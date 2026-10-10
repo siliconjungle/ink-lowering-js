@@ -46,13 +46,13 @@ query wide(x:u64)->u64{return wide_id(x);}
     let dir = std::env::temp_dir().join(format!("ink-merged-js-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("program.mjs"), e.javascript).unwrap();
-    fs::write(dir.join("run.mjs"),r#"import assert from 'node:assert/strict';import {functions,callInto,createState} from './program.mjs';
+    fs::write(dir.join("run.mjs"),r#"import assert from 'node:assert/strict';import {functions,call,callInto,createState} from './program.mjs';
 const input=new Uint32Array([1,2,3]);assert.deepEqual(functions.run(input),[2,8,3]);assert.deepEqual(Array.from(input),[1,2,3]);
 assert.equal(functions.nested([new Uint32Array([7,9])],new Uint32Array([1])),2n);assert.equal(functions.nested([],new Uint32Array([1])),1n);
 assert.deepEqual(functions.keys(),[-2,5]);assert.deepEqual(functions.values(),[7n,100n]);
 assert.equal(functions.stop(0,9),0);assert.equal(functions.stop(10,0),0);assert.equal(functions.stop(10,3),3);assert.equal(functions.stop(2,9),2);
 assert.deepEqual(functions.collect(10),[0,1,2]);assert.deepEqual(functions.collect(0),[]);
-assert.equal(Object.hasOwn(functions,'edit'),false);
+assert.equal(Object.hasOwn(functions,'edit'),false);assert.throws(()=>call('edit',[]),{message:'temporary storage is internal to a pure invocation'});assert.throws(()=>callInto('edit',[],[]),{message:'temporary storage is internal to a pure invocation'});
 const destination=new Array(8).fill('tail');assert.equal(callInto('run',[input],destination),3);assert.deepEqual(destination.slice(0,3),[2,8,3]);assert.equal(destination[3],'tail');
 assert.deepEqual(functions.opt({Some:{F32Bits:2143363909}}),{Some:{F32Bits:2143363909}});assert.equal(Object.is(functions.opt({Some:-0}).Some,-0),true);assert.deepEqual(functions.opt({None:null}),{None:null});
 assert.deepEqual(functions.exact({Int:'123456789012345678901234567890'}),{Int:'123456789012345678901234567890'});assert.equal(functions.text('😀hello'),'😀hello');assert.equal(functions.key('ABCDEF00000000000000000000000000'),'abcdef00000000000000000000000000');assert.deepEqual(functions.copied([{data:new Uint32Array([7,9])}],{data:[]}),[7,9]);

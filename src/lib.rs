@@ -1206,7 +1206,20 @@ export const functions = Object.freeze(Object.fromEntries(metadata.functions.fil
     } else {
         javascript.push_str("export const functions = Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal).map(f=>[f.name,__implementations[f.index]])));\n");
     }
-    javascript.push_str("export function call(name,args) { return functions[name](...args); }\n");
+    // Owned temporaries are an internal capability, not a caller-value check.
+    // Public trusted numeric entries remain direct functions without guards.
+    let internal_cases = functions
+        .iter()
+        .filter(|f| f["internal"] == json!(true))
+        .map(|f| format!("case {}:", f["name"]))
+        .collect::<Vec<_>>()
+        .join("");
+    if internal_cases.is_empty() {
+        javascript
+            .push_str("export function call(name,args) { return functions[name](...args); }\n");
+    } else {
+        javascript.push_str(&format!("export function call(name,args) {{switch(name){{{internal_cases}throw new Error('temporary storage is internal to a pure invocation');}}return functions[name](...args);}}\n"));
+    }
     for (i, f) in p.functions.iter().enumerate() {
         if matches!(f.result, Type::List(_))
             && interface["functions"][i]["result"]["element"]
@@ -1244,7 +1257,11 @@ export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.f
     } else {
         javascript.push_str("export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal&&f.result.kind==='list').map(f=>[f.name,__intoImplementations[f.index]])));\n");
     }
-    javascript.push_str("export function callInto(name,args,destination){return functionsInto[name](...args,destination);}\n");
+    if internal_cases.is_empty() {
+        javascript.push_str("export function callInto(name,args,destination){return functionsInto[name](...args,destination);}\n");
+    } else {
+        javascript.push_str(&format!("export function callInto(name,args,destination){{switch(name){{{internal_cases}throw new Error('temporary storage is internal to a pure invocation');}}return functionsInto[name](...args,destination);}}\n"));
+    }
 
     let mut manifest = interface;
     manifest["javascript_sha256"] = json!(format!("{:x}", Sha256::digest(javascript.as_bytes())));
