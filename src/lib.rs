@@ -21,6 +21,7 @@ fn descriptor(t: &Type, p: &Program, seen: &mut BTreeSet<String>) -> LangResult<
         Type::Unit => json!({"kind":"unit"}), Type::String => json!({"kind":"string"}), Type::Int => json!({"kind":"int"}),
         Type::Option(t) => json!({"kind":"option","element":descriptor(t,p,seen)?}),
         Type::Result(a,b) => json!({"kind":"result","ok":descriptor(a,p,seen)?,"error":descriptor(b,p,seen)?}),
+        Type::Buffer(_) | Type::Map(..) => json!({"kind":"temporary"}),
         Type::List(t) => json!({"kind":"list","element":descriptor(t,p,seen)?}),
         Type::Vector(t,n) => json!({"kind":"vector","size":n,"element":descriptor(t,p,seen)?}),
         Type::Named(n) if p.ids.contains(n) => json!({"kind":"id","name":n}),
@@ -226,6 +227,90 @@ impl Emitter<'_> {
                 t == Type::I32,
                 n == "rem_or"
             ),
+            Expr::Call(n, args) if n == "length" => {
+                format!("({}).length", self.expr(&args[0], env, None)?)
+            }
+            Expr::Call(n, args) if n == "repeat_until" => format!(
+                "__repeat_until(ctx,{},{},{},{})",
+                self.expr(&args[0], env, Some(&Type::U32))?,
+                self.expr(&args[1], env, Some(&t))?,
+                self.lambda(&args[2], env, &[t.clone()], &Type::Bool)?,
+                self.lambda(&args[3], env, &[Type::U32, t.clone()], &t)?
+            ),
+            Expr::Call(n, args) if n == "buffer" || n == "buffer_fill" => {
+                let Type::Buffer(inner) = &t else {
+                    unreachable!()
+                };
+                if n == "buffer" {
+                    format!(
+                        "({}).slice()",
+                        self.expr(&args[0], env, Some(&Type::List(inner.clone())))?
+                    )
+                } else {
+                    format!(
+                        "__bufferFill(ctx,{},{})",
+                        self.expr(&args[0], env, Some(&Type::U32))?,
+                        self.expr(&args[1], env, Some(inner))?
+                    )
+                }
+            }
+            Expr::Method(x, _, _) if matches!(x.as_ref(),Expr::Var(v) if v=="Buffer" || v=="Map") => {
+                if matches!(t, Type::Buffer(_)) {
+                    "[]".into()
+                } else {
+                    "new Map()".into()
+                }
+            }
+            Expr::Method(x, n, args)
+                if matches!(self.infer(x, env, None)?, Type::Buffer(_) | Type::Map(..)) =>
+            {
+                let xt = self.infer(x, env, None)?;
+                let xv = self.expr(x, env, None)?;
+                let (key, value) = match &xt {
+                    Type::Buffer(inner) => (Type::U32, inner.as_ref()),
+                    Type::Map(k, v) => (*k.clone(), v.as_ref()),
+                    _ => unreachable!(),
+                };
+                let kv = if args.is_empty() {
+                    String::new()
+                } else {
+                    self.expr(&args[0], env, Some(if n == "push" { value } else { &key }))?
+                };
+                match n.as_str() {
+                    "len" => format!(
+                        "({xv}).{}",
+                        if matches!(xt, Type::Buffer(_)) {
+                            "length"
+                        } else {
+                            "size"
+                        }
+                    ),
+                    "at_or" => format!(
+                        "__at({xv},{kv},()=>{})",
+                        self.expr(&args[1], env, Some(value))?
+                    ),
+                    "get_or" => format!(
+                        "__mapGet({xv},{kv},()=>{})",
+                        self.expr(&args[1], env, Some(value))?
+                    ),
+                    "contains" => format!("({xv}).has({kv})"),
+                    "keys" | "values" => format!("__mapEntries({xv}, {})", n == "keys"),
+                    "freeze" => xv,
+                    "set" => format!(
+                        "__tempSet({xv},{kv},{},{})",
+                        self.expr(&args[1], env, Some(value))?,
+                        matches!(xt, Type::Map(..))
+                    ),
+                    "swap" => format!(
+                        "__bufferSwap({xv},{kv},{})",
+                        self.expr(&args[1], env, Some(&Type::U32))?
+                    ),
+                    "push" | "pop" | "truncate" | "remove" => {
+                        format!("__tempEdit({xv},{},{kv})", quote(n))
+                    }
+                    _ => return Err("temporary method".into()),
+                }
+            }
             Expr::Call(n, args) if n == "repeat" => {
                 let Expr::Num(bound) = args[0] else {
                     unreachable!()
@@ -370,6 +455,7 @@ fn lower_with_layout(
         budget: 200_000,
     };
     let mut javascript = include_str!("values.mjs").to_string();
+    javascript.push_str(include_str!("temporary.mjs"));
     javascript.push_str(
         "\nfunction __tick(ctx){if(--ctx.fuel<0)throw Error('Ink execution budget exhausted');}\n",
     );
@@ -397,7 +483,7 @@ fn lower_with_layout(
                 format!(",{}", vars.join(","))
             }
         ));
-        functions.push(json!({"index":i,"name":f.name,"params":params,"result":result}));
+        functions.push(json!({"index":i,"name":f.name,"params":params,"result":result,"internal":ink_core::local_collections::owned(&f.result,p)||f.params.iter().any(|(_,t)|ink_core::local_collections::owned(t,p))}));
     }
     let named = p
         .records
@@ -441,6 +527,7 @@ const __interfaces = new Map(metadata.functions.map(f=>[f.name,f]));
 export function call(name, args) {
   const f=__interfaces.get(name);
   if (!f) throw Error(`unknown Ink function ${name}`);
+  if (f.internal) __fail('temporary storage is internal to a pure invocation');
   if (!Array.isArray(args) || args.length!==f.params.length) __fail('argument count mismatch');
   const budget={cells:1000000};
   const captured=args.map((v,i)=>__in(v,f.params[i].type,budget));
