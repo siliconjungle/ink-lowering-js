@@ -274,6 +274,13 @@ impl StateEmitter<'_> {
     }
 }
 pub fn emit(module: &ink_core::core::CheckedModule) -> LangResult<(String, Value)> {
+    let layout = ink_core::snapshot::layout(module.program())?;
+    emit_with_layout(module, &layout)
+}
+pub(crate) fn emit_with_layout(
+    module: &ink_core::core::CheckedModule,
+    layout: &ink_core::snapshot_wire::Layout,
+) -> LangResult<(String, Value)> {
     let p = module.program();
     let execution = ink_core::action_ir::CheckedActions::elaborate(module)?.execution()?;
     let mut emitter = StateEmitter {
@@ -317,7 +324,6 @@ pub fn emit(module: &ink_core::core::CheckedModule) -> LangResult<(String, Value
         .iter()
         .map(|(n, t)| Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?})))
         .collect::<LangResult<Vec<_>>>()?;
-    let layout = ink_core::snapshot::layout(p)?;
     let state = json!({"actions":actions,"roots":roots,"events":events,"snapshot":{"program":layout.program,"schema":layout.schema}});
     code.push_str(&format!(
         "const __stateMetadata={state};const __actions=[{}];\n",

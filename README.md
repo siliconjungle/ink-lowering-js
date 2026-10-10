@@ -69,3 +69,5 @@ Rust tests execute emitted modules in Node and compare results with the pinned
 Ink reference interpreter, including full-width integer overflow, f32 rounding,
 exceptional inputs, lazy evaluation, nested collections, records, vectors,
 particles, identifier hygiene, invalid inputs and resource limits.
+
+`lower_selected(&CheckedSelection)` retains the original checked snapshot namespace for state instances while the emitted code/manifest identify the selected module. Bare-module emission keeps that module’s own namespace; no arbitrary snapshot identity override is accepted.

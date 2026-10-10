@@ -349,6 +349,20 @@ impl Emitter<'_> {
 /// Emit an ES module. Backend implementation and the JavaScript engine are
 /// trusted; checked source/rewrite evidence does not certify emitted machine code.
 pub fn lower(module: &CheckedModule) -> LangResult<Emission> {
+    lower_with_layout(module, None)
+}
+/// Emit selected code with the snapshot origin authenticated by the core.
+pub fn lower_selected(selected: &ink_core::optimisation::CheckedSelection) -> LangResult<Emission> {
+    let layout = ink_core::snapshot::selected_layout(selected)?;
+    let mut emission = lower_with_layout(selected.module(), Some(&layout))?;
+    emission.manifest["selection"] =
+        serde_json::to_value(selected.evidence()).map_err(|e| e.to_string())?;
+    Ok(emission)
+}
+fn lower_with_layout(
+    module: &CheckedModule,
+    layout: Option<&ink_core::snapshot_wire::Layout>,
+) -> LangResult<Emission> {
     let p = module.program();
     let mut emitter = Emitter {
         p,
@@ -400,7 +414,11 @@ pub fn lower(module: &CheckedModule) -> LangResult<Emission> {
         serde_json::to_string(&named).map_err(|e| e.to_string())?
     ));
     let state = if !p.actions.is_empty() || !p.states.is_empty() || !p.keeps.is_empty() {
-        let (code, metadata) = state::emit(module)?;
+        let (code, metadata) = if let Some(layout) = layout {
+            state::emit_with_layout(module, layout)?
+        } else {
+            state::emit(module)?
+        };
         javascript.push_str(include_str!("snapshot.mjs"));
         javascript.push_str(&code);
         Some(metadata)
