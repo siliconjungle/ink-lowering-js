@@ -43,9 +43,6 @@ still needs a compiler wrapper to accept newly edited Ink source.
   emitted literally. No floating-point reassociation or fused reductions.
 - Ordered sums emit indexed loops with the declared rounding/wrapping at each
   addition, eliminating per-element reduction callbacks.
-- The initial target excludes states, actions, events and opaque stateful value
-  types (`Int`, String, Option/Result, tables and nominal IDs). Unsupported
-  capabilities reject rather than silently converting values or changing types.
 
 ## Trusted native caller contract
 
@@ -66,9 +63,21 @@ function can return the original array/record; callers own aliasing and must
 keep values stable during calls. Invalid caller values are outside the ABI
 contract and have no specified diagnostic or result.
 
-There is no execution timeout or collection size limit in the emitted module.
+Pure calls have no execution timeout or collection size limit.
 Resource policy belongs to the application. This is an intentional ABI change
 from `ink-javascript-values-v1` to `ink-javascript-trusted-values-v2`.
+
+- Exact Int, String, Unit, nominal IDs, enums and tagged Option/Result are supported.
+- `createState()` exposes typed table-backed queries/changes, keeps,
+  rollback, ordered events, outbox acknowledgement and asynchronous portable
+  checkpoint/restore. Query-local Result errors do not poison a change unless
+  propagated; nested failing changes do poison it even if their Result is ignored.
+- Portable snapshot bytes match the reference format for the same program.
+  WebCrypto supplies hashing; the host supplies durable storage and external I/O.
+  Keeps use full recomputation as the baseline implementation.
+
+
+State transactions retain their separate bounded host execution policy.
 
 `lower(&CheckedModule)` returns source and a manifest binding the checked core
 identity, semantics version, typed interface and emitted-source hash. The checker,
@@ -87,3 +96,8 @@ exceptional inputs, lazy evaluation, nested collections, records, vectors,
 particles, identifier hygiene, typed maps that change element type, native
 identity aliasing and absence of runtime checker machinery. Separate compile-time
 negative tests reject type errors and unsupported capabilities.
+
+
+`lower_selected(&CheckedSelection)` retains the original checked snapshot namespace for state instances while the emitted code/manifest identify the selected module. Bare-module emission keeps that module’s own namespace; no arbitrary snapshot identity override is accepted.
+
+Existing i32/f32 and fixed numerical vectors also cross state/action/keep/event boundaries. Scalar float comparisons use IEEE semantics; aggregate action equality compares stored float bits. Numerical checkpoints preserve payloads and signed zero. Arithmetic NaN payloads remain engine dependent.

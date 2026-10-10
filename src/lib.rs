@@ -8,6 +8,7 @@ pub struct Emission {
     pub javascript: String,
     pub manifest: Value,
 }
+mod state;
 type Env = BTreeMap<String, (String, Type)>;
 // Lexical occurrence, not identifier spelling alone: local binders shadow the
 // fold accumulator, while a let initializer still uses its enclosing scope.
@@ -41,10 +42,17 @@ fn descriptor(t: &Type, p: &Program, seen: &mut BTreeSet<String>) -> LangResult<
         Type::U32 => json!({"kind":"u32"}), Type::U64 => json!({"kind":"u64"}),
         Type::I32 => json!({"kind":"i32"}), Type::F32 => json!({"kind":"f32"}),
         Type::Bool => json!({"kind":"bool"}),
+        Type::Unit => json!({"kind":"unit"}), Type::String => json!({"kind":"string"}), Type::Int => json!({"kind":"int"}),
+        Type::Option(t) => json!({"kind":"option","element":descriptor(t,p,seen)?}),
+        Type::Result(a,b) => json!({"kind":"result","ok":descriptor(a,p,seen)?,"error":descriptor(b,p,seen)?}),
+        Type::Buffer(_) | Type::Map(..) => json!({"kind":"temporary"}),
         Type::List(t) => json!({"kind":"list","element":descriptor(t,p,seen)?}),
         Type::Vector(t,n) => json!({"kind":"vector","size":n,"element":descriptor(t,p,seen)?}),
+        Type::Named(n) if p.ids.contains(n) => json!({"kind":"id","name":n}),
+        Type::Named(n) if n == "ArithmeticError" => json!({"kind":"enum","name":n,"variants":["ArithmeticError.Overflow"]}),
+        Type::Named(n) if p.enums.contains_key(n) => json!({"kind":"enum","name":n,"variants":p.enums[n].iter().map(|v|format!("{n}.{v}")).collect::<Vec<_>>()}),
         Type::Named(n) => {
-            if !seen.insert(n.clone()) { return Err("recursive record is not supported by JavaScript lowering".into()); }
+            if !seen.insert(n.clone()) { return Ok(json!({"kind":"ref","name":n})); }
             let fs=p.records.get(n).ok_or("JavaScript lowering requires a record definition")?;
             let fields=fs.iter().map(|(name,t)|Ok(json!({"name":name,"type":descriptor(t,p,seen)?})))
                 .collect::<LangResult<Vec<_>>>()?;
@@ -57,6 +65,7 @@ fn descriptor(t: &Type, p: &Program, seen: &mut BTreeSet<String>) -> LangResult<
 fn arithmetic(op: &str, a: &str, b: &str, t: &Type) -> String {
     match t {
         Type::U64 => format!("__u64(({a}) {op} ({b}))"),
+        Type::Int => format!("(({a}) {op} ({b}))"),
         Type::U32 => {
             if op == "*" {
                 format!("(Math.imul({a},{b}) >>> 0)")
@@ -76,7 +85,7 @@ fn arithmetic(op: &str, a: &str, b: &str, t: &Type) -> String {
     }
 }
 fn zero(t: &Type) -> &'static str {
-    if *t == Type::U64 {
+    if matches!(t, Type::U64 | Type::Int) {
         "0n"
     } else {
         "0"
@@ -431,12 +440,19 @@ impl Emitter<'_> {
         let t = self.infer(e, env, want)?;
         Ok(match e {
             Expr::Num(n) => match t {
-                Type::U64 => format!("{n}n"),
+                Type::U64 | Type::Int => format!("{n}n"),
                 Type::F32 => format!("{}", (*n as f32).to_bits()),
                 _ => n.to_string(),
             },
             Expr::Float(b) => b.to_string(),
             Expr::Bool(b) => b.to_string(),
+            Expr::String(s) => quote(s),
+            Expr::Unit => "null".into(),
+            Expr::Try(a) => {
+                let value = self.expr(a, env, None)?;
+                format!("__try({value})")
+            }
+            Expr::Var(n) if n == "None" => "({None:null})".into(),
             Expr::Var(n) => env.get(n).ok_or("unbound JavaScript variable")?.0.clone(),
             Expr::Neg(a) => {
                 if t == Type::I32 {
@@ -473,6 +489,13 @@ impl Emitter<'_> {
                     values.push(format!("[{}]:{value}", quote(field)));
                 }
                 format!("({{{}}})", values.join(","))
+            }
+            Expr::Field(a, n) if matches!(a.as_ref(),Expr::Var(root) if self.p.enums.contains_key(root)||root=="ArithmeticError") =>
+            {
+                let Expr::Var(root) = a.as_ref() else {
+                    unreachable!()
+                };
+                quote(&format!("{root}.{n}"))
             }
             Expr::Field(a, n) => {
                 let at = self.infer(a, env, None)?;
@@ -573,6 +596,115 @@ impl Emitter<'_> {
                 self.line(format!("{out}={value};}}"));
                 out
             }
+            Expr::Call(n, args) if n == "length" => {
+                format!("({}).length", self.expr(&args[0], env, None)?)
+            }
+            Expr::Call(n, args) if n == "repeat_until" => {
+                let limit = self.expr(&args[0], env, Some(&Type::U32))?;
+                let limit = self.bind(&limit);
+                let initial = self.expr(&args[1], env, Some(&t))?;
+                let out = self.fresh();
+                self.line(format!("let {out}={initial};"));
+                let index = self.fresh();
+                self.line(format!("for(let {index}=0;{index}<{limit};{index}++){{"));
+                let (stop, local) = Self::callback(&args[2], env, &[(out.clone(), t.clone())])?;
+                let stop = self.expr(stop, &local, Some(&Type::Bool))?;
+                self.line(format!("if({stop}){{break;}}"));
+                let idx = self.bind(&format!("({index}>>>0)"));
+                let (body, local) =
+                    Self::callback(&args[3], env, &[(idx, Type::U32), (out.clone(), t.clone())])?;
+                let value = self.expr(body, &local, Some(&t))?;
+                self.line(format!("{out}={value};}}"));
+                out
+            }
+            Expr::Call(n, args) if n == "buffer" || n == "buffer_fill" => {
+                let Type::Buffer(inner) = &t else {
+                    unreachable!()
+                };
+                if n == "buffer" {
+                    format!(
+                        "__tempCopy(Array.from({}))",
+                        self.expr(&args[0], env, Some(&Type::List(inner.clone())))?
+                    )
+                } else {
+                    format!(
+                        "__bufferFill({},{})",
+                        self.expr(&args[0], env, Some(&Type::U32))?,
+                        self.expr(&args[1], env, Some(inner))?
+                    )
+                }
+            }
+            Expr::Method(x, _, _) if matches!(x.as_ref(),Expr::Var(v) if v=="Buffer" || v=="Map") => {
+                if matches!(t, Type::Buffer(_)) {
+                    "[]".into()
+                } else {
+                    "new Map()".into()
+                }
+            }
+            Expr::Method(x, n, args)
+                if matches!(self.infer(x, env, None)?, Type::Buffer(_) | Type::Map(..)) =>
+            {
+                let xt = self.infer(x, env, None)?;
+                let xv = self.expr(x, env, None)?;
+                let xv = self.bind(&xv);
+                let (key, value) = match &xt {
+                    Type::Buffer(inner) => (Type::U32, inner.as_ref()),
+                    Type::Map(k, v) => (*k.clone(), v.as_ref()),
+                    _ => unreachable!(),
+                };
+                let kv = if args.is_empty() {
+                    String::new()
+                } else {
+                    let v =
+                        self.expr(&args[0], env, Some(if n == "push" { value } else { &key }))?;
+                    self.bind(&v)
+                };
+                match n.as_str() {
+                    "len" => format!(
+                        "({xv}).{}",
+                        if matches!(xt, Type::Buffer(_)) {
+                            "length"
+                        } else {
+                            "size"
+                        }
+                    ),
+                    "at_or" | "get_or" => {
+                        let out = self.fresh();
+                        let condition = if n == "at_or" {
+                            format!("{kv}<{xv}.length")
+                        } else {
+                            format!("{xv}.has({kv})")
+                        };
+                        let access = if n == "at_or" {
+                            format!("{xv}[{kv}]")
+                        } else {
+                            format!("{xv}.get({kv})")
+                        };
+                        self.line(format!(
+                            "let {out};if({condition}){{{out}=__tempCopy({access});}}else{{"
+                        ));
+                        let fallback = self.expr(&args[1], env, Some(value))?;
+                        self.line(format!("{out}={fallback};}}"));
+                        out
+                    }
+                    "contains" => format!("({xv}).has({kv})"),
+                    "keys" | "values" => format!("__mapEntries({xv}, {})", n == "keys"),
+                    "freeze" => xv,
+                    "set" => format!(
+                        "__tempSet({xv},{kv},{},{})",
+                        self.expr(&args[1], env, Some(value))?,
+                        matches!(xt, Type::Map(..))
+                    ),
+                    "swap" => format!(
+                        "__bufferSwap({xv},{kv},{})",
+                        self.expr(&args[1], env, Some(&Type::U32))?
+                    ),
+                    "push" | "pop" | "truncate" | "remove" => {
+                        format!("__tempEdit({xv},{},{kv})", quote(n))
+                    }
+                    _ => return Err("temporary method".into()),
+                }
+            }
             Expr::Call(n, args) if n == "repeat" => {
                 let Expr::Num(bound) = args[0] else {
                     unreachable!()
@@ -649,6 +781,39 @@ impl Emitter<'_> {
                     out
                 }
             }
+            Expr::Call(n, args) if ["Some", "Ok", "Err"].contains(&n.as_str()) => {
+                let inner = match (&t, n.as_str()) {
+                    (Type::Option(a), "Some") | (Type::Result(a, _), "Ok") => a.as_ref(),
+                    (Type::Result(_, b), "Err") => b.as_ref(),
+                    _ => return Err("variant type".into()),
+                };
+                let value = self.expr(&args[0], env, Some(inner))?;
+                format!("({{{n}:{value}}})")
+            }
+            Expr::Call(n, args) if n == "Int" => {
+                let value = self.expr(&args[0], env, None)?;
+                format!("BigInt({value})")
+            }
+            Expr::Call(n, args)
+                if ["checked_add", "checked_sub", "checked_mul"].contains(&n.as_str()) =>
+            {
+                let at = self.infer(&args[0], env, None)?;
+                let a = self.expr(&args[0], env, Some(&at))?;
+                let a = self.bind(&a);
+                let b = self.expr(&args[1], env, Some(&at))?;
+                let b = self.bind(&b);
+                format!(
+                    "__checked({},{a},{b},{})",
+                    quote(n),
+                    if at == Type::I32 {
+                        -32
+                    } else if at == Type::U32 {
+                        32
+                    } else {
+                        64
+                    }
+                )
+            }
             Expr::Call(n, args) => {
                 let (index, f) = self
                     .p
@@ -665,6 +830,44 @@ impl Emitter<'_> {
                 }
                 self.inline_call(&f, &values)
                     .unwrap_or_else(|| format!("__fn{index}({})", values.join(",")))
+            }
+            Expr::Method(xs, method, args)
+                if matches!(
+                    self.infer(xs, env, None)?,
+                    Type::Option(_) | Type::Result(..)
+                ) =>
+            {
+                let xt = self.infer(xs, env, None)?;
+                let value = self.expr(xs, env, None)?;
+                let value = self.bind(&value);
+                let (tag, inner) = match (&xt, method.as_str()) {
+                    (Type::Option(a), _) => ("Some", a.as_ref()),
+                    (Type::Result(a, _), "map") => ("Ok", a.as_ref()),
+                    (Type::Result(_, b), "map_err") => ("Err", b.as_ref()),
+                    _ => return Err("unsupported variant method".into()),
+                };
+                if method == "ok_or" {
+                    let error = self.expr(&args[0], env, None)?;
+                    format!("__okOr({value},{error})")
+                } else {
+                    let out = self.fresh();
+                    self.line(format!(
+                        "let {out};if(Object.hasOwn({value},{})){{",
+                        quote(tag)
+                    ));
+                    let item = self.bind(&format!("{value}[{}]", quote(tag)));
+                    let result = match (&t, method.as_str()) {
+                        (Type::Option(a), _) | (Type::Result(a, _), "map") => a.as_ref(),
+                        (Type::Result(_, b), "map_err") => b.as_ref(),
+                        _ => return Err("variant map result".into()),
+                    };
+                    let (body, local) = Self::callback(&args[0], env, &[(item, inner.clone())])?;
+                    let mapped = self.expr(body, &local, Some(result))?;
+                    self.line(format!(
+                        "{out}=({{{tag}:{mapped}}});}}else{{{out}={value};}}"
+                    ));
+                    out
+                }
             }
             Expr::Method(xs, method, args) => {
                 let context = if method == "filter" || method == "concat" {
@@ -792,7 +995,21 @@ impl Emitter<'_> {
 /// Emit an ES module. Backend implementation and the JavaScript engine are
 /// trusted; checked source/rewrite evidence does not certify emitted machine code.
 pub fn lower(module: &CheckedModule) -> LangResult<Emission> {
-    let p = module.pure_program()?;
+    lower_with_layout(module, None)
+}
+/// Emit selected code with the snapshot origin authenticated by the core.
+pub fn lower_selected(selected: &ink_core::optimisation::CheckedSelection) -> LangResult<Emission> {
+    let layout = ink_core::snapshot::selected_layout(selected)?;
+    let mut emission = lower_with_layout(selected.module(), Some(&layout))?;
+    emission.manifest["selection"] =
+        serde_json::to_value(selected.evidence()).map_err(|e| e.to_string())?;
+    Ok(emission)
+}
+fn lower_with_layout(
+    module: &CheckedModule,
+    layout: Option<&ink_core::snapshot_wire::Layout>,
+) -> LangResult<Emission> {
+    let p = module.program();
     let mut emitter = Emitter {
         p,
         next: 0,
@@ -834,7 +1051,7 @@ pub fn lower(module: &CheckedModule) -> LangResult<Emission> {
         } else {
             Value::Null
         };
-        functions.push(json!({"index":i,"name":f.name,"params":params,"result":result,"destination":destination}));
+        functions.push(json!({"index":i,"name":f.name,"params":params,"result":result,"destination":destination,"internal":ink_core::local_collections::owned(&f.result,p)||f.params.iter().any(|(_,t)|ink_core::local_collections::owned(t,p))}));
     }
     // A separate budget ensures adding the destination capability does not
     // change the ordinary entrypoints' bounded inlining decisions.
@@ -858,6 +1075,9 @@ pub fn lower(module: &CheckedModule) -> LangResult<Emission> {
         let conversion = if functions[i]["result"]["element"]
             .to_string()
             .contains("\"kind\":\"f32\"")
+            || functions[i]["result"]["element"]
+                .to_string()
+                .contains("\"kind\":\"int\"")
         {
             format!("__intoOutput{i}")
         } else {
@@ -870,23 +1090,92 @@ pub fn lower(module: &CheckedModule) -> LangResult<Emission> {
             emitter.lines
         ));
     }
-    let interface = json!({"schema":1,"backend":"javascript","abi":"ink-javascript-trusted-values-v2","destination_abi":{"name":"ink-javascript-into-v1","count_unit":"elements","ownership":"caller-owned","capacity":"trusted","aliasing":"destination-disjoint-from-all-reachable-inputs","tail":"unwritten"},"core_semantics":module.semantics(),"core_sha256":module.identity()?,"functions":functions});
+    let mut interface = json!({"schema":1,"backend":"javascript","abi":"ink-javascript-trusted-values-v2","destination_abi":{"name":"ink-javascript-into-v1","count_unit":"elements","ownership":"caller-owned","capacity":"trusted","aliasing":"destination-disjoint-from-all-reachable-inputs","tail":"unwritten"},"core_semantics":module.semantics(),"core_sha256":module.identity()?,"functions":functions});
     // Emit only helpers referenced by the compiled expressions. Descriptor
     // conversion is needed solely for signatures containing binary32 values.
-    let needs_conversion = interface.to_string().contains("\"kind\":\"f32\"");
+    let needs_conversion = interface.to_string().contains("\"kind\":\"f32\"")
+        || interface.to_string().contains("\"kind\":\"int\"")
+        || interface.to_string().contains("\"kind\":\"id\"");
     let mut helpers = String::new();
     for section in include_str!("values.mjs").split("// @helper ").skip(1) {
         let (name, source) = section.split_once('\n').unwrap();
         let used = if name == "representation" {
-            needs_conversion || javascript.contains("__bits(") || javascript.contains("__float(")
+            needs_conversion
+                || !p.actions.is_empty()
+                || !p.states.is_empty()
+                || !p.keeps.is_empty()
+                || javascript.contains("__bits(")
+                || javascript.contains("__float(")
         } else {
             javascript.contains(name)
+                || !p.actions.is_empty()
+                || !p.states.is_empty()
+                || !p.keeps.is_empty()
         };
         if used {
             helpers.push_str(source);
         }
     }
+    let temporary = include_str!("temporary.mjs");
+    if [
+        "__tempCopy",
+        "__mapGet",
+        "__mapEntries",
+        "__tempSet",
+        "__bufferSwap",
+        "__tempEdit",
+        "__bufferFill",
+    ]
+    .iter()
+    .any(|name| javascript.contains(name))
+    {
+        helpers.push_str(temporary);
+    }
+    let has_state = !p.actions.is_empty() || !p.states.is_empty() || !p.keeps.is_empty();
+    let support = include_str!("state.mjs");
+    if !has_state
+        && ["__try", "__checked", "__okOr", "__mapValue", "__equal"]
+            .iter()
+            .any(|name| javascript.contains(name))
+    {
+        let pure = support
+            .split("const __encoder=")
+            .next()
+            .unwrap()
+            .split_once('\n')
+            .unwrap()
+            .1;
+        helpers.push_str(pure);
+    }
     javascript = helpers + &javascript;
+    let named = p
+        .records
+        .keys()
+        .map(|n| {
+            Ok((
+                n.clone(),
+                descriptor(&Type::Named(n.clone()), p, &mut BTreeSet::new())?,
+            ))
+        })
+        .collect::<LangResult<BTreeMap<_, _>>>()?;
+    javascript.push_str(&format!(
+        "const __namedTypes={};\n",
+        serde_json::to_string(&named).map_err(|e| e.to_string())?
+    ));
+    let state = if !p.actions.is_empty() || !p.states.is_empty() || !p.keeps.is_empty() {
+        let (code, metadata) = if let Some(layout) = layout {
+            state::emit_with_layout(module, layout)?
+        } else {
+            state::emit(module)?
+        };
+        javascript.push_str(include_str!("snapshot.mjs"));
+        javascript.push_str(&code);
+        Some(metadata)
+    } else {
+        None
+    };
+    interface["state"] = serde_json::to_value(state).map_err(|e| e.to_string())?;
+    interface["named_types"] = serde_json::to_value(named).map_err(|e| e.to_string())?;
     javascript.push_str(&format!(
         "export const metadata = {};\nconst __implementations=[{}];\n",
         interface,
@@ -903,7 +1192,7 @@ __freeze(metadata);
         javascript.push_str(
             r#"
 // Descriptor work occurs once at module initialisation, never per word-list call.
-export const functions = Object.freeze(Object.fromEntries(metadata.functions.map(f=> {
+export const functions = Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal).map(f=> {
   const input=f.params.map(p=>__representation(p.type,false));
   const output=__representation(f.result,true);
   const implementation=__implementations[f.index];
@@ -915,7 +1204,7 @@ export const functions = Object.freeze(Object.fromEntries(metadata.functions.map
 "#,
         );
     } else {
-        javascript.push_str("export const functions = Object.freeze(Object.fromEntries(metadata.functions.map(f=>[f.name,__implementations[f.index]])));\n");
+        javascript.push_str("export const functions = Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal).map(f=>[f.name,__implementations[f.index]])));\n");
     }
     javascript.push_str("export function call(name,args) { return functions[name](...args); }\n");
     for (i, f) in p.functions.iter().enumerate() {
@@ -923,6 +1212,9 @@ export const functions = Object.freeze(Object.fromEntries(metadata.functions.map
             && interface["functions"][i]["result"]["element"]
                 .to_string()
                 .contains("\"kind\":\"f32\"")
+            || interface["functions"][i]["result"]["element"]
+                .to_string()
+                .contains("\"kind\":\"int\"")
         {
             javascript.push_str(&format!("const __intoOutput{i}=__representation(metadata.functions[{i}].result.element,true);\n"));
         }
@@ -942,7 +1234,7 @@ export const functions = Object.freeze(Object.fromEntries(metadata.functions.map
     ));
     if needs_conversion {
         javascript.push_str(r#"
-export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.filter(f=>f.result.kind==='list').map(f=>{
+export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal&&f.result.kind==='list').map(f=>{
   const input=f.params.map(p=>__representation(p.type,false));
   const implementation=__intoImplementations[f.index];
   const entry=input.every(c=>c===__identity)?implementation:(...values)=>implementation(...input.map((convert,i)=>convert(values[i])),values[f.params.length]);
@@ -950,7 +1242,7 @@ export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.f
 })));
 "#);
     } else {
-        javascript.push_str("export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.filter(f=>f.result.kind==='list').map(f=>[f.name,__intoImplementations[f.index]])));\n");
+        javascript.push_str("export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal&&f.result.kind==='list').map(f=>[f.name,__intoImplementations[f.index]])));\n");
     }
     javascript.push_str("export function callInto(name,args,destination){return functionsInto[name](...args,destination);}\n");
 
@@ -962,7 +1254,7 @@ export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.f
         "JavaScript engine and host"
     ]);
     manifest["caller_contract"]=json!("trusted, well-typed target-native values; no input validation, snapshot capture or host resource budgets");
-    manifest["scope"]=json!("pure numeric, Bool, vectors, records and nested lists; no state/actions or opaque stateful types");
+    manifest["scope"]=json!("trusted pure functions and temporary collections; state/actions with portable snapshots and ordered transaction events");
     Ok(Emission {
         javascript,
         manifest,

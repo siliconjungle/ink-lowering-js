@@ -6,6 +6,11 @@ const __bits = number => { __view.setFloat32(0, number, true); return __view.get
 const __identity = value => value;
 function __representation(type, output) {
   switch (type.kind) {
+    case 'ref': return value => __representation(__namedTypes[type.name],output)(value);
+    case 'id': return value=>value.toLowerCase();
+    case 'int': return output ? value=>({Int:value.toString()}) : value=>BigInt(value && typeof value==='object' ? value.Int : value);
+    case 'option': return value=>Object.hasOwn(value,'Some')?{Some:__representation(type.element,output)(value.Some)}:{None:null};
+    case 'result': return value=>Object.hasOwn(value,'Ok')?{Ok:__representation(type.ok,output)(value.Ok)}:{Err:__representation(type.error,output)(value.Err)};
     case 'f32': return output ? value => {
       const number = __float(value);
       return Number.isFinite(number) ? number : {F32Bits:value};
@@ -22,6 +27,18 @@ function __representation(type, output) {
     default: return __identity;
   }
 }
+function __stateInput(value,type){
+  switch(type.kind){
+    case 'ref':return __stateInput(value,__namedTypes[type.name]);
+    case 'u64':return BigInt(value);
+    case 'list':case 'vector':return Array.from(value,v=>__stateInput(v,type.element));
+    case 'record':return Object.fromEntries(type.fields.map(f=>[f.name,__stateInput(value[f.name],f.type)]));
+    case 'option':return Object.hasOwn(value,'Some')?{Some:__stateInput(value.Some,type.element)}:{None:null};
+    case 'result':return Object.hasOwn(value,'Ok')?{Ok:__stateInput(value.Ok,type.ok)}:{Err:__stateInput(value.Err,type.error)};
+    default:return __representation(type,false)(value);
+  }
+}
+function __stateOutput(value,type){return __representation(type,true)(value);}
 // @helper __u64
 const __u64 = n => BigInt.asUintN(64, n);
 // @helper __div
