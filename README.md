@@ -25,32 +25,54 @@ still needs a compiler wrapper to accept newly edited Ink source.
 ## Semantics and boundary
 
 - `u32` and `i32` wrap at 32 bits. Multiplication uses `Math.imul`.
-- `u64` uses `BigInt` and wraps at 64 bits after each arithmetic operation. Host
-  inputs accept BigInt, safe integer Number or a canonical decimal string.
-  Results are BigInt. JSON callers must explicitly encode them as strings; unsafe
-  Numbers, coercible booleans, hexadecimal strings and out-of-range values reject.
+- `u64` uses `BigInt` and wraps at 64 bits after each arithmetic operation.
+  Native callers supply BigInt, including inside arrays/records. Results are
+  BigInt. JSON consumers explicitly encode/decode them as decimal strings.
 - `f32` is represented internally by binary32 bits. Every arithmetic operation
   rounds separately to binary32; negation flips the sign bit. Input/output uses
-  finite Numbers or explicit `{F32Bits: bits}` for exceptional values. Zero signs,
+  Numbers or explicit `{F32Bits: bits}` for exceptional values. Zero signs,
   subnormals and passed-through exceptional payloads survive. NaN payloads
   produced by arithmetic remain engine-dependent, as they are on native CPU;
   this package does not promise cross-engine NaN payload reproducibility.
-- Bool, vectors, records and nested lists retain their checked types. Host
-  inputs are captured and validated; collection operations do not mutate them.
+- Bool, vectors, records and nested lists retain their checked types. Callers
+  supply the declared types; collection operations do not mutate inputs. Typed
+  word arrays are accepted as list inputs, and map/filter/scan produce ordinary
+  arrays so maps to Bool or u64 retain their element type.
 - Calls, lexical bindings, map/filter, indexed map, truncating zip, ordered sum,
   right fold, scan, numeric sort, bounded repeat and lazy branches/fallbacks are
   emitted literally. No floating-point reassociation or fused reductions.
+- Ordered sums emit indexed loops with the declared rounding/wrapping at each
+  addition, eliminating per-element reduction callbacks.
 - The initial target excludes states, actions, events and opaque stateful value
   types (`Int`, String, Option/Result, tables and nominal IDs). Unsupported
   capabilities reject rather than silently converting values or changing types.
 
-Ingress/output have a one-million-cell limit. Calls and collection iterations
-share a one-million-step execution budget. This is a host resource policy, not
-an optimisation rule or the reference interpreter's exact fuel accounting.
+## Trusted native caller contract
+
+`functions.name(...args)` binds directly to the generated synchronous function
+for signatures without f32 representation conversion. `call(name, args)` is
+only a compatibility name lookup. Generated modules have no runtime input
+validator, snapshot capture, fuel counter or cell budget. The checker still
+rejects ill-typed Ink programs and checks proof applications during compilation.
+
+Callers provide the arity, shapes and numeric ranges declared in `metadata`:
+u32/i32 are integer Numbers in range, u64 is BigInt, Bool is boolean, and
+collections/records contain their declared values. f32 boundaries convert
+Numbers to binary32 bits and back, preserving separately rounded operations;
+explicit `{F32Bits: bits}` supports exceptional values and payloads. These
+representation conversions are specialised once at module initialisation.
+Word-only inputs and outputs have no codec traversal or copy. An identity
+function can return the original array/record; callers own aliasing and must
+keep values stable during calls. Invalid caller values are outside the ABI
+contract and have no specified diagnostic or result.
+
+There is no execution timeout or collection size limit in the emitted module.
+Resource policy belongs to the application. This is an intentional ABI change
+from `ink-javascript-values-v1` to `ink-javascript-trusted-values-v2`.
 
 `lower(&CheckedModule)` returns source and a manifest binding the checked core
 identity, semantics version, typed interface and emitted-source hash. The checker,
-lowerer, value codec and JavaScript engine remain trusted implementations.
+lowerer, representation conversion and JavaScript engine remain trusted implementations.
 Differential testing is evidence, not a formal target-code proof.
 
 ## Validation
@@ -62,4 +84,6 @@ cargo test --locked
 Rust tests execute emitted modules in Node and compare results with the pinned
 Ink reference interpreter, including full-width integer overflow, f32 rounding,
 exceptional inputs, lazy evaluation, nested collections, records, vectors,
-particles, identifier hygiene, invalid inputs and resource limits.
+particles, identifier hygiene, typed maps that change element type, native
+identity aliasing and absence of runtime checker machinery. Separate compile-time
+negative tests reject type errors and unsupported capabilities.
