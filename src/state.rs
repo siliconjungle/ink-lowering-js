@@ -37,6 +37,9 @@ impl StateEmitter<'_> {
         let t = self.infer(e, env, want)?;
         Ok(match e {
             Expr::Num(n) => {
+                if t == Type::F32 {
+                    return Ok((*n as f32).to_bits().to_string());
+                }
                 if matches!(t, Type::U64 | Type::Int) {
                     format!("{n}n")
                 } else {
@@ -44,6 +47,20 @@ impl StateEmitter<'_> {
                 }
             }
             Expr::Bool(b) => b.to_string(),
+            Expr::Float(bits) => bits.to_string(),
+            Expr::Neg(value) => {
+                if t == Type::I32 && matches!(value.as_ref(), Expr::Num(2147483648)) {
+                    return Ok("-2147483648".into());
+                }
+                let v = self.expr(value, env, Some(&t))?;
+                match t {
+                    Type::F32 => format!("(({v})^0x80000000)>>>0"),
+                    Type::I32 => format!("(-({v}))|0"),
+                    Type::U32 => format!("(-({v}))>>>0"),
+                    Type::U64 => format!("__u64(-({v}))"),
+                    _ => format!("-({v})"),
+                }
+            }
             Expr::String(s) => quote(s),
             Expr::Unit => "null".into(),
             Expr::Var(n) => {
@@ -67,6 +84,14 @@ impl StateEmitter<'_> {
                         return Ok(quote(&format!("{en}.{n}")));
                     }
                 }
+                if matches!(self.infer(x, env, None)?, Type::Vector(..)) {
+                    let v = self.expr(x, env, None)?;
+                    let i = ["x", "y", "z", "w"]
+                        .iter()
+                        .position(|s| *s == n)
+                        .ok_or("vector component")?;
+                    return Ok(format!("({v})[{i}]"));
+                }
                 format!("({})[{}]", self.expr(x, env, None)?, quote(n))
             }
             Expr::Record(n, fs) => {
@@ -86,7 +111,7 @@ impl StateEmitter<'_> {
                 let mut at = self.infer(
                     a,
                     env,
-                    if matches!(t, Type::U32 | Type::U64 | Type::Int) {
+                    if matches!(t, Type::U32 | Type::U64 | Type::Int | Type::I32 | Type::F32) {
                         Some(&t)
                     } else {
                         None
@@ -94,7 +119,7 @@ impl StateEmitter<'_> {
                 )?;
                 if matches!(a.as_ref(), Expr::Num(_)) {
                     let bt = self.infer(b, env, None)?;
-                    if matches!(bt, Type::U32 | Type::Int) {
+                    if matches!(bt, Type::U32 | Type::Int | Type::I32 | Type::F32) {
                         at = bt
                     }
                 }
@@ -106,6 +131,13 @@ impl StateEmitter<'_> {
                     } else {
                         arithmetic(op, &a, &b, &at)
                     }
+                } else if at == Type::F32 {
+                    let op = match op.as_str() {
+                        "==" => "===",
+                        "!=" => "!==",
+                        _ => op,
+                    };
+                    format!("(__float({a}) {op} __float({b}))")
                 } else if op == "==" || op == "!=" {
                     format!("{}__equal({a},{b})", if op == "!=" { "!" } else { "" })
                 } else {
@@ -113,6 +145,13 @@ impl StateEmitter<'_> {
                 }
             }
             Expr::Call(n, args) => match n.as_str() {
+                "vec2" | "vec3" | "vec4" => format!(
+                    "[{}]",
+                    args.iter()
+                        .map(|e| self.expr(e, env, None))
+                        .collect::<LangResult<Vec<_>>>()?
+                        .join(",")
+                ),
                 "Ok" | "Err" | "Some" => {
                     let inner = match (&t, n.as_str()) {
                         (Type::Result(a, _), "Ok") | (Type::Option(a), "Some") => Some(&**a),
@@ -129,7 +168,13 @@ impl StateEmitter<'_> {
                         quote(n),
                         self.expr(&args[0], env, Some(&at))?,
                         self.expr(&args[1], env, Some(&at))?,
-                        if at == Type::U32 { 32 } else { 64 }
+                        if at == Type::I32 {
+                            -32
+                        } else if at == Type::U32 {
+                            32
+                        } else {
+                            64
+                        }
                     )
                 }
                 "sum" | "count" => {

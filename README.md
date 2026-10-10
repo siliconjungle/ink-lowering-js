@@ -71,3 +71,5 @@ exceptional inputs, lazy evaluation, nested collections, records, vectors,
 particles, identifier hygiene, invalid inputs and resource limits.
 
 `lower_selected(&CheckedSelection)` retains the original checked snapshot namespace for state instances while the emitted code/manifest identify the selected module. Bare-module emission keeps that module’s own namespace; no arbitrary snapshot identity override is accepted.
+
+Existing i32/f32 and fixed numerical vectors also cross state/action/keep/event boundaries. Scalar float comparisons use IEEE semantics; aggregate action equality compares stored float bits. Numerical checkpoints preserve payloads and signed zero. Arithmetic NaN payloads remain engine dependent.
