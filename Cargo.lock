@@ -65,7 +65,7 @@ dependencies = [
 [[package]]
 name = "ink-core"
 version = "0.1.0"
-source = "git+https://github.com/siliconjungle/ink-lang?rev=f688079b78dcd740a42cf1655fec9629c862bf69#f688079b78dcd740a42cf1655fec9629c862bf69"
+source = "git+https://github.com/siliconjungle/ink-lang?rev=b977fdc1888dc187d090574a56d155e25e534fa2#b977fdc1888dc187d090574a56d155e25e534fa2"
 dependencies = [
  "num-bigint",
  "num-traits",

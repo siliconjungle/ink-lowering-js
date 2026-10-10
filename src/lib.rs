@@ -8,6 +8,7 @@ pub struct Emission {
     pub javascript: String,
     pub manifest: Value,
 }
+mod state;
 type Env = BTreeMap<String, (String, Type)>;
 fn quote(s: &str) -> String {
     serde_json::to_string(s).unwrap()
@@ -17,10 +18,16 @@ fn descriptor(t: &Type, p: &Program, seen: &mut BTreeSet<String>) -> LangResult<
         Type::U32 => json!({"kind":"u32"}), Type::U64 => json!({"kind":"u64"}),
         Type::I32 => json!({"kind":"i32"}), Type::F32 => json!({"kind":"f32"}),
         Type::Bool => json!({"kind":"bool"}),
+        Type::Unit => json!({"kind":"unit"}), Type::String => json!({"kind":"string"}), Type::Int => json!({"kind":"int"}),
+        Type::Option(t) => json!({"kind":"option","element":descriptor(t,p,seen)?}),
+        Type::Result(a,b) => json!({"kind":"result","ok":descriptor(a,p,seen)?,"error":descriptor(b,p,seen)?}),
         Type::List(t) => json!({"kind":"list","element":descriptor(t,p,seen)?}),
         Type::Vector(t,n) => json!({"kind":"vector","size":n,"element":descriptor(t,p,seen)?}),
+        Type::Named(n) if p.ids.contains(n) => json!({"kind":"id","name":n}),
+        Type::Named(n) if n == "ArithmeticError" => json!({"kind":"enum","name":n,"variants":["ArithmeticError.Overflow"]}),
+        Type::Named(n) if p.enums.contains_key(n) => json!({"kind":"enum","name":n,"variants":p.enums[n].iter().map(|v|format!("{n}.{v}")).collect::<Vec<_>>()}),
         Type::Named(n) => {
-            if !seen.insert(n.clone()) { return Err("recursive record is not supported by JavaScript lowering".into()); }
+            if !seen.insert(n.clone()) { return Ok(json!({"kind":"ref","name":n})); }
             let fs=p.records.get(n).ok_or("JavaScript lowering requires a record definition")?;
             let fields=fs.iter().map(|(name,t)|Ok(json!({"name":name,"type":descriptor(t,p,seen)?})))
                 .collect::<LangResult<Vec<_>>>()?;
@@ -342,7 +349,7 @@ impl Emitter<'_> {
 /// Emit an ES module. Backend implementation and the JavaScript engine are
 /// trusted; checked source/rewrite evidence does not certify emitted machine code.
 pub fn lower(module: &CheckedModule) -> LangResult<Emission> {
-    let p = module.pure_program()?;
+    let p = module.program();
     let mut emitter = Emitter {
         p,
         next: 0,
@@ -378,7 +385,29 @@ pub fn lower(module: &CheckedModule) -> LangResult<Emission> {
         ));
         functions.push(json!({"index":i,"name":f.name,"params":params,"result":result}));
     }
-    let interface = json!({"schema":1,"backend":"javascript","abi":"ink-javascript-values-v1","core_semantics":module.semantics(),"core_sha256":module.identity()?,"functions":functions});
+    let named = p
+        .records
+        .keys()
+        .map(|n| {
+            Ok((
+                n.clone(),
+                descriptor(&Type::Named(n.clone()), p, &mut BTreeSet::new())?,
+            ))
+        })
+        .collect::<LangResult<BTreeMap<_, _>>>()?;
+    javascript.push_str(&format!(
+        "const __namedTypes={};\n",
+        serde_json::to_string(&named).map_err(|e| e.to_string())?
+    ));
+    let state = if !p.actions.is_empty() || !p.states.is_empty() || !p.keeps.is_empty() {
+        let (code, metadata) = state::emit(module)?;
+        javascript.push_str(include_str!("snapshot.mjs"));
+        javascript.push_str(&code);
+        Some(metadata)
+    } else {
+        None
+    };
+    let interface = json!({"schema":1,"backend":"javascript","abi":"ink-javascript-values-v1","core_semantics":module.semantics(),"core_sha256":module.identity()?,"functions":functions,"state":state,"named_types":named});
     javascript.push_str(&format!(
         "export const metadata = {};\nconst __implementations=[{}];\n",
         interface,
@@ -408,7 +437,9 @@ export const functions = Object.freeze(Object.fromEntries(metadata.functions.map
         "JavaScript emitter and value codec",
         "JavaScript engine and host"
     ]);
-    manifest["scope"]=json!("pure numeric, Bool, vectors, records and nested lists; no state/actions or opaque stateful types");
+    manifest["scope"] = json!(
+        "literal pure and stateful execution; portable snapshots and ordered transaction events"
+    );
     Ok(Emission {
         javascript,
         manifest,

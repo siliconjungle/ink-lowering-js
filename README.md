@@ -40,12 +40,18 @@ still needs a compiler wrapper to accept newly edited Ink source.
 - Calls, lexical bindings, map/filter, indexed map, truncating zip, ordered sum,
   right fold, scan, numeric sort, bounded repeat and lazy branches/fallbacks are
   emitted literally. No floating-point reassociation or fused reductions.
-- The initial target excludes states, actions, events and opaque stateful value
-  types (`Int`, String, Option/Result, tables and nominal IDs). Unsupported
-  capabilities reject rather than silently converting values or changing types.
+- Exact Int, String, Unit, nominal IDs, enums and tagged Option/Result are supported.
+- `createState()` exposes typed table-backed queries/changes, keeps,
+  rollback, ordered events, outbox acknowledgement and asynchronous portable
+  checkpoint/restore. Query-local Result errors do not poison a change unless
+  propagated; nested failing changes do poison it even if their Result is ignored.
+- Portable snapshot bytes match the reference format for the same program.
+  WebCrypto supplies hashing; the host supplies durable storage and external I/O.
+  Keeps use full recomputation as the baseline implementation.
+
 
 Ingress/output have a one-million-cell limit. Calls and collection iterations
-share a one-million-step execution budget. This is a host resource policy, not
+share a one-million-step pure execution budget; state invocation uses 100 million steps. This is a host resource policy, not
 an optimisation rule or the reference interpreter's exact fuel accounting.
 
 `lower(&CheckedModule)` returns source and a manifest binding the checked core

@@ -215,15 +215,8 @@ console.log(`${cases.length} reference comparisons and boundary regressions pass
     fs::remove_dir_all(dir).unwrap();
 }
 #[test]
-fn rejects_stateful_opaque_and_recursive_programs_without_changing_core_types() {
-    for source in [
-        "module X;state count:Int=0;query get()->Int{return count;}",
-        "module X;fn f(x:Int)->Int{return x;}",
-        "module X;record R{x:R,}fn f(x:R)->R{return x;}",
-    ] {
-        let p = parse(source).unwrap();
-        if let Ok(module) = CheckedModule::from_source(p) {
-            assert!(ink_lowering_js::lower(&module).is_err());
-        }
-    }
+fn admits_stateful_and_opaque_values_without_changing_core_types() {
+    for source in ["module X;fn f(x:Int)->Int{return x;}", "module X;state T:Table<String,u64> =Table.empty();query get()->List<u64> reads(T){return T.values();}"] {
+  let module=CheckedModule::from_source(parse(source).unwrap()).unwrap();assert!(ink_lowering_js::lower(&module).is_ok());
+ }
 }
