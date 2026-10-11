@@ -129,6 +129,7 @@ struct Emitter<'a> {
     p: &'a Program,
     next: usize,
     budget: usize,
+    depth: usize,
     lines: String,
     inline_stack: Vec<String>,
     inline_remaining: usize,
@@ -270,6 +271,12 @@ impl Emitter<'_> {
         match e {
             Expr::Let(n, annotation, a, b) => {
                 let at = self.infer(a, env, annotation.as_deref())?;
+                if at == *ty && ink_core::collection_facts::returned_alias(b, n) {
+                    // Only alias binders remain: place the initializer directly
+                    // in caller storage and retain its logical count. Capacity
+                    // is never used as the source collection's extent.
+                    return self.list_into(a, env, ty, destination, conversion);
+                }
                 let value = self.expr(a, env, Some(&at))?;
                 let value = self.bind(&value);
                 let mut local = env.clone();
@@ -315,8 +322,23 @@ impl Emitter<'_> {
                 let Type::List(inner) = self.infer(receiver, env, context)? else {
                     return Err("list receiver required".into());
                 };
-                let xs = self.expr(receiver, env, context)?;
-                let xs = self.bind(&xs);
+                // Compaction may shrink below the source extent; the trusted
+                // destination contract only guarantees room for the result.
+                let reuse = method != "filter"
+                    && conversion.is_empty()
+                    && ink_core::collection_facts::reusable_private_receiver(
+                        self.p,
+                        e,
+                        &Self::types(env),
+                        Some(ty),
+                    );
+                let (xs, logical_len) = if reuse {
+                    let len = self.list_into(receiver, env, ty, destination, conversion)?;
+                    (destination.to_owned(), Some(len))
+                } else {
+                    let xs = self.expr(receiver, env, context)?;
+                    (self.bind(&xs), None)
+                };
                 if method == "concat" {
                     let ys = self.expr(&args[0], env, Some(ty))?;
                     let ys = self.bind(&ys);
@@ -349,7 +371,7 @@ impl Emitter<'_> {
                     second = Some((ys, *other));
                     len
                 } else {
-                    self.bind(&format!("{xs}.length"))
+                    logical_len.unwrap_or_else(|| self.bind(&format!("{xs}.length")))
                 };
                 if method == "scan" {
                     let acc = self.fresh();
@@ -431,6 +453,164 @@ impl Emitter<'_> {
             }
         }
     }
+    // Keep collection-specific storage analysis off the recursive scalar
+    // emitter's stack frame; bounded scalar helper expansion keeps its original
+    // stack/resource contract even when a program never uses storage reuse.
+    fn collection_expr(
+        &mut self,
+        e: &Expr,
+        xs: &Expr,
+        method: &String,
+        args: &[Expr],
+        env: &Env,
+        t: &Type,
+    ) -> LangResult<String> {
+        let reuse =
+            ink_core::collection_facts::reusable_private_receiver(self.p, e, &Self::types(env), Some(t));
+        let context = if method == "filter" || method == "concat" {
+            Some(t)
+        } else {
+            None
+        };
+        let Type::List(inner) = self.infer(xs, env, context)? else {
+            unreachable!()
+        };
+        let xs = self.expr(xs, env, context)?;
+        let xs = self.bind(&xs);
+        Ok(match method.as_str() {
+            "at_or" => {
+                let idx = self.expr(&args[0], env, Some(&Type::U32))?;
+                let idx = self.bind(&idx);
+                let out = self.fresh();
+                self.line(format!(
+                    "let {out};if({idx}<{xs}.length){{{out}={xs}[{idx}];}}else{{"
+                ));
+                let fallback = self.expr(&args[1], env, Some(t))?;
+                self.line(format!("{out}={fallback};}}"));
+                out
+            }
+            "drop" | "take" => {
+                let count = self.expr(&args[0], env, Some(&Type::U32))?;
+                if method == "drop" {
+                    format!("{xs}.slice({count})")
+                } else {
+                    format!("{xs}.slice(0,{count})")
+                }
+            }
+            "sort" => format!("__sort({xs})"),
+            "concat" => {
+                let ys = self.expr(&args[0], env, Some(t))?;
+                let ys = self.bind(&ys);
+                let left = self.bind(&format!("{xs}.length"));
+                let right = self.bind(&format!("{ys}.length"));
+                let out = self.bind(&format!("new Array({left}+{right})"));
+                let i = self.fresh();
+                self.line(format!(
+                    "for(let {i}=0;{i}<{left};{i}++){{{out}[{i}]={xs}[{i}];}}"
+                ));
+                let j = self.fresh();
+                self.line(format!(
+                    "for(let {j}=0;{j}<{right};{j}++){{{out}[{left}+{j}]={ys}[{j}];}}"
+                ));
+                out
+            }
+            "scan" => {
+                let len = self.bind(&format!("{xs}.length"));
+                let out = self.bind(&if reuse {
+                    xs.clone()
+                } else {
+                    format!("new Array({len})")
+                });
+                let acc = self.fresh();
+                self.line(format!("let {acc}={};", zero(&inner)));
+                let i = self.fresh();
+                self.line(format!("for(let {i}=0;{i}<{len};{i}++){{"));
+                let element = self.bind(&format!("{xs}[{i}]"));
+                self.line(format!(
+                    "{acc}={};{out}[{i}]={acc};}}",
+                    arithmetic("+", &acc, &element, &inner)
+                ));
+                out
+            }
+            "map" | "filter" | "map_indexed" | "zip" => {
+                let Type::List(output) = t else {
+                    unreachable!()
+                };
+                let mut second = None;
+                let len = if method == "zip" {
+                    let Type::List(other) = self.infer(&args[0], env, None)? else {
+                        unreachable!()
+                    };
+                    let ys = self.expr(&args[0], env, None)?;
+                    let ys = self.bind(&ys);
+                    let len = self.bind(&format!("Math.min({xs}.length,{ys}.length)"));
+                    second = Some((ys, *other));
+                    len
+                } else {
+                    self.bind(&format!("{xs}.length"))
+                };
+                let out = self.bind(&if reuse {
+                    xs.clone()
+                } else if method == "filter" {
+                    "[]".into()
+                } else {
+                    format!("new Array({len})")
+                });
+                let compact_count = if method == "filter" && reuse {
+                    let count = self.fresh();
+                    self.line(format!("let {count}=0;"));
+                    Some(count)
+                } else {
+                    None
+                };
+                let i = self.fresh();
+                self.line(format!("for(let {i}=0;{i}<{len};{i}++){{"));
+                let element = self.bind(&format!("{xs}[{i}]"));
+                let (callback, params, result) = if let Some((ys, other)) = second {
+                    let right = self.bind(&format!("{ys}[{i}]"));
+                    (
+                        &args[1],
+                        vec![(element.clone(), *inner), (right, other)],
+                        output.as_ref(),
+                    )
+                } else if method == "map_indexed" {
+                    let idx = self.bind(&format!("({i}>>>0)"));
+                    (
+                        &args[0],
+                        vec![(idx, Type::U32), (element.clone(), *inner)],
+                        output.as_ref(),
+                    )
+                } else {
+                    (
+                        &args[0],
+                        vec![(element.clone(), *inner)],
+                        if method == "filter" {
+                            &Type::Bool
+                        } else {
+                            output.as_ref()
+                        },
+                    )
+                };
+                let (body, local) = Self::callback(callback, env, &params)?;
+                let value = self.expr(body, &local, Some(result))?;
+                if method == "filter" {
+                    if let Some(count) = &compact_count {
+                        self.line(format!("if({value}){{{out}[{count}++]={element};}}"));
+                    } else {
+                        self.line(format!("if({value}){{{out}.push({element});}}"));
+                    }
+                } else {
+                    self.line(format!("{out}[{i}]={value};"));
+                }
+                self.line("}");
+                if let Some(count) = compact_count {
+                    self.line(format!("{out}.length={count};"));
+                }
+                out
+            }
+            _ => return Err(format!("unsupported JavaScript method {method}")),
+        })
+    }
     // Emit prerequisite statements and return the final value expression. Each
     // caller materializes a value before emitting later operands or mutating an
     // accumulator. Lazy subexpressions are emitted inside their actual branch.
@@ -472,6 +652,19 @@ impl Emitter<'_> {
         Ok(())
     }
     fn expr(&mut self, e: &Expr, env: &Env, want: Option<&Type>) -> LangResult<String> {
+        // Target resource bound, matching C's scalar emission guard. A known
+        // helper expansion crossing this bound is rolled back by inline_call
+        // and emitted as an ordinary call; recursive typing never keeps growing
+        // beneath an already deep emitter stack.
+        if self.depth >= 48 {
+            return Err("JavaScript expression emission depth budget exceeded".into());
+        }
+        self.depth += 1;
+        let result = self.expr_inner(e, env, want);
+        self.depth -= 1;
+        result
+    }
+    fn expr_inner(&mut self, e: &Expr, env: &Env, want: Option<&Type>) -> LangResult<String> {
         if self.budget == 0 {
             return Err("JavaScript emission budget exceeded".into());
         }
@@ -645,13 +838,18 @@ impl Emitter<'_> {
                 let grain = self.expr(&args[1], env, Some(&Type::U32))?;
                 self.bind(&grain);
                 let mut local = env.clone();
+                // The temporary source binder must not shadow a caller capture.
+                let mut source_name = "__parallel_input".to_owned();
+                while local.contains_key(&source_name) {
+                    source_name.push('_');
+                }
                 local.insert(
-                    "__parallel_input".into(),
+                    source_name.clone(),
                     (input, self.infer(&args[0], env, None)?),
                 );
                 self.expr(
                     &Expr::Method(
-                        Box::new(Expr::Var("__parallel_input".into())),
+                        Box::new(Expr::Var(source_name)),
                         "map_indexed".into(),
                         vec![args[2].clone()],
                     ),
@@ -964,130 +1162,7 @@ impl Emitter<'_> {
                     out
                 }
             }
-            Expr::Method(xs, method, args) => {
-                let context = if method == "filter" || method == "concat" {
-                    Some(&t)
-                } else {
-                    None
-                };
-                let Type::List(inner) = self.infer(xs, env, context)? else {
-                    unreachable!()
-                };
-                let xs = self.expr(xs, env, context)?;
-                let xs = self.bind(&xs);
-                match method.as_str() {
-                    "at_or" => {
-                        let idx = self.expr(&args[0], env, Some(&Type::U32))?;
-                        let idx = self.bind(&idx);
-                        let out = self.fresh();
-                        self.line(format!(
-                            "let {out};if({idx}<{xs}.length){{{out}={xs}[{idx}];}}else{{"
-                        ));
-                        let fallback = self.expr(&args[1], env, Some(&t))?;
-                        self.line(format!("{out}={fallback};}}"));
-                        out
-                    }
-                    "drop" | "take" => {
-                        let count = self.expr(&args[0], env, Some(&Type::U32))?;
-                        if method == "drop" {
-                            format!("{xs}.slice({count})")
-                        } else {
-                            format!("{xs}.slice(0,{count})")
-                        }
-                    }
-                    "sort" => format!("__sort({xs})"),
-                    "concat" => {
-                        let ys = self.expr(&args[0], env, Some(&t))?;
-                        let ys = self.bind(&ys);
-                        let left = self.bind(&format!("{xs}.length"));
-                        let right = self.bind(&format!("{ys}.length"));
-                        let out = self.bind(&format!("new Array({left}+{right})"));
-                        let i = self.fresh();
-                        self.line(format!(
-                            "for(let {i}=0;{i}<{left};{i}++){{{out}[{i}]={xs}[{i}];}}"
-                        ));
-                        let j = self.fresh();
-                        self.line(format!(
-                            "for(let {j}=0;{j}<{right};{j}++){{{out}[{left}+{j}]={ys}[{j}];}}"
-                        ));
-                        out
-                    }
-                    "scan" => {
-                        let out = self.bind(&format!("new Array({xs}.length)"));
-                        let acc = self.fresh();
-                        self.line(format!("let {acc}={};", zero(&inner)));
-                        let i = self.fresh();
-                        self.line(format!("for(let {i}=0;{i}<{xs}.length;{i}++){{"));
-                        let element = self.bind(&format!("{xs}[{i}]"));
-                        self.line(format!(
-                            "{acc}={};{out}[{i}]={acc};}}",
-                            arithmetic("+", &acc, &element, &inner)
-                        ));
-                        out
-                    }
-                    "map" | "filter" | "map_indexed" | "zip" => {
-                        let Type::List(output) = &t else {
-                            unreachable!()
-                        };
-                        let mut second = None;
-                        let len = if method == "zip" {
-                            let Type::List(other) = self.infer(&args[0], env, None)? else {
-                                unreachable!()
-                            };
-                            let ys = self.expr(&args[0], env, None)?;
-                            let ys = self.bind(&ys);
-                            let len = self.bind(&format!("Math.min({xs}.length,{ys}.length)"));
-                            second = Some((ys, *other));
-                            len
-                        } else {
-                            self.bind(&format!("{xs}.length"))
-                        };
-                        let out = self.bind(&if method == "filter" {
-                            "[]".into()
-                        } else {
-                            format!("new Array({len})")
-                        });
-                        let i = self.fresh();
-                        self.line(format!("for(let {i}=0;{i}<{len};{i}++){{"));
-                        let element = self.bind(&format!("{xs}[{i}]"));
-                        let (callback, params, result) = if let Some((ys, other)) = second {
-                            let right = self.bind(&format!("{ys}[{i}]"));
-                            (
-                                &args[1],
-                                vec![(element.clone(), *inner), (right, other)],
-                                output.as_ref(),
-                            )
-                        } else if method == "map_indexed" {
-                            let idx = self.bind(&format!("({i}>>>0)"));
-                            (
-                                &args[0],
-                                vec![(idx, Type::U32), (element.clone(), *inner)],
-                                output.as_ref(),
-                            )
-                        } else {
-                            (
-                                &args[0],
-                                vec![(element.clone(), *inner)],
-                                if method == "filter" {
-                                    &Type::Bool
-                                } else {
-                                    output.as_ref()
-                                },
-                            )
-                        };
-                        let (body, local) = Self::callback(callback, env, &params)?;
-                        let value = self.expr(body, &local, Some(result))?;
-                        if method == "filter" {
-                            self.line(format!("if({value}){{{out}.push({element});}}"));
-                        } else {
-                            self.line(format!("{out}[{i}]={value};"));
-                        }
-                        self.line("}");
-                        out
-                    }
-                    _ => return Err(format!("unsupported JavaScript method {method}")),
-                }
-            }
+            Expr::Method(xs, method, args) => self.collection_expr(e, xs, method, args, env, &t)?,
             _ => return Err(
                 "JavaScript lowering supports pure function expressions, not stateful operations"
                     .into(),
@@ -1117,6 +1192,7 @@ fn lower_with_layout(
         p,
         next: 0,
         budget: 200_000,
+        depth: 0,
         lines: String::new(),
         inline_stack: Vec::new(),
         inline_remaining: INLINE_NODE_BUDGET,

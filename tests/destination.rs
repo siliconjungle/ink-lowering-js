@@ -68,8 +68,8 @@ const NativeArray=globalThis.Array;let allocs=0,reads=[];globalThis.Array=new Pr
 function tracked(v,name){const a=v.slice();v.forEach((x,i)=>Object.defineProperty(a,i,{get(){reads.push(name+i);return x;}}));return a;}
 const xs=tracked([1,2],'x'),ys=tracked([4,5,6],'y'),out=new Uint32Array(32);
 reads=[];allocs=0;assert.equal(functionsInto.map_u32(xs,ys,3,7,out),2);assert.deepEqual(reads,['x0','x1']);assert.equal(allocs,0);
-reads=[];allocs=0;assert.equal(functionsInto.chain_u32(xs,ys,3,7,out),2);assert.equal(allocs,2);
-reads=[];allocs=0;assert.equal(functionsInto.local_u32(xs,ys,3,7,out),2);assert.equal(allocs,1);
+reads=[];allocs=0;assert.equal(functionsInto.chain_u32(xs,ys,3,7,out),2);assert.equal(allocs,1);
+reads=[];allocs=0;assert.equal(functionsInto.local_u32(xs,ys,3,7,out),2);assert.equal(allocs,0);
 reads=[];allocs=0;counters.reset();assert.equal(functionsInto.lazy(xs,ys,0,7,out),2);assert.deepEqual(reads,['x0','x1']);assert.equal(allocs,0);assert.equal(counters.huge,0);
 for(const name of ['receiver_map','receiver_filter','receiver_indexed','receiver_scan','receiver_sum','receiver_count','receiver_fold']){counters.reset();functions[name](xs,ys,0,7);assert.equal(counters.huge,1,name);}
 counters.reset();reads=[];functions.receiver_zip(xs,ys,0,7);assert.equal(counters.huge,2);assert.deepEqual(reads,['x0','x1','y0','y1','y2']);
