@@ -71,10 +71,12 @@ impl Emit<'_> {
     }
 }
 pub fn lower(checked: &CheckedRepresentation) -> LangResult<String> {
+    let executable = checked.definition().reachable_executable_declarations()?;
     let types = checked
         .projection()
         .types
         .iter()
+        .filter(|(_,sort)| match sort { Sort::Data(id)=>executable.contains_key(id), _=>true })
         .enumerate()
         .map(|(i, (key, sort))| {
             Ok((

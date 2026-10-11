@@ -10,7 +10,6 @@ pub struct Emission {
 }
 pub mod definition;
 pub mod portable_definition;
-pub mod representation;
 mod state;
 type Env = BTreeMap<String, (String, Type)>;
 fn quote(s: &str) -> String {
