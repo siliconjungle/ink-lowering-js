@@ -122,3 +122,5 @@ length and lifetime. No malformed-input diagnostic or rollback is promised.
 Representation conversion/JSON parsing and explicit portable checkpoint integrity
 checks remain. Source/proof checking happens during compilation. Standalone
 representation calls skip whole-state checkpoint validation; query envelopes execute the literal proved physical step. Backend-specific envelope erasure has been removed.
+
+Fixed table operations include bulk upsert/removal, shared keys, ordered direct sums and predicate counts. Generated state journals touched optional rows, caches ordered keys until membership changes, and reads live payloads on replacement. Shared-key scans probe the smaller map and sort only their result; direct reductions avoid intermediate row/map arrays. Portable snapshots retain logical key order and exclude physical caches/journals.

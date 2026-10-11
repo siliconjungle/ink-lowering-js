@@ -65,7 +65,7 @@ dependencies = [
 [[package]]
 name = "ink-abi"
 version = "0.1.0"
-source = "git+https://github.com/siliconjungle/ink-abi?rev=841a1898ea1c6e8c69845b94aa5f1c79a151d55f#841a1898ea1c6e8c69845b94aa5f1c79a151d55f"
+source = "git+https://github.com/siliconjungle/ink-abi?rev=c800d60a4f49790dced13fc930b84ba7815d60a0#c800d60a4f49790dced13fc930b84ba7815d60a0"
 dependencies = [
  "serde",
  "serde_json",
@@ -74,7 +74,7 @@ dependencies = [
 [[package]]
 name = "ink-core"
 version = "0.1.0"
-source = "git+https://github.com/siliconjungle/ink-lang?rev=4da3bbf0ca10f5fc3052a04c4d4b25b5287d2f48#4da3bbf0ca10f5fc3052a04c4d4b25b5287d2f48"
+source = "git+https://github.com/siliconjungle/ink-lang?rev=db31ed4c50101fe1b256ab24e396f7f8a1661b22#db31ed4c50101fe1b256ab24e396f7f8a1661b22"
 dependencies = [
  "num-bigint",
  "num-traits",
@@ -190,9 +190,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.152"
+version = "1.0.154"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1741ab7a6cc54a03a89b5d563ed60075c277d9e3cfa73ad0c1f23f23974703c6"
+checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
 dependencies = [
  "itoa",
  "memchr",

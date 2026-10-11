@@ -1441,3 +1441,8 @@ export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.f
 
 mod definition_literal;
 pub mod representation_program;
+
+/// Compile-time read-only observation projection.
+pub mod representation_query;
+
+pub mod representation_transition;
