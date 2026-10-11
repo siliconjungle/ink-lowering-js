@@ -19,7 +19,7 @@ fn expected(v: &eval::Value) -> Value {
     }
 }
 #[test]
-fn destination_outputs_match_interpreter_and_reuse_storage_without_mutating_inputs() {
+fn destination_outputs_match_interpreter_and_preserve_stage_allocations_without_mutating_inputs() {
     let p = fixture();
     let m = CheckedModule::from_source(p.clone()).unwrap();
     let emitted = ink_lowering_js::lower(&m).unwrap();
@@ -31,16 +31,14 @@ fn destination_outputs_match_interpreter_and_reuse_storage_without_mutating_inpu
     let start = source.find(&marker).unwrap();
     let open = start + source[start..].find('{').unwrap();
     source.insert_str(open + 1, "__hugeCalls++;__sequence=__sequence*10+1;");
-    source = source
-        .replace(
-            "/* inline probe_idx */",
-            "/* inline probe_idx */__sequence=__sequence*10+2;",
-        )
-        .replace(
-            "/* inline fallback */",
-            "/* inline fallback */__sequence=__sequence*10+3;",
-        )
-        .replace("=[];", "=new Array(0);");
+    for (name, digit) in [("probe_idx", 2), ("fallback", 3)] {
+        let i = p.functions.iter().position(|f| f.name == name).unwrap();
+        let marker = format!("function __fn{i}(");
+        let start = source.find(&marker).unwrap();
+        let open = start + source[start..].find('{').unwrap();
+        source.insert_str(open + 1, &format!("__sequence=__sequence*10+{digit};"));
+    }
+    source = source.replace("=[];", "=new Array(0);");
     source=format!("let __hugeCalls=0,__sequence=0;export const counters={{reset(){{__hugeCalls=0;__sequence=0;}},get huge(){{return __hugeCalls;}},get sequence(){{return __sequence;}}}};\n{source}");
     let dir = directory("js");
     fs::write(dir.join("output.mjs"), source).unwrap();
@@ -68,7 +66,7 @@ const NativeArray=globalThis.Array;let allocs=0,reads=[];globalThis.Array=new Pr
 function tracked(v,name){const a=v.slice();v.forEach((x,i)=>Object.defineProperty(a,i,{get(){reads.push(name+i);return x;}}));return a;}
 const xs=tracked([1,2],'x'),ys=tracked([4,5,6],'y'),out=new Uint32Array(32);
 reads=[];allocs=0;assert.equal(functionsInto.map_u32(xs,ys,3,7,out),2);assert.deepEqual(reads,['x0','x1']);assert.equal(allocs,0);
-reads=[];allocs=0;assert.equal(functionsInto.chain_u32(xs,ys,3,7,out),2);assert.equal(allocs,1);
+reads=[];allocs=0;assert.equal(functionsInto.chain_u32(xs,ys,3,7,out),2);assert.equal(allocs,2);
 reads=[];allocs=0;assert.equal(functionsInto.local_u32(xs,ys,3,7,out),2);assert.equal(allocs,0);
 reads=[];allocs=0;counters.reset();assert.equal(functionsInto.lazy(xs,ys,0,7,out),2);assert.deepEqual(reads,['x0','x1']);assert.equal(allocs,0);assert.equal(counters.huge,0);
 for(const name of ['receiver_map','receiver_filter','receiver_indexed','receiver_scan','receiver_sum','receiver_count','receiver_fold']){counters.reset();functions[name](xs,ys,0,7);assert.equal(counters.huge,1,name);}

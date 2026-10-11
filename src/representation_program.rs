@@ -93,7 +93,7 @@ pub fn lower(checked: &CheckedRepresentation) -> LangResult<String> {
     let p = checked.module().program();
     let plan = checked.plan();
     let projection = checked.projection();
-    let queries = super::representation_query::declarations(checked)?;
+    let queries: BTreeMap<String, ink_core::logic::Declaration> = BTreeMap::new();
     let mut out = super::definition_literal::lower(checked.definition(), &queries)?;
     out.push_str("const __encoder=new TextEncoder();\nfunction __keyCompare(a,b){return a<b?-1:a>b?1:0;}\n\n");
     out.push_str(include_str!("snapshot.mjs"));
@@ -155,40 +155,11 @@ pub fn lower(checked: &CheckedRepresentation) -> LangResult<String> {
             .unwrap();
             args.push(format!("a{i}"));
         }
-        let query = format!("q_{}", a.execute);
-        if queries.contains_key(&query) {
-            writeln!(out,"const reply=f_{query}({});return {{result:{},committed:false,version,events:[]}};}}",args.join(","),e.write(&source.result,"reply","0","false")?).unwrap();
-            continue;
-        }
         writeln!(out,"const executed=f_{}({});const observed=f_{}(executed),next=f_{}(executed);if(observed.c===1)throw Error('commit sequence exhausted');const [reply,committed,newVersion,,events]=observed.a;const result={},staged=__events(events),published=[];",a.execute,args.join(","),a.observe,a.next,e.write(&source.result,"reply","0","false")?).unwrap();
         out.push_str("if(committed){for(let i=0;i<staged.length;i++){const [channel,value,publicValue]=staged[i];outbox.push({commit:newVersion,position:BigInt(i),channel,value});published.push({commit:newVersion,position:BigInt(i),channel,value:publicValue});}}physical=next;version=newVersion;return {result,committed,version,events:published};}\n");
     }
     out.push_str("default:throw Error(`unknown action ${name}`);}}\nreturn Object.freeze({invoke:invoke_json,invoke_json,");
-    for source in &p.actions {
-        let a = &plan.actions[&source.name];
-        let query = format!("q_{}", a.execute);
-        if !queries.contains_key(&query) {
-            continue;
-        }
-        writeln!(out, "query_{}(...args){{boundary();", source.name).unwrap();
-        let mut inputs = vec!["physical".to_owned(), "version".to_owned()];
-        for (i, (_, t)) in source.params.iter().enumerate() {
-            writeln!(
-                out,
-                "const a{i}={};",
-                e.read(t, &format!("args[{i}]"), "0")?
-            )
-            .unwrap();
-            inputs.push(format!("a{i}"));
-        }
-        writeln!(
-            out,
-            "const reply=f_{query}({});return {};}},",
-            inputs.join(","),
-            e.write(&source.result, "reply", "0", "false")?
-        )
-        .unwrap();
-    }
+
     out.push_str("get version(){return version;},get outbox(){return outbox.map(e=>({...e,value:__publicEvent(e.channel,e.value)}));},acknowledge_through(commit,position){boundary();commit=BigInt(commit);position=BigInt(position);outbox=outbox.filter(e=>e.commit>commit||(e.commit===commit&&e.position>position));},async checkpoint(limits){boundary();\n");
     writeln!(out,"const logical=f_{}(physical);return __snapshotEncode(__meta,{{version,tables:__tables(logical),outbox}},limits);}},async restore(bytes,limits){{boundary();busy=true;try{{const saved=await __snapshotDecode(__meta,bytes,limits);const logical=__fromTables(saved.tables);const next=f_{}(logical);physical=next;version=saved.version;outbox=saved.outbox;}}finally{{busy=false;}}}}}});}}",plan.decode,plan.encode).unwrap();
     out.push_str("function __publicEvent(channel,value){switch(channel){\n");
