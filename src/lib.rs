@@ -9,6 +9,8 @@ pub struct Emission {
     pub manifest: Value,
 }
 mod state;
+pub mod definition;
+pub mod representation;
 type Env = BTreeMap<String, (String, Type)>;
 // Lexical occurrence, not identifier spelling alone: local binders shadow the
 // fold accumulator, while a let initializer still uses its enclosing scope.
@@ -388,6 +390,13 @@ impl Emitter<'_> {
                 } else {
                     format!("new Array({len})")
                 });
+                let compact_count = if method == "filter" && reuse {
+                    let count = self.fresh();
+                    self.line(format!("let {count}=0;"));
+                    Some(count)
+                } else {
+                    None
+                };
                 let i = self.fresh();
                 self.line(format!("for(let {i}=0;{i}<{len};{i}++){{"));
                 let element = self.bind(&format!("{xs}[{i}]"));
@@ -419,11 +428,18 @@ impl Emitter<'_> {
                 let (body, local) = Self::callback(callback, env, &params)?;
                 let value = self.expr(body, &local, Some(result))?;
                 if method == "filter" {
-                    self.line(format!("if({value}){{{out}.push({element});}}"));
+                    if let Some(count) = &compact_count {
+                        self.line(format!("if({value}){{{out}[{count}++]={element};}}"));
+                    } else {
+                        self.line(format!("if({value}){{{out}.push({element});}}"));
+                    }
                 } else {
                     self.line(format!("{out}[{i}]={value};"));
                 }
                 self.line("}");
+                if let Some(count) = compact_count {
+                    self.line(format!("{out}.length={count};"));
+                }
                 out
             }
             _ => return Err(format!("unsupported JavaScript method {method}")),
@@ -1314,3 +1330,9 @@ export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.f
         manifest,
     })
 }
+
+mod definition_literal;
+pub mod representation_program;
+
+/// Compile-time read-only observation projection.
+pub mod representation_query;
