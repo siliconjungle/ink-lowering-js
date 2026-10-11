@@ -36,7 +36,7 @@ function __table(rt,index,method,args){
  if(!table.has(key))__tableOrder.delete(table);
  rt.undo.push([index,key,table.has(key),table.get(key)]);table.set(key,args[1]);return null;
 }
-function __rollback(rt){for(let i=rt.undo.length-1;i>=0;i--){const [index,key,present,value]=rt.undo[i];__tableOrder.delete(rt.tables[index]);if(present)rt.tables[index].set(key,value);else rt.tables[index].delete(key);}rt.undo.length=0;}
+function __rollback(rt){for(let i=rt.undo.length-1;i>=0;i--){const [index,key,present,value]=rt.undo[i];const table=rt.tables[index];if(table.has(key)!==present)__tableOrder.delete(table);if(present)table.set(key,value);else table.delete(key);}rt.undo.length=0;}
 function __createState(meta,implementations){
  const rt={meta,tables:meta.roots.map(()=>new Map()),version:0n,outbox:[],staged:[],undo:[],busy:false};
  const actionMap=new Map(meta.actions.map(a=>[a.name,a]));
