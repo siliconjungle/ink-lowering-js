@@ -249,7 +249,9 @@ impl StateEmitter<'_> {
                     format!("__table(rt,{i},{},[{}])", quote(n), values.join(","))
                 } else {
                     let x = self.expr(xs, env, None)?;
-                    if n == "ok_or" {
+                    if n == "unwrap_or" {
+                        format!("((v,fallback)=>Object.hasOwn(v,'Some')?v.Some:fallback)({x},{})", self.expr(&args[0], env, Some(&t))?)
+                    } else if n == "ok_or" {
                         format!("__okOr({x},{})", self.expr(&args[0], env, None)?)
                     } else {
                         let inner = match &xt {
