@@ -484,6 +484,14 @@ impl Emitter<'_> {
                 self.line(format!("{out}={fallback};}}"));
                 out
             }
+            "drop" | "take" => {
+                let count = self.expr(&args[0], env, Some(&Type::U32))?;
+                if method == "drop" {
+                    format!("{xs}.slice({count})")
+                } else {
+                    format!("{xs}.slice(0,{count})")
+                }
+            }
             "sort" => format!("__sort({xs})"),
             "concat" => {
                 let ys = self.expr(&args[0], env, Some(t))?;
@@ -587,6 +595,43 @@ impl Emitter<'_> {
     // Emit prerequisite statements and return the final value expression. Each
     // caller materializes a value before emitting later operands or mutating an
     // accumulator. Lazy subexpressions are emitted inside their actual branch.
+    fn tail(&mut self, e: &Expr, env: &Env, f: &Function, targets: &Env) -> LangResult<()> {
+        match e {
+            Expr::Let(n, annotation, a, b) => {
+                let t = self.infer(a, env, annotation.as_deref())?;
+                let value = self.expr(a, env, Some(&t))?;
+                let mut local = env.clone();
+                local.insert(n.clone(), (value, t));
+                self.tail(b, &local, f, targets)?;
+            }
+            Expr::Call(n, a) if n == "choose" => {
+                let value = self.expr(&a[0], env, Some(&Type::Bool))?;
+                self.line(format!("if({value}){{"));
+                self.tail(&a[1], env, f, targets)?;
+                self.line("}else{");
+                self.tail(&a[2], env, f, targets)?;
+                self.line("}");
+            }
+            Expr::Call(n, a) if n == &f.name => {
+                let mut values = vec![];
+                for (a, (_, t)) in a.iter().zip(&f.params) {
+                    let v = self.expr(a, env, Some(t))?;
+                    let v = self.bind(&v);
+                    values.push(v);
+                }
+                for ((n, _), v) in f.params.iter().zip(values) {
+                    let target = &targets[n].0;
+                    self.line(format!("{target}={v};"));
+                }
+                self.line("continue;");
+            }
+            _ => {
+                let v = self.expr(e, env, Some(&f.result))?;
+                self.line(format!("return {v};"));
+            }
+        }
+        Ok(())
+    }
     fn expr(&mut self, e: &Expr, env: &Env, want: Option<&Type>) -> LangResult<String> {
         // Target resource bound, matching C's scalar emission guard. A known
         // helper expansion crossing this bound is rolled back by inline_call
@@ -767,6 +812,32 @@ impl Emitter<'_> {
             Expr::Call(n, args) if n == "length" => {
                 format!("({}).length", self.expr(&args[0], env, None)?)
             }
+            Expr::Call(n, args) if n == "parallel_map" => {
+                // Evaluate inputs in source order; the JS target is sequential.
+                let input = self.expr(&args[0], env, None)?;
+                let input = self.bind(&input);
+                let grain = self.expr(&args[1], env, Some(&Type::U32))?;
+                self.bind(&grain);
+                let mut local = env.clone();
+                // The temporary source binder must not shadow a caller capture.
+                let mut source_name = "__parallel_input".to_owned();
+                while local.contains_key(&source_name) {
+                    source_name.push('_');
+                }
+                local.insert(
+                    source_name.clone(),
+                    (input, self.infer(&args[0], env, None)?),
+                );
+                self.expr(
+                    &Expr::Method(
+                        Box::new(Expr::Var(source_name)),
+                        "map_indexed".into(),
+                        vec![args[2].clone()],
+                    ),
+                    &local,
+                    Some(&t),
+                )?
+            }
             Expr::Call(n, args) if n == "repeat_until" => {
                 let limit = self.expr(&args[0], env, Some(&Type::U32))?;
                 let limit = self.bind(&limit);
@@ -815,6 +886,41 @@ impl Emitter<'_> {
                 let xt = self.infer(x, env, None)?;
                 let xv = self.expr(x, env, None)?;
                 let xv = self.bind(&xv);
+                if n == "map_parallel" {
+                    let Type::Buffer(inner) = &xt else {
+                        unreachable!()
+                    };
+                    let grain = self.expr(&args[0], env, Some(&Type::U32))?;
+                    self.bind(&grain);
+                    let i = self.fresh();
+                    self.line(format!("for(let {i}=0;{i}<{xv}.length;{i}++){{"));
+                    let element = self.bind(&format!("__tempCopy({xv}[{i}])"));
+                    let (body, local) = Self::callback(
+                        &args[1],
+                        env,
+                        &[(format!("({i}>>>0)"), Type::U32), (element, *inner.clone())],
+                    )?;
+                    let v = self.expr(body, &local, Some(inner))?;
+                    self.line(format!("{xv}[{i}]={v};}}"));
+                    return Ok(xv);
+                }
+                if n == "split_at" {
+                    let at = self.expr(&args[0], env, Some(&Type::U32))?;
+                    let at = self.bind(&at);
+                    let right = self.bind(&format!("{xv}.splice(Math.min({at},{xv}.length))"));
+                    let (body, local) =
+                        Self::callback(&args[1], env, &[(xv, xt.clone()), (right, xt.clone())])?;
+                    return self.expr(body, &local, Some(&xt));
+                }
+                if n == "append" {
+                    let other = self.expr(&args[0], env, Some(&xt))?;
+                    let other = self.bind(&other);
+                    let i = self.fresh();
+                    self.line(format!(
+                        "for(let {i}=0;{i}<{other}.length;{i}++){{{xv}.push({other}[{i}]);}}"
+                    ));
+                    return Ok(xv);
+                }
                 let (key, value) = match &xt {
                     Type::Buffer(inner) => (Type::U32, inner.as_ref()),
                     Type::Map(k, v) => (*k.clone(), v.as_ref()),
@@ -1090,7 +1196,14 @@ fn lower_with_layout(
         }
         emitter.lines.clear();
         emitter.inline_stack.clear();
-        let body = emitter.expr(&f.body, &env, Some(&f.result))?;
+        let body = if ink_core::recursion::recursive(f) {
+            emitter.line("while(true){");
+            emitter.tail(&f.body, &env, f, &env)?;
+            emitter.line("}");
+            "undefined".into()
+        } else {
+            emitter.expr(&f.body, &env, Some(&f.result))?
+        };
         javascript.push_str(&format!(
             "function __fn{i}({}){{\n{}return {body};}}\n",
             if vars.is_empty() {
