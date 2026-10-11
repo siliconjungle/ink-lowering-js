@@ -1,3 +1,4 @@
+// CALLER CONTRACT: arguments must match declared types; malformed data may throw or corrupt state.
 function __tick(ctx){if(--ctx.fuel<0)throw Error('Ink state execution budget exhausted');}
 // Fixed state primitives used by emitted action bodies, without an AST evaluator.
 class __Abort {constructor(value){this.value=value;}}
@@ -32,9 +33,8 @@ function __createState(meta,implementations){
  function invoke(name,args){
   if(rt.busy)throw Error('state operation already in progress');
   const a=actionMap.get(name);if(!a)throw Error(`unknown action ${name}`);
-  if(!Array.isArray(args)||args.length!==a.params.length)(() => {throw Error('argument count mismatch');})();
-  const captured=args.map((v,i)=>__stateInput(v,a.params[i].type,{cells:1000000}));
-  const tables=rt.tables.map(t=>new Map(t)),version=rt.version,outbox=rt.outbox;
+  const captured=a.params.map((p,i)=>__stateInput(args[i],p.type));
+  const tables=a.change?rt.tables.map(t=>new Map(t)):rt.tables,version=rt.version,outbox=rt.outbox;
   rt.busy=true;rt.staged=[];
   try{
    const value=implementations[a.index]({fuel:100000000},rt,...captured);
