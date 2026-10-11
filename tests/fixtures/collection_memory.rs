@@ -35,7 +35,7 @@ fn fixture() -> Program {
             ("alias", format!("let a=make_{t}(xs,z);let b=a;return b;")),
             (
                 "observed",
-                format!("let a=make_{t}(xs,z);let n=count(a);return a.map(fn(x)=>x+k);"),
+                format!("let a=make_{t}(xs,z);let n:u64=count(a);return a.map(fn(x)=>x+k);"),
             ),
             (
                 "shadow",
