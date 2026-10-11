@@ -170,7 +170,9 @@ impl Lower<'_> {
             Term::Binary { op, left, right } => {
                 let a = self.expr(left, env, current, lines, depth + 1)?;
                 let b = self.expr(right, env, current, lines, depth + 1)?;
-                match op.as_str() {
+                if let Some(operator)=op.strip_prefix("f32:") { format!("__fpWord({operator:?},{a},{b})") } else {match op.as_str() {
+                    "quot" | "rem" => format!("({b}===0n?0n:({a} {} {b}))",if op=="quot"{"/"}else{"%"}),
+                    "&" => format!("({a}&{b})"),
                     "+" | "-" | "*" => format!("BigInt.asUintN(64,({a}){op}({b}))"),
                     "==" => format!("__defEqual({a},{b})"),
                     "!=" => format!("!__defEqual({a},{b})"),
@@ -178,7 +180,7 @@ impl Lower<'_> {
                     "||" => format!("Boolean(({a})|({b}))"),
                     "<" | "<=" | ">" | ">=" => format!("(({a}){op}({b}))"),
                     _ => return Err("unsupported definition primitive".into()),
-                }
+                }}
             }
             Term::If {
                 condition,
@@ -264,7 +266,7 @@ pub fn lower(checked: &CheckedDefinition) -> LangResult<Emission> {
     for id in checked.exports() {
         lower.select(checked.choices().get(id).unwrap_or(id))?;
     }
-    let mut source = include_str!("definition.mjs").to_owned();
+    let mut source = include_str!("definition.mjs").to_owned()+include_str!("definition-f32.mjs.txt");
     let mut types = BTreeMap::new();
     for id in lower.selected.clone() {
         match &objects[&id].declaration {
