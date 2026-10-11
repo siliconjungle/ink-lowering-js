@@ -24,6 +24,17 @@ still needs a compiler wrapper to accept newly edited Ink source.
 
 ## Semantics and boundary
 
+State modules retain eligible scalar keeps until a checked table dependency
+changes. Failed actions restore their cached before-images; successful restore
+and host rollback clear caches. Composite values keep their ownership path.
+`state.bind(name, {resultOnly:true})` supplies a synchronous typed entrypoint:
+scalar arguments use native carriers, composite inputs are captured, results own
+their mutable containers, and all committed events remain in the outbox. Normal
+state invocation keeps its existing boundary. Pure representation definitions
+use ordinary shallow calls and a private depth-triggered explicit-stack replay;
+their private constructor carriers are immutable by construction. See the
+distribution's [contract and evidence](https://github.com/siliconjungle/ink-lang/blob/main/docs/signals-state-performance.md).
+
 - `u32` and `i32` wrap at 32 bits. Multiplication uses `Math.imul`.
 - `u64` uses `BigInt` and wraps at 64 bits after each arithmetic operation.
   Native callers supply BigInt, including inside arrays/records. Results are

@@ -88,7 +88,28 @@ function __stateInput(value,type,budget={cells:1000000},depth=0){
   }
 }
 // Mutable host replies must not retain references into compiled state or its outbox.
-function __stateOutput(value,type){return __representation(type,true)(structuredClone(value));}
+// State results must own mutable containers. Compile the declared schema once:
+// scalars need no structured clone, while nested records/lists remain detached.
+function __ownedResult(copy,nested){
+ const owned=(value,context)=>{
+  if(!context&&!nested)return copy(value,null);
+  const memo=context||new WeakMap();
+  if(memo.has(value))return memo.get(value);
+  const result=copy(value,memo);memo.set(value,result);return result;
+ };
+ owned.container=true;return owned;
+}
+function __stateResult(type){
+ switch(type.kind){
+  case 'ref':return __stateResult(__namedTypes[type.name]);
+  case 'record':{const fields=type.fields.map(f=>[f.name,__stateResult(f.type)]);return __ownedResult((value,context)=>Object.fromEntries(fields.map(([name,copy])=>[name,copy(value[name],context)])),fields.some(([,copy])=>copy.container));}
+  case 'list':case 'vector':{const copy=__stateResult(type.element);return __ownedResult((value,context)=>Array.from(value,item=>copy(item,context)),copy.container);}
+  case 'option':{const copy=__stateResult(type.element);return __ownedResult((value,context)=>Object.hasOwn(value,'Some')?{Some:copy(value.Some,context)}:{None:null},copy.container);}
+  case 'result':{const ok=__stateResult(type.ok),err=__stateResult(type.error);return __ownedResult((value,context)=>Object.hasOwn(value,'Ok')?{Ok:ok(value.Ok,context)}:{Err:err(value.Err,context)},ok.container||err.container);}
+  default:return __representation(type,true);
+ }
+}
+function __stateOutput(value,type){return __stateResult(type)(value);}
 // @helper __u64
 const __u64 = n => BigInt.asUintN(64, n);
 // @helper __div
