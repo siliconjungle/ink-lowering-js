@@ -17,41 +17,46 @@ function __keyCompare(a,b,type){
  if(type.kind==='string'){const x=__encoder.encode(a),y=__encoder.encode(b);for(let i=0;i<Math.min(x.length,y.length);i++)if(x[i]!==y[i])return x[i]-y[i];return x.length-y.length;}
  return a<b?-1:a>b?1:0;
 }
+function __rollback(rt,mark){for(let i=rt.undo.length-1;i>=mark;i--){const [index,key,present,value]=rt.undo[i];if(present)rt.tables[index].set(key,value);else rt.tables[index].delete(key);}rt.undo.length=mark;}
 function __table(rt,index,method,args){
  const table=rt.tables[index],key=args[0];
  if(method==='values')return [...table.entries()].sort((a,b)=>__keyCompare(a[0],b[0],rt.meta.roots[index].key)).map(([k,v])=>v);
  if(method==='get')return table.has(key)?{Some:table.get(key)}:{None:null};
  if(method==='contains')return table.has(key);
+ if(method==='remove')rt.undo.push([index,key,table.has(key),table.get(key)]);
  if(method==='remove'){const old=table.has(key)?{Some:table.get(key)}:{None:null};table.delete(key);return old;}
  if(method==='insert'&&table.has(key))throw Error('insert key already present');
  if(method==='replace'&&!table.has(key))throw Error('replace key absent');
- table.set(key,args[1]);return null;
+ rt.undo.push([index,key,table.has(key),table.get(key)]);table.set(key,args[1]);return null;
 }
 function __createState(meta,implementations){
- const rt={meta,tables:meta.roots.map(()=>new Map()),version:0n,outbox:[],staged:[],busy:false};
+ const rt={meta,tables:meta.roots.map(()=>new Map()),version:0n,outbox:[],staged:[],busy:false,undo:[],host:null};
  const actionMap=new Map(meta.actions.map(a=>[a.name,a]));
  function invoke(name,args){
   if(rt.busy)throw Error('state operation already in progress');
   const a=actionMap.get(name);if(!a)throw Error(`unknown action ${name}`);
   const captured=a.params.map((p,i)=>__stateInput(args[i],p.type));
-  const tables=a.change?rt.tables.map(t=>new Map(t)):rt.tables,version=rt.version,outbox=rt.outbox;
+  const mark=rt.undo.length,version=rt.version,outbox=rt.outbox,outboxLength=rt.outbox.length;
   rt.busy=true;rt.staged=[];
   try{
    const value=implementations[a.index]({fuel:100000000},rt,...captured);
    const result=__stateOutput(value,a.result,{cells:1000000});
    if(!a.change)return {result,committed:false,version,events:[]};
-   if(Object.hasOwn(value,'Err')){rt.tables=tables;return {result,committed:false,version,events:[]};}
+   if(Object.hasOwn(value,'Err')){__rollback(rt,mark);return {result,committed:false,version,events:[]};}
    if(version===18446744073709551615n)throw Error('commit sequence exhausted');
    const next=version+1n;
    const events=rt.staged.map(([channel,value],i)=>({commit:next,position:BigInt(i),channel,value:__stateOutput(value,meta.events.find(e=>e.name===channel).type,{cells:1000000})}));
    const pending=rt.staged.map(([channel,value],i)=>({commit:next,position:BigInt(i),channel,value}));
-   rt.version=next;rt.outbox=outbox.concat(pending);
+   rt.version=next;for(const event of pending)rt.outbox.push(event);
    return {result,committed:true,version:next,events};
-  }catch(e){rt.tables=tables;rt.version=version;rt.outbox=outbox;throw e;}
-  finally{rt.staged=[];rt.busy=false;}
+  }catch(e){__rollback(rt,mark);rt.version=version;rt.outbox=outbox;rt.outbox.length=outboxLength;throw e;}
+  finally{rt.staged=[];rt.busy=false;if(!rt.host)rt.undo.length=0;}
  }
  return Object.freeze({
   invoke,invoke_json:invoke,
+  beginTransaction(){if(rt.busy||rt.host||rt.undo.length)throw Error('transaction already in progress');rt.host={version:rt.version,outbox:rt.outbox,length:rt.outbox.length};return true;},
+  commitTransaction(){rt.host=null;rt.undo.length=0;},
+  rollbackTransaction(){if(rt.host){__rollback(rt,0);rt.version=rt.host.version;rt.outbox=rt.host.outbox;rt.outbox.length=rt.host.length;rt.host=null;}},
   get version(){return rt.version;},
   get outbox(){return rt.outbox.map(e=>({...e,value:__stateOutput(e.value,meta.events.find(t=>t.name===e.channel).type,{cells:1000000})}));},
   acknowledgeThrough(commit,position){if(rt.busy)throw Error('state operation already in progress');commit=__stateInput(commit,{kind:'u64'},{cells:1});position=__stateInput(position,{kind:'u64'},{cells:1});rt.outbox=rt.outbox.filter(e=>e.commit>commit||(e.commit===commit&&e.position>position));},
@@ -61,6 +66,6 @@ function __createState(meta,implementations){
    try{const snapshot=await __snapshotEncode(meta,rt);const reply=await __parallelInvokeAsync(name,captured,snapshot);const s=await __snapshotDecode(meta,reply.snapshot);rt.tables=s.tables;rt.version=s.version;rt.outbox=s.outbox;return reply.value;}finally{rt.busy=false;}
   },
   checkpoint(limits){if(rt.busy)throw Error('checkpoint requires transaction boundary');return __snapshotEncode(meta,rt,limits);},
-  async restore(bytes,limits){if(rt.busy)throw Error('restore requires transaction boundary');rt.busy=true;try{const s=await __snapshotDecode(meta,bytes,limits);rt.tables=s.tables;rt.version=s.version;rt.outbox=s.outbox;}finally{rt.busy=false;}},
+  async restore(bytes,limits){if(rt.host)throw Error('restore during transaction');if(rt.busy)throw Error('restore requires transaction boundary');rt.busy=true;try{const s=await __snapshotDecode(meta,bytes,limits);rt.tables=s.tables;rt.version=s.version;rt.outbox=s.outbox;}finally{rt.busy=false;}},
  });
 }
