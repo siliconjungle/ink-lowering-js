@@ -101,3 +101,8 @@ negative tests reject type errors and unsupported capabilities.
 `lower_selected(&CheckedSelection)` retains the original checked snapshot namespace for state instances while the emitted code/manifest identify the selected module. Bare-module emission keeps that module’s own namespace; no arbitrary snapshot identity override is accepted.
 
 Existing i32/f32 and fixed numerical vectors also cross state/action/keep/event boundaries. Scalar float comparisons use IEEE semantics; aggregate action equality compares stored float bits. Numerical checkpoints preserve payloads and signed zero. Arithmetic NaN payloads remain engine dependent.
+
+All targets consume [ink-abi](https://github.com/siliconjungle/ink-abi) for shared
+type/layout contracts. Early termination, owned-buffer transforms and helper
+unfolding are checked database choices. The backend emits the resulting general
+operations literally; it does not infer those transformations from source patterns.

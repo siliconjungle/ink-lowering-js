@@ -12,55 +12,11 @@ mod state;
 type Env = BTreeMap<String, (String, Type)>;
 // Lexical occurrence, not identifier spelling alone: local binders shadow the
 // fold accumulator, while a let initializer still uses its enclosing scope.
-fn references(e: &Expr, name: &str) -> bool {
-    match e {
-        Expr::Var(n) => n == name,
-        Expr::Let(n, _, a, b) => references(a, name) || (n != name && references(b, name)),
-        Expr::Lambda(n, b) => n != name && references(b, name),
-        Expr::Neg(a) | Expr::Field(a, _) | Expr::Try(a) => references(a, name),
-        Expr::Binary(_, a, b) => references(a, name) || references(b, name),
-        Expr::Call(_, a) => a.iter().any(|a| references(a, name)),
-        Expr::Method(a, _, b) => references(a, name) || b.iter().any(|b| references(b, name)),
-        Expr::Record(_, fs) => fs.iter().any(|(_, e)| references(e, name)),
-        Expr::Num(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) | Expr::Unit => false,
-    }
-}
-fn replacement_tree(e: &Expr, acc: &str) -> bool {
-    match e {
-        Expr::Call(n, a) if n == "choose" && a.len() == 3 => {
-            !references(&a[0], acc) && replacement_tree(&a[1], acc) && replacement_tree(&a[2], acc)
-        }
-        Expr::Var(n) if n == acc => true,
-        _ => !references(e, acc),
-    }
-}
 fn quote(s: &str) -> String {
     serde_json::to_string(s).unwrap()
 }
-fn descriptor(t: &Type, p: &Program, seen: &mut BTreeSet<String>) -> LangResult<Value> {
-    Ok(match t {
-        Type::U32 => json!({"kind":"u32"}), Type::U64 => json!({"kind":"u64"}),
-        Type::I32 => json!({"kind":"i32"}), Type::F32 => json!({"kind":"f32"}),
-        Type::Bool => json!({"kind":"bool"}),
-        Type::Unit => json!({"kind":"unit"}), Type::String => json!({"kind":"string"}), Type::Int => json!({"kind":"int"}),
-        Type::Option(t) => json!({"kind":"option","element":descriptor(t,p,seen)?}),
-        Type::Result(a,b) => json!({"kind":"result","ok":descriptor(a,p,seen)?,"error":descriptor(b,p,seen)?}),
-        Type::Buffer(_) | Type::Map(..) => json!({"kind":"temporary"}),
-        Type::List(t) => json!({"kind":"list","element":descriptor(t,p,seen)?}),
-        Type::Vector(t,n) => json!({"kind":"vector","size":n,"element":descriptor(t,p,seen)?}),
-        Type::Named(n) if p.ids.contains(n) => json!({"kind":"id","name":n}),
-        Type::Named(n) if n == "ArithmeticError" => json!({"kind":"enum","name":n,"variants":["ArithmeticError.Overflow"]}),
-        Type::Named(n) if p.enums.contains_key(n) => json!({"kind":"enum","name":n,"variants":p.enums[n].iter().map(|v|format!("{n}.{v}")).collect::<Vec<_>>()}),
-        Type::Named(n) => {
-            if !seen.insert(n.clone()) { return Ok(json!({"kind":"ref","name":n})); }
-            let fs=p.records.get(n).ok_or("JavaScript lowering requires a record definition")?;
-            let fields=fs.iter().map(|(name,t)|Ok(json!({"name":name,"type":descriptor(t,p,seen)?})))
-                .collect::<LangResult<Vec<_>>>()?;
-            seen.remove(n);
-            json!({"kind":"record","name":n,"fields":fields})
-        }
-        _ => return Err(format!("JavaScript lowering does not support {t:?}; supports pure numeric, Bool, vector, record and list values")),
-    })
+fn descriptor(t: &Type, p: &Program, _seen: &mut BTreeSet<String>) -> LangResult<Value> {
+    ink_abi::describe(t, &p.records, &p.enums, &p.ids)
 }
 fn arithmetic(op: &str, a: &str, b: &str, t: &Type) -> String {
     match t {
@@ -92,45 +48,12 @@ fn zero(t: &Type) -> &'static str {
     }
 }
 
-// Target operational refinement only: expose bounded known pure bodies to the
-// target optimizer. This is not an algebraic rewrite or a callback whitelist.
-const INLINE_MAX_BODY_NODES: usize = 2048;
-const INLINE_MAX_DEPTH: usize = 8;
-const INLINE_NODE_BUDGET: usize = 16_384;
-fn inline_body_nodes(e: &Expr) -> Option<usize> {
-    let mut pending = vec![e];
-    let mut count = 0;
-    while let Some(e) = pending.pop() {
-        count += 1;
-        if count > INLINE_MAX_BODY_NODES {
-            return None;
-        }
-        match e {
-            Expr::Let(_, _, a, b) | Expr::Binary(_, a, b) => {
-                pending.push(a);
-                pending.push(b);
-            }
-            Expr::Lambda(_, b) | Expr::Neg(b) | Expr::Field(b, _) | Expr::Try(b) => pending.push(b),
-            Expr::Call(_, a) => pending.extend(a),
-            Expr::Method(a, _, b) => {
-                pending.push(a);
-                pending.extend(b);
-            }
-            Expr::Record(_, fields) => pending.extend(fields.iter().map(|(_, e)| e)),
-            _ => {}
-        }
-    }
-    Some(count)
-}
-
 struct Emitter<'a> {
     p: &'a Program,
     next: usize,
     budget: usize,
     depth: usize,
     lines: String,
-    inline_stack: Vec<String>,
-    inline_remaining: usize,
 }
 impl Emitter<'_> {
     fn fresh(&mut self) -> String {
@@ -156,48 +79,6 @@ impl Emitter<'_> {
         check::infer_context(e, &Self::types(env), self.p, want)
     }
 
-    fn inline_call(&mut self, f: &Function, values: &[String]) -> Option<String> {
-        let nodes = inline_body_nodes(&f.body)?;
-        if self.inline_stack.len() >= INLINE_MAX_DEPTH
-            || self.inline_stack.contains(&f.name)
-            || nodes > self.inline_remaining
-        {
-            return None;
-        }
-        let local: Env = f
-            .params
-            .iter()
-            .zip(values)
-            .map(|((name, ty), value)| (name.clone(), (value.clone(), ty.clone())))
-            .collect();
-        let saved = (
-            self.lines.len(),
-            self.next,
-            self.budget,
-            self.inline_remaining,
-        );
-        self.inline_remaining -= nodes;
-        self.inline_stack.push(f.name.clone());
-        self.line(format!("/* inline {} */", f.name));
-        let result = self.expr(&f.body, &local, Some(&f.result));
-        self.inline_stack.pop();
-        match result {
-            Ok(value) => {
-                // The original source-emission budget counts each definition
-                // once; duplicated body work has its own bounded inline budget.
-                self.budget = saved.2;
-                Some(value)
-            }
-            Err(_) => {
-                self.lines.truncate(saved.0);
-                self.next = saved.1;
-                self.budget = saved.2;
-                self.inline_remaining = saved.3;
-                None
-            }
-        }
-    }
-
     // Bind callback arguments into a lexical environment at compile time. The
     // target loop executes the checked body directly, not a callback closure.
     fn callback<'a>(
@@ -215,31 +96,6 @@ impl Emitter<'_> {
             body = rest;
         }
         Ok((body, local))
-    }
-    fn replacement_step(
-        &mut self,
-        e: &Expr,
-        acc: &str,
-        out: &str,
-        env: &Env,
-        t: &Type,
-    ) -> LangResult<()> {
-        match e {
-            Expr::Call(n, a) if n == "choose" && a.len() == 3 => {
-                let c = self.expr(&a[0], env, Some(&Type::Bool))?;
-                self.line(format!("if({c}){{"));
-                self.replacement_step(&a[1], acc, out, env, t)?;
-                self.line("}else{");
-                self.replacement_step(&a[2], acc, out, env, t)?;
-                self.line("}");
-            }
-            Expr::Var(n) if n == acc => {}
-            _ => {
-                let value = self.expr(e, env, Some(t))?;
-                self.line(format!("{out}={value};break;"));
-            }
-        }
-        Ok(())
     }
     fn destination_store(&mut self, destination: &str, index: &str, value: &str, conversion: &str) {
         let value = if conversion.is_empty() {
@@ -320,20 +176,9 @@ impl Emitter<'_> {
                 let Type::List(inner) = self.infer(receiver, env, context)? else {
                     return Err("list receiver required".into());
                 };
-                let reuse = conversion.is_empty()
-                    && ink_core::collection_facts::reusable_receiver(
-                        self.p,
-                        e,
-                        &Self::types(env),
-                        Some(ty),
-                    );
-                let (xs, logical_len) = if reuse {
-                    let len = self.list_into(receiver, env, ty, destination, conversion)?;
-                    (destination.to_owned(), Some(len))
-                } else {
-                    let xs = self.expr(receiver, env, context)?;
-                    (self.bind(&xs), None)
-                };
+                let value = self.expr(receiver, env, context)?;
+                let xs = self.bind(&value);
+                let logical_len: Option<String> = None;
                 if method == "concat" {
                     let ys = self.expr(&args[0], env, Some(ty))?;
                     let ys = self.bind(&ys);
@@ -453,15 +298,13 @@ impl Emitter<'_> {
     // stack/resource contract even when a program never uses storage reuse.
     fn collection_expr(
         &mut self,
-        e: &Expr,
+        _e: &Expr,
         xs: &Expr,
         method: &String,
         args: &[Expr],
         env: &Env,
         t: &Type,
     ) -> LangResult<String> {
-        let reuse =
-            ink_core::collection_facts::reusable_receiver(self.p, e, &Self::types(env), Some(t));
         let context = if method == "filter" || method == "concat" {
             Some(t)
         } else {
@@ -511,11 +354,7 @@ impl Emitter<'_> {
             }
             "scan" => {
                 let len = self.bind(&format!("{xs}.length"));
-                let out = self.bind(&if reuse {
-                    xs.clone()
-                } else {
-                    format!("new Array({len})")
-                });
+                let out = self.bind(&format!("new Array({len})"));
                 let acc = self.fresh();
                 self.line(format!("let {acc}={};", zero(&inner)));
                 let i = self.fresh();
@@ -544,9 +383,7 @@ impl Emitter<'_> {
                 } else {
                     self.bind(&format!("{xs}.length"))
                 };
-                let out = self.bind(&if reuse {
-                    xs.clone()
-                } else if method == "filter" {
+                let out = self.bind(&if method == "filter" {
                     "[]".into()
                 } else {
                     format!("new Array({len})")
@@ -634,9 +471,7 @@ impl Emitter<'_> {
     }
     fn expr(&mut self, e: &Expr, env: &Env, want: Option<&Type>) -> LangResult<String> {
         // Target resource bound, matching C's scalar emission guard. A known
-        // helper expansion crossing this bound is rolled back by inline_call
-        // and emitted as an ordinary call; recursive typing never keeps growing
-        // beneath an already deep emitter stack.
+        // expression nesting cannot exceed the bounded emitter stack.
         if self.depth >= 48 {
             return Err("JavaScript expression emission depth budget exceeded".into());
         }
@@ -886,6 +721,51 @@ impl Emitter<'_> {
                 let xt = self.infer(x, env, None)?;
                 let xv = self.expr(x, env, None)?;
                 let xv = self.bind(&xv);
+                if n == "filter" {
+                    let Type::Buffer(inner) = &xt else {
+                        unreachable!()
+                    };
+                    let i = self.fresh();
+                    let kept = self.fresh();
+                    self.line(format!(
+                        "let {kept}=0;for(let {i}=0;{i}<{xv}.length;{i}++){{"
+                    ));
+                    let element = self.bind(&format!("__tempCopy({xv}[{i}])"));
+                    let (body, local) =
+                        Self::callback(&args[0], env, &[(element.clone(), *inner.clone())])?;
+                    let pred = self.expr(body, &local, Some(&Type::Bool))?;
+                    self.line(format!(
+                        "if({pred}){{{xv}[{kept}++]={element};}}}}{xv}.length={kept};"
+                    ));
+                    return Ok(xv);
+                }
+                if ["map", "map_indexed", "scan"].contains(&n.as_str()) {
+                    let Type::Buffer(inner) = &xt else {
+                        unreachable!()
+                    };
+                    let i = self.fresh();
+                    let acc = self.fresh();
+                    if n == "scan" {
+                        self.line(format!("let {acc}={};", zero(inner)));
+                    }
+                    self.line(format!("for(let {i}=0;{i}<{xv}.length;{i}++){{"));
+                    let element = self.bind(&format!("__tempCopy({xv}[{i}])"));
+                    let value = if n == "scan" {
+                        let add = arithmetic("+", &acc, &element, inner);
+                        self.line(format!("{acc}={add};"));
+                        acc
+                    } else {
+                        let params = if n == "map" {
+                            vec![(element, *inner.clone())]
+                        } else {
+                            vec![(format!("({i}>>>0)"), Type::U32), (element, *inner.clone())]
+                        };
+                        let (body, local) = Self::callback(&args[0], env, &params)?;
+                        self.expr(body, &local, Some(inner))?
+                    };
+                    self.line(format!("{xv}[{i}]={value};}}"));
+                    return Ok(xv);
+                }
                 if n == "map_parallel" {
                     let Type::Buffer(inner) = &xt else {
                         unreachable!()
@@ -995,7 +875,7 @@ impl Emitter<'_> {
                 self.line(format!("{out}={value};}}"));
                 out
             }
-            Expr::Call(n, args) if n == "foldr" => {
+            Expr::Call(n, args) if n == "foldr" || n == "fold_until" => {
                 let Type::List(inner) = self.infer(&args[0], env, None)? else {
                     unreachable!()
                 };
@@ -1003,32 +883,28 @@ impl Emitter<'_> {
                 let xs = self.bind(&xs);
                 let initial = self.expr(&args[1], env, Some(&t))?;
                 let out = self.fresh();
-                self.line(format!("let {out}={initial};"));
                 let index = self.fresh();
-                let forward = matches!(t, Type::U32 | Type::I32 | Type::U64 | Type::F32)
-                    && matches!(&args[2], Expr::Lambda(item, rest) if matches!(rest.as_ref(), Expr::Lambda(acc, body) if item!=acc && matches!(body.as_ref(), Expr::Call(n,a) if n=="choose"&&a.len()==3) && replacement_tree(body,acc)));
-                self.line(if forward {
+                self.line(format!("let {out}={initial};"));
+                self.line(if n == "fold_until" {
                     format!("for(let {index}=0;{index}<{xs}.length;{index}++){{")
                 } else {
                     format!("for(let {index}={xs}.length-1;{index}>=0;{index}--){{")
                 });
                 let element = self.bind(&format!("{xs}[{index}]"));
-                let (body, local) = Self::callback(
-                    &args[2],
-                    env,
-                    &[(element, *inner), (out.clone(), t.clone())],
-                )?;
-                if forward {
-                    let Expr::Lambda(_, rest) = &args[2] else {
-                        unreachable!()
-                    };
-                    let Expr::Lambda(acc, _) = rest.as_ref() else {
-                        unreachable!()
-                    };
-                    self.replacement_step(body, acc, &out, &local, &t)?;
+                let values = [(element, *inner), (out.clone(), t.clone())];
+                let stop = if n == "fold_until" {
+                    let (body, local) = Self::callback(&args[2], env, &values)?;
+                    let condition = self.expr(body, &local, Some(&Type::Bool))?;
+                    Some(self.bind(&condition))
                 } else {
-                    let value = self.expr(body, &local, Some(&t))?;
-                    self.line(format!("{out}={value};"));
+                    None
+                };
+                let (body, local) =
+                    Self::callback(&args[if n == "fold_until" { 3 } else { 2 }], env, &values)?;
+                let value = self.expr(body, &local, Some(&t))?;
+                self.line(format!("{out}={value};"));
+                if let Some(flag) = stop {
+                    self.line(format!("if({flag})break;"));
                 }
                 self.line("}");
                 out
@@ -1102,8 +978,7 @@ impl Emitter<'_> {
                     let value = self.expr(expr, env, Some(ty))?;
                     values.push(self.bind(&value));
                 }
-                self.inline_call(&f, &values)
-                    .unwrap_or_else(|| format!("__fn{index}({})", values.join(",")))
+                Ok::<_, String>(format!("__fn{index}({})", values.join(",")))?
             }
             Expr::Method(xs, method, args)
                 if matches!(
@@ -1175,8 +1050,6 @@ fn lower_with_layout(
         budget: 200_000,
         depth: 0,
         lines: String::new(),
-        inline_stack: Vec::new(),
-        inline_remaining: INLINE_NODE_BUDGET,
     };
     let mut javascript = String::new();
     let mut functions = vec![];
@@ -1195,7 +1068,6 @@ fn lower_with_layout(
             vars.push(v);
         }
         emitter.lines.clear();
-        emitter.inline_stack.clear();
         let body = if ink_core::recursion::recursive(f) {
             emitter.line("while(true){");
             emitter.tail(&f.body, &env, f, &env)?;
@@ -1223,7 +1095,6 @@ fn lower_with_layout(
     // A separate budget ensures adding the destination capability does not
     // change the ordinary entrypoints' bounded inlining decisions.
     emitter.budget = 200_000;
-    emitter.inline_remaining = INLINE_NODE_BUDGET;
     for (i, f) in p.functions.iter().enumerate() {
         if !matches!(f.result, Type::List(_)) {
             continue;
@@ -1238,7 +1109,6 @@ fn lower_with_layout(
         let destination = emitter.fresh();
         vars.push(destination.clone());
         emitter.lines.clear();
-        emitter.inline_stack.clear();
         let conversion = if functions[i]["result"]["element"]
             .to_string()
             .contains("\"kind\":\"f32\"")
