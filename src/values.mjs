@@ -27,6 +27,7 @@ function __representation(type, output) {
     default: return __identity;
   }
 }
+// @helper state-validation
 function __stateInput(value,type,budget={cells:1000000},depth=0){
   if(depth>64||--budget.cells<0)throw Error('state input resource limit');
   const input=(v,t)=>__stateInput(v,t,budget,depth+1);

@@ -353,9 +353,7 @@ impl Emitter<'_> {
             }
         }
     }
-    // Keep collection-specific storage analysis off the recursive scalar
-    // emitter's stack frame; bounded scalar helper expansion keeps its original
-    // stack/resource contract even when a program never uses storage reuse.
+    // Keep collection emission off the recursive scalar emitter's stack frame.
     fn collection_expr(
         &mut self,
         _e: &Expr,
@@ -1185,7 +1183,9 @@ fn lower_with_layout(
     let mut helpers = String::new();
     for section in include_str!("values.mjs").split("// @helper ").skip(1) {
         let (name, source) = section.split_once('\n').unwrap();
-        let used = if name == "representation" {
+        let used = if name == "state-validation" {
+            !p.actions.is_empty() || !p.states.is_empty() || !p.keeps.is_empty()
+        } else if name == "representation" {
             needs_conversion
                 || !p.actions.is_empty()
                 || !p.states.is_empty()
