@@ -5,5 +5,5 @@ function __fpWord(op,a,b){
  const x=__fpNumber(a),y=__fpNumber(b);
  switch(op){case '==':return x===y;case '!=':return x!==y;case '<':return x<y;case '<=':return x<=y;case '>':return x>y;case '>=':return x>=y;}
  const value=op==='+'?x+y:op==='-'?x-y:op==='*'?x*y:undefined;
- if(value===undefined)throw Error('binary32 operator');__fpView.setFloat32(0,value,true);return BigInt(__fpView.getUint32(0,true));
+ if(value===undefined)throw Error('binary32 operator');if(Number.isNaN(value))return 2143289344n;__fpView.setFloat32(0,value,true);return BigInt(__fpView.getUint32(0,true));
 }
