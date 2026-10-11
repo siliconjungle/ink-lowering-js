@@ -63,9 +63,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ink-abi"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ink-core"
 version = "0.1.0"
-source = "git+https://github.com/siliconjungle/ink-lang?rev=7d9fa45364d369d55d744cde7ddfc9b6077f60d2#7d9fa45364d369d55d744cde7ddfc9b6077f60d2"
 dependencies = [
  "num-bigint",
  "num-traits",
@@ -78,6 +85,7 @@ dependencies = [
 name = "ink-lowering-js"
 version = "0.1.0"
 dependencies = [
+ "ink-abi",
  "ink-core",
  "serde_json",
  "sha2",
@@ -236,3 +244,23 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[patch.unused]]
+name = "ink-lowering-wasm"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "ink-lowering-c"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "ink-native-support"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "ink-lowering-gpu"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "ink-lowering-rust"
+version = "0.1.0"
