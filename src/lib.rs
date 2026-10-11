@@ -27,15 +27,6 @@ fn references(e: &Expr, name: &str) -> bool {
         Expr::Num(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) | Expr::Unit => false,
     }
 }
-fn replacement_tree(e: &Expr, acc: &str) -> bool {
-    match e {
-        Expr::Call(n, a) if n == "choose" && a.len() == 3 => {
-            !references(&a[0], acc) && replacement_tree(&a[1], acc) && replacement_tree(&a[2], acc)
-        }
-        Expr::Var(n) if n == acc => true,
-        _ => !references(e, acc),
-    }
-}
 fn quote(s: &str) -> String {
     serde_json::to_string(s).unwrap()
 }
@@ -286,31 +277,6 @@ impl Emitter<'_> {
         }
         Ok((body, local))
     }
-    fn replacement_step(
-        &mut self,
-        e: &Expr,
-        acc: &str,
-        out: &str,
-        env: &Env,
-        t: &Type,
-    ) -> LangResult<()> {
-        match e {
-            Expr::Call(n, a) if n == "choose" && a.len() == 3 => {
-                let c = self.expr(&a[0], env, Some(&Type::Bool))?;
-                self.line(format!("if({c}){{"));
-                self.replacement_step(&a[1], acc, out, env, t)?;
-                self.line("}else{");
-                self.replacement_step(&a[2], acc, out, env, t)?;
-                self.line("}");
-            }
-            Expr::Var(n) if n == acc => {}
-            _ => {
-                let value = self.expr(e, env, Some(t))?;
-                self.line(format!("{out}={value};break;"));
-            }
-        }
-        Ok(())
-    }
     fn destination_store(&mut self, destination: &str, index: &str, value: &str, conversion: &str) {
         let value = if conversion.is_empty() {
             value.to_owned()
@@ -533,8 +499,12 @@ impl Emitter<'_> {
         env: &Env,
         t: &Type,
     ) -> LangResult<String> {
-        let reuse =
-            ink_core::collection_facts::reusable_private_receiver(self.p, e, &Self::types(env), Some(t));
+        let reuse = ink_core::collection_facts::reusable_private_receiver(
+            self.p,
+            e,
+            &Self::types(env),
+            Some(t),
+        );
         let context = if method == "filter" || method == "concat" {
             Some(t)
         } else {
@@ -790,7 +760,7 @@ impl Emitter<'_> {
                 }
                 format!("({{{}}})", values.join(","))
             }
-            Expr::Field(a, n) if matches!(a.as_ref(),Expr::Var(root) if self.p.enums.contains_key(root)||root=="ArithmeticError") =>
+            Expr::Field(a, n) if matches!(a.as_ref(),Expr::Var(root) if !env.contains_key(root) && (self.p.enums.contains_key(root)||root=="ArithmeticError")) =>
             {
                 let Expr::Var(root) = a.as_ref() else {
                     unreachable!()
@@ -814,7 +784,7 @@ impl Emitter<'_> {
             }
             Expr::Binary(op, a, b) => {
                 let ts = Self::types(env);
-                let context = if check::is_number(&t) {
+                let context = if check::is_numeric_value(&t) {
                     Some(t.clone())
                 } else {
                     check::hint(a, &ts, self.p).or_else(|| check::hint(b, &ts, self.p))
@@ -836,6 +806,8 @@ impl Emitter<'_> {
                 let bv = self.bind(&bv);
                 if ["+", "-", "*"].contains(&op.as_str()) {
                     arithmetic(op, &av, &bv, &at)
+                } else if (op == "==" || op == "!=") && at != Type::F32 {
+                    format!("{}__equal({av},{bv})", if op == "!=" { "!" } else { "" })
                 } else {
                     let (av, bv) = if at == Type::F32 {
                         (format!("__float({av})"), format!("__float({bv})"))
@@ -1059,7 +1031,7 @@ impl Emitter<'_> {
                 self.line(format!("{out}={value};}}"));
                 out
             }
-            Expr::Call(n, args) if n == "foldr" => {
+            Expr::Call(n, args) if n == "foldr" || n == "foldl" => {
                 let Type::List(inner) = self.infer(&args[0], env, None)? else {
                     unreachable!()
                 };
@@ -1069,12 +1041,10 @@ impl Emitter<'_> {
                 let out = self.fresh();
                 self.line(format!("let {out}={initial};"));
                 let index = self.fresh();
-                let forward = matches!(t, Type::U32 | Type::I32 | Type::U64 | Type::F32)
-                    && matches!(&args[2], Expr::Lambda(item, rest) if matches!(rest.as_ref(), Expr::Lambda(acc, body) if item!=acc && matches!(body.as_ref(), Expr::Call(n,a) if n=="choose"&&a.len()==3) && replacement_tree(body,acc)));
-                self.line(if forward {
-                    format!("for(let {index}=0;{index}<{xs}.length;{index}++){{")
-                } else {
+                self.line(if n == "foldr" {
                     format!("for(let {index}={xs}.length-1;{index}>=0;{index}--){{")
+                } else {
+                    format!("for(let {index}=0;{index}<{xs}.length;{index}++){{")
                 });
                 let element = self.bind(&format!("{xs}[{index}]"));
                 let (body, local) = Self::callback(
@@ -1082,18 +1052,8 @@ impl Emitter<'_> {
                     env,
                     &[(element, *inner), (out.clone(), t.clone())],
                 )?;
-                if forward {
-                    let Expr::Lambda(_, rest) = &args[2] else {
-                        unreachable!()
-                    };
-                    let Expr::Lambda(acc, _) = rest.as_ref() else {
-                        unreachable!()
-                    };
-                    self.replacement_step(body, acc, &out, &local, &t)?;
-                } else {
-                    let value = self.expr(body, &local, Some(&t))?;
-                    self.line(format!("{out}={value};"));
-                }
+                let value = self.expr(body, &local, Some(&t))?;
+                self.line(format!("{out}={value};"));
                 self.line("}");
                 out
             }
@@ -1119,6 +1079,36 @@ impl Emitter<'_> {
                     out
                 }
             }
+            Expr::Call(n, args) if n == "list" => {
+                let Type::List(inner) = &t else {
+                    return Err("list type".into());
+                };
+                let mut values = Vec::new();
+                for e in args {
+                    let value = self.expr(e, env, Some(inner))?;
+                    values.push(self.bind(&value));
+                }
+                format!("[{}]", values.join(","))
+            }
+            Expr::Call(n, args) if ink_core::word::primitive(n) => {
+                let ts = ink_core::word::arguments(n, &t);
+                let mut vals = vec![];
+                for (a, t) in args.iter().zip(ts) {
+                    let v = self.expr(a, env, Some(&t))?;
+                    vals.push(self.bind(&v));
+                }
+                format!(
+                    "__word({},{},{},{})",
+                    quote(n),
+                    vals[0],
+                    vals.get(1).map(String::as_str).unwrap_or("0"),
+                    match t {
+                        Type::I32 => -32,
+                        Type::U32 => 32,
+                        _ => 64,
+                    }
+                )
+            }
             Expr::Call(n, args) if ["Some", "Ok", "Err"].contains(&n.as_str()) => {
                 let inner = match (&t, n.as_str()) {
                     (Type::Option(a), "Some") | (Type::Result(a, _), "Ok") => a.as_ref(),
@@ -1135,7 +1125,10 @@ impl Emitter<'_> {
             Expr::Call(n, args)
                 if ["checked_add", "checked_sub", "checked_mul"].contains(&n.as_str()) =>
             {
-                let at = self.infer(&args[0], env, None)?;
+                let Type::Result(at, _) = &t else {
+                    return Err("checked arithmetic type".into());
+                };
+                let at = *at.clone();
                 let a = self.expr(&args[0], env, Some(&at))?;
                 let a = self.bind(&a);
                 let b = self.expr(&args[1], env, Some(&at))?;
@@ -1178,6 +1171,31 @@ impl Emitter<'_> {
                 let xt = self.infer(xs, env, None)?;
                 let value = self.expr(xs, env, None)?;
                 let value = self.bind(&value);
+                if method == "fold" {
+                    let (a, b, tag_a, tag_b) = match &xt {
+                        Type::Option(a) => (a.as_ref().clone(), Type::Unit, "Some", "None"),
+                        Type::Result(a, b) => (a.as_ref().clone(), b.as_ref().clone(), "Ok", "Err"),
+                        _ => unreachable!(),
+                    };
+                    let out = self.fresh();
+                    self.line(format!(
+                        "let {out};if(Object.hasOwn({value},{})){{",
+                        quote(tag_a)
+                    ));
+                    let item = self.bind(&format!("{value}[{}]", quote(tag_a)));
+                    let (body, local) = Self::callback(&args[0], env, &[(item, a)])?;
+                    let body = self.expr(body, &local, Some(&t))?;
+                    self.line(format!("{out}={body};}}else{{"));
+                    let item = self.bind(&if tag_b == "None" {
+                        "null".into()
+                    } else {
+                        format!("{value}[{}]", quote(tag_b))
+                    });
+                    let (body, local) = Self::callback(&args[1], env, &[(item, b)])?;
+                    let body = self.expr(body, &local, Some(&t))?;
+                    self.line(format!("{out}={body};}}"));
+                    return Ok(out);
+                }
                 let (tag, inner) = match (&xt, method.as_str()) {
                     (Type::Option(a), _) => ("Some", a.as_ref()),
                     (Type::Result(a, _), "map") => ("Ok", a.as_ref()),
@@ -1389,6 +1407,9 @@ fn lower_with_layout(
             .unwrap()
             .1;
         helpers.push_str(pure);
+    }
+    if has_state || javascript.contains("__word(") {
+        helpers.push_str(include_str!("word.mjs"));
     }
     javascript = helpers + &javascript;
     let named = p
