@@ -9,6 +9,8 @@ pub struct Emission {
     pub manifest: Value,
 }
 mod state;
+pub mod definition;
+pub mod representation;
 type Env = BTreeMap<String, (String, Type)>;
 // Lexical occurrence, not identifier spelling alone: local binders shadow the
 // fold accumulator, while a let initializer still uses its enclosing scope.
@@ -1385,3 +1387,9 @@ export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.f
         manifest,
     })
 }
+
+mod definition_literal;
+pub mod representation_program;
+
+/// Compile-time read-only observation projection.
+pub mod representation_query;

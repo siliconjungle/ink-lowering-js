@@ -101,3 +101,10 @@ negative tests reject type errors and unsupported capabilities.
 `lower_selected(&CheckedSelection)` retains the original checked snapshot namespace for state instances while the emitted code/manifest identify the selected module. Bare-module emission keeps that module’s own namespace; no arbitrary snapshot identity override is accepted.
 
 Existing i32/f32 and fixed numerical vectors also cross state/action/keep/event boundaries. Scalar float comparisons use IEEE semantics; aggregate action equality compares stored float bits. Numerical checkpoints preserve payloads and signed zero. Arithmetic NaN payloads remain engine dependent.
+
+Standalone proof-selected representations use the compile-time checked witness
+and emit literal functions with native state retained between calls. Generated
+applications carry no proof package, checker context, source AST or Ink runtime
+dependency. See ink-lang/docs/database-representations.md and the shared
+`representation_parity` conformance gate. Recursive GPU state uses the complete
+host lane; device eligibility remains separate.
