@@ -1,3 +1,4 @@
+function __tick(ctx){if(--ctx.fuel<0)throw Error('Ink state execution budget exhausted');}
 // Fixed state primitives used by emitted action bodies, without an AST evaluator.
 class __Abort {constructor(value){this.value=value;}}
 function __try(value){if(Object.hasOwn(value,'Err'))throw new __Abort(value.Err);return value.Ok;}
@@ -31,18 +32,18 @@ function __createState(meta,implementations){
  function invoke(name,args){
   if(rt.busy)throw Error('state operation already in progress');
   const a=actionMap.get(name);if(!a)throw Error(`unknown action ${name}`);
-  if(!Array.isArray(args)||args.length!==a.params.length)__fail('argument count mismatch');
-  const captured=args.map((v,i)=>__in(v,a.params[i].type,{cells:1000000}));
+  if(!Array.isArray(args)||args.length!==a.params.length)(() => {throw Error('argument count mismatch');})();
+  const captured=args.map((v,i)=>__stateInput(v,a.params[i].type,{cells:1000000}));
   const tables=rt.tables.map(t=>new Map(t)),version=rt.version,outbox=rt.outbox;
   rt.busy=true;rt.staged=[];
   try{
    const value=implementations[a.index]({fuel:100000000},rt,...captured);
-   const result=__out(value,a.result,{cells:1000000});
+   const result=__stateOutput(value,a.result,{cells:1000000});
    if(!a.change)return {result,committed:false,version,events:[]};
    if(Object.hasOwn(value,'Err')){rt.tables=tables;return {result,committed:false,version,events:[]};}
    if(version===18446744073709551615n)throw Error('commit sequence exhausted');
    const next=version+1n;
-   const events=rt.staged.map(([channel,value],i)=>({commit:next,position:BigInt(i),channel,value:__out(value,meta.events.find(e=>e.name===channel).type,{cells:1000000})}));
+   const events=rt.staged.map(([channel,value],i)=>({commit:next,position:BigInt(i),channel,value:__stateOutput(value,meta.events.find(e=>e.name===channel).type,{cells:1000000})}));
    const pending=rt.staged.map(([channel,value],i)=>({commit:next,position:BigInt(i),channel,value}));
    rt.version=next;rt.outbox=outbox.concat(pending);
    return {result,committed:true,version:next,events};
@@ -52,8 +53,8 @@ function __createState(meta,implementations){
  return Object.freeze({
   invoke,invoke_json:invoke,
   get version(){return rt.version;},
-  get outbox(){return rt.outbox.map(e=>({...e,value:__out(e.value,meta.events.find(t=>t.name===e.channel).type,{cells:1000000})}));},
-  acknowledgeThrough(commit,position){if(rt.busy)throw Error('state operation already in progress');commit=__in(commit,{kind:'u64'},{cells:1});position=__in(position,{kind:'u64'},{cells:1});rt.outbox=rt.outbox.filter(e=>e.commit>commit||(e.commit===commit&&e.position>position));},
+  get outbox(){return rt.outbox.map(e=>({...e,value:__stateOutput(e.value,meta.events.find(t=>t.name===e.channel).type,{cells:1000000})}));},
+  acknowledgeThrough(commit,position){if(rt.busy)throw Error('state operation already in progress');commit=__stateInput(commit,{kind:'u64'},{cells:1});position=__stateInput(position,{kind:'u64'},{cells:1});rt.outbox=rt.outbox.filter(e=>e.commit>commit||(e.commit===commit&&e.position>position));},
   checkpoint(limits){if(rt.busy)throw Error('checkpoint requires transaction boundary');return __snapshotEncode(meta,rt,limits);},
   async restore(bytes,limits){if(rt.busy)throw Error('restore requires transaction boundary');rt.busy=true;try{const s=await __snapshotDecode(meta,bytes,limits);rt.tables=s.tables;rt.version=s.version;rt.outbox=s.outbox;}finally{rt.busy=false;}},
  });

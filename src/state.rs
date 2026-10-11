@@ -225,7 +225,7 @@ impl StateEmitter<'_> {
                     if isaction {
                         format!("__nested(__action{index}(ctx,rt{argv}),{change})")
                     } else {
-                        format!("__fn{index}(ctx{argv})")
+                        format!("__fn{index}({})", values.join(","))
                     }
                 }
             },

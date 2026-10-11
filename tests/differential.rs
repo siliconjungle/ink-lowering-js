@@ -23,7 +23,7 @@ fn wire(v: Value, t: &Type, p: &ink_core::syntax::Program) -> Value {
     }
 }
 #[test]
-fn generated_javascript_matches_reference_and_rejects_invalid_inputs() {
+fn generated_javascript_matches_reference_for_trusted_native_inputs() {
     let source = format!(
         "{}\n{}",
         include_str!("../examples/particles.ink"),
@@ -39,6 +39,23 @@ fn wide_div(x:u64,y:u64)->u64{return quot_or(x,y,99);}
 fn wide_rem(x:u64,y:u64)->u64{return rem_or(x,y,99);}
 fn narrow_div(x:u32,y:u32)->u32{return quot_or(x,y,99);}
 fn count_flags(xs:List<Bool>)->u64{return count(xs);}
+fn identity_words(xs:List<u32>)->List<u32>{return xs;}
+fn typed_flags(xs:List<u32>)->List<Bool>{return xs.map(fn(x)=>x>0);}
+fn typed_wide(xs:List<u32>)->List<u64>{return xs.map(fn(x)=>count_flags(xs.map(fn(y)=>y==x)));}
+fn typed_index(xs:List<u32>)->List<Bool>{return xs.map_indexed(fn(i)=>fn(x)=>i==x);}
+fn float_flags(xs:List<f32>)->List<Bool>{return xs.map(fn(x)=>x>0.0);}
+fn float_pass(xs:List<f32>)->List<f32>{return xs;}
+fn join_words(xs:List<u32>,ys:List<u32>)->List<u32>{return xs.concat(ys);}
+fn join_context(xs:List<u32>,ys:List<u32>)->List<u32>{return xs.map(fn(x)=>0).concat(ys);}
+fn join_signed(xs:List<i32>,ys:List<i32>)->List<i32>{return xs.concat(ys);}
+fn join_wide(xs:List<u64>,ys:List<u64>)->List<u64>{return xs.concat(ys);}
+fn join_flags(xs:List<Bool>,ys:List<Bool>)->List<Bool>{return xs.concat(ys);}
+fn join_floats(xs:List<f32>,ys:List<f32>)->List<f32>{return xs.concat(ys);}
+fn join_nested(xs:List<List<u32>>,ys:List<List<u32>>)->List<List<u32>>{return xs.concat(ys);}
+fn join_vectors(xs:List<Vec3<f32>>,ys:List<Vec3<f32>>)->List<Vec3<f32>>{return xs.concat(ys);}
+fn join_records(xs:List<Particle>,ys:List<Particle>)->List<Particle>{return xs.concat(ys);}
+fn join_sum(xs:List<f32>,ys:List<f32>)->f32{return sum(xs.concat(ys));}
+
 fn negate(x:f32)->f32{return -x;}
 fn fadd(x:f32,y:f32)->f32{return x+y;}
 fn fmul(x:f32,y:f32)->f32{return x*y;}
@@ -61,6 +78,21 @@ fn __in(x:u32)->u32{return x+1;}
     let p = parse(&source).unwrap();
     let module = CheckedModule::from_source(p.clone()).unwrap();
     let emitted = ink_lowering_js::lower(&module).unwrap();
+    for forbidden in [
+        "__in(",
+        "__out(",
+        "__tick",
+        "ctx.fuel",
+        "budget.cells",
+        "Number.isInteger",
+        "__fail",
+        "capture(",
+    ] {
+        assert!(
+            !emitted.javascript.contains(forbidden),
+            "unexpected runtime checker machinery: {forbidden}"
+        );
+    }
     let mut inputs = vec![];
     let mut add = |name: &str, args: Value| {
         let f = p.functions.iter().find(|f| f.name == name).unwrap();
@@ -139,6 +171,43 @@ fn __in(x:u32)->u32{return x+1;}
         json!([[18446744073709551615u64, 1, 9007199254740993u64]]),
     );
     add("count_flags", json!([[true, false]]));
+    for name in ["identity_words", "typed_flags", "typed_wide", "typed_index"] {
+        add(name, json!([[0, 1, 4294967295u32]]));
+    }
+    for (left, right) in [
+        (json!([]), json!([])),
+        (json!([0, 4294967295u32]), json!([])),
+        (json!([]), json!([2, 1])),
+        (json!([0, 1, 4294967295u32]), json!([7, 2])),
+    ] {
+        add("join_words", json!([left, right]));
+    }
+    add("join_context", json!([[1, 4294967295u32], [2, 3]]));
+    add(
+        "join_signed",
+        json!([[-2147483648i64, -1], [0, 2147483647]]),
+    );
+    add(
+        "join_wide",
+        json!([[18446744073709551615u64, 9007199254740993u64], [0, 1]]),
+    );
+    add("join_flags", json!([[false, true], [true, false]]));
+    add(
+        "join_floats",
+        json!([[{"F32Bits":2143363909u32},{"F32Bits":2147483648u32}],[{"F32Bits":1},{"F32Bits":2139095040u32}]]),
+    );
+    add("join_nested", json!([[[0, 1], []], [[4294967295u32]]]));
+    add("join_vectors", json!([[[1, 2, 3]], [[4, 5, 6]]]));
+    add(
+        "join_records",
+        json!([[{"position":[1,2,3],"velocity":[2,-2,1],"mass":5}],[{"position":[4,5,6],"velocity":[0,1,0],"mass":2}]]),
+    );
+    add("join_sum", json!([[16777216.0, 1.0], [-16777216.0]]));
+    add("float_flags", json!([[-1.0, -0.0, 1.0]]));
+    add(
+        "float_pass",
+        json!([[{"F32Bits":2147483648u32},{"F32Bits":2143363909u32}]]),
+    );
     add("kick", json!([[[1, 2, 3], [4, 5, 6]], 0.5, [0, -2, 0]]));
     add(
         "particles",
@@ -187,19 +256,40 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {call,functions,metadata} from './program.mjs';
 const cases=JSON.parse(readFileSync(new URL('./cases.json',import.meta.url)));
+function native(v,t) { switch(t.kind) {case 'u64':return BigInt(v);case 'list':case 'vector':return v.map(x=>native(x,t.element));case 'record':return Object.fromEntries(t.fields.map(f=>[f.name,native(v[f.name],f.type)]));default:return v;} }
 const json=v=>JSON.stringify(v,(_,v)=>typeof v==='bigint'?v.toString():v);
-for (const {name,args,expected} of cases) assert.deepEqual(JSON.parse(json(call(name,args))),JSON.parse(json(expected)),`${name}: ${json(args)}`);
-for (const args of [[9007199254740992,0],[true,0],['0x10',0],[-1,0],['18446744073709551616',0]]) assert.throws(()=>call('wide',args));
-assert.throws(()=>call('mul',[1.5,0])); assert.throws(()=>call('mul',[1]));assert.throws(()=>call('missing',[]));
-assert.throws(()=>call('kick',[[[1,2]],1,[0,0,0]]));assert.throws(()=>call('negate',[Infinity]));
-assert.throws(()=>call('particles',[[{position:[1,2,3],velocity:[1,2,3],mass:1,extra:0}],1]));
-assert.throws(()=>call('dangerous',[]),/budget/);
+for (const {name,args,expected} of cases) { const f=metadata.functions.find(f=>f.name===name); const values=args.map((v,i)=>native(v,f.params[i].type)); assert.deepEqual(JSON.parse(json(functions[name](...values))),JSON.parse(json(expected)),`${name}: ${json(args)}`); assert.deepEqual(JSON.parse(json(call(name,values))),JSON.parse(json(expected))); }
 assert.throws(()=>{metadata.functions[0].name='bad';});
 assert.equal(functions.default(7),7);
 assert.equal(functions.__in(7),8);
 assert.ok(Object.is(call('negate',[0]),-0));
 const xs=[3,1,2];call('ordered',[xs]);assert.deepEqual(xs,[3,1,2]);
-console.log(`${cases.length} reference comparisons and boundary regressions passed`);
+const typed=new Uint32Array([0,1,4294967295]);
+assert.equal(functions.identity_words(typed),typed); // Trusted native identity does not capture/copy.
+assert.deepEqual(functions.typed_flags(typed),[false,true,true]);
+assert.deepEqual(functions.typed_wide(typed),[3n,3n,3n]);
+assert.deepEqual(functions.typed_index(typed),[true,true,false]);
+assert.deepEqual(typed,new Uint32Array([0,1,4294967295]));
+const fs=new Float32Array([16777216,1,-16777216]);
+assert.equal(functions.ordered_sum(fs),0);
+assert.deepEqual(functions.float_flags(fs),[true,true,false]);
+const fpass=functions.float_pass([{F32Bits:2147483648},{F32Bits:2143363909}]);
+assert.ok(Object.is(fpass[0],-0));assert.deepEqual(fpass[1],{F32Bits:2143363909});
+const tail=new Uint32Array([7,2]), joined=functions.join_words(typed,tail);
+assert.ok(Array.isArray(joined));assert.deepEqual(joined,[0,1,4294967295,7,2]);
+assert.notEqual(joined,typed);assert.notEqual(joined,tail);
+joined[0]=99;assert.equal(typed[0],0);assert.deepEqual(tail,new Uint32Array([7,2]));
+const empty=[];assert.notEqual(functions.join_words(empty,empty),empty);
+const inner=[1,2], nestedJoined=functions.join_nested([inner],[[]]);
+assert.equal(nestedJoined[0],inner);assert.deepEqual(nestedJoined,[[1,2],[]]);
+assert.deepEqual(functions.join_wide(new BigUint64Array([18446744073709551615n]),[1n]),[18446744073709551615n,1n]);
+assert.deepEqual(functions.join_signed(new Int32Array([-2147483648,-1]),new Int32Array([0,2147483647])),[-2147483648,-1,0,2147483647]);
+assert.equal(functions.join_sum(new Float32Array([16777216,1]),new Float32Array([-16777216])),0);
+const special=functions.join_floats([{F32Bits:2143363909},-0],[{F32Bits:1},{F32Bits:2139095040}]);
+assert.deepEqual(special[0],{F32Bits:2143363909});assert.ok(Object.is(special[1],-0));
+assert.equal(special[2],1.401298464324817e-45);assert.deepEqual(special[3],{F32Bits:2139095040});
+assert.equal(metadata.abi,'ink-javascript-trusted-values-v2');
+console.log(`${cases.length} reference comparisons and native caller regressions passed`);
 "#).unwrap();
     let output = Command::new("node")
         .arg(dir.join("test.mjs"))
@@ -219,4 +309,45 @@ fn admits_stateful_and_opaque_values_without_changing_core_types() {
     for source in ["module X;fn f(x:Int)->Int{return x;}", "module X;state T:Table<String,u64> =Table.empty();query get()->List<u64> reads(T){return T.values();}"] {
   let module=CheckedModule::from_source(parse(source).unwrap()).unwrap();assert!(ink_lowering_js::lower(&module).is_ok());
  }
+}
+
+#[test]
+fn compile_time_checking_still_rejects_ill_typed_functions() {
+    for source in [
+        "module X;fn f(x:u32)->Bool{return x;}",
+        "module X;fn f(x:List<u32>)->List<Bool>{return x.map(fn(y)=>y+1);}",
+        "module X;fn f(x:u32)->u32{return x+true;}",
+        "module X;fn f(xs:List<u32>,ys:List<Bool>)->List<u32>{return xs.concat(ys);}",
+        "module X;fn f(xs:List<u32>)->List<u32>{return xs.concat();}",
+        "module X;fn f(xs:List<u32>)->List<u32>{return xs.concat(1);}",
+    ] {
+        let p = parse(source).unwrap();
+        assert!(CheckedModule::from_source(p).is_err());
+    }
+}
+
+#[test]
+fn word_only_output_binds_direct_functions_and_omits_unused_runtime_helpers() {
+    let module = CheckedModule::from_source(parse("module X;fn f(x:u32,y:u32)->u32{return x*y+x;}fn id(xs:List<u32>)->List<u32>{return xs;}").unwrap()).unwrap();
+    let emitted = ink_lowering_js::lower(&module).unwrap();
+    assert!(emitted.javascript.contains("function __fn0(v0,v1){"));
+    assert!(!emitted.javascript.contains("(()=>"));
+    assert!(emitted
+        .javascript
+        .contains("[f.name,__implementations[f.index]]"));
+    for forbidden in [
+        "DataView",
+        "__representation",
+        "__div",
+        "__map",
+        "__repeat",
+        "__tick",
+        "budget",
+    ] {
+        assert!(
+            !emitted.javascript.contains(forbidden),
+            "unused machinery: {forbidden}"
+        );
+    }
+    assert!(emitted.javascript.contains("Math.imul"));
 }
