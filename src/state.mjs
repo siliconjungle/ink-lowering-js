@@ -55,6 +55,11 @@ function __createState(meta,implementations){
   get version(){return rt.version;},
   get outbox(){return rt.outbox.map(e=>({...e,value:__stateOutput(e.value,meta.events.find(t=>t.name===e.channel).type,{cells:1000000})}));},
   acknowledgeThrough(commit,position){if(rt.busy)throw Error('state operation already in progress');commit=__stateInput(commit,{kind:'u64'},{cells:1});position=__stateInput(position,{kind:'u64'},{cells:1});rt.outbox=rt.outbox.filter(e=>e.commit>commit||(e.commit===commit&&e.position>position));},
+  async invokeAsync(name,args){
+   if(typeof __parallelInvokeAsync!=='function')return invoke(name,args);
+   if(rt.busy)throw Error('state operation already in progress');const captured=structuredClone(args);rt.busy=true;
+   try{const snapshot=await __snapshotEncode(meta,rt);const reply=await __parallelInvokeAsync(name,captured,snapshot);const s=await __snapshotDecode(meta,reply.snapshot);rt.tables=s.tables;rt.version=s.version;rt.outbox=s.outbox;return reply.value;}finally{rt.busy=false;}
+  },
   checkpoint(limits){if(rt.busy)throw Error('checkpoint requires transaction boundary');return __snapshotEncode(meta,rt,limits);},
   async restore(bytes,limits){if(rt.busy)throw Error('restore requires transaction boundary');rt.busy=true;try{const s=await __snapshotDecode(meta,bytes,limits);rt.tables=s.tables;rt.version=s.version;rt.outbox=s.outbox;}finally{rt.busy=false;}},
  });
