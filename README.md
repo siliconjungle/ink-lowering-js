@@ -124,3 +124,8 @@ checks remain. Source/proof checking happens during compilation. Standalone
 representation calls skip whole-state checkpoint validation; query envelopes execute the literal proved physical step. Backend-specific envelope erasure has been removed.
 
 Fixed table operations include bulk upsert/removal, shared keys, ordered direct sums and predicate counts. Generated state journals touched optional rows, caches ordered keys until membership changes, and reads live payloads on replacement. Shared-key scans probe the smaller map and sort only their result; direct reductions avoid intermediate row/map arrays. Portable snapshots retain logical key order and exclude physical caches/journals.
+Pure buffer elements are immutable logical values and may share nested records
+with inputs and outputs. Slot arrays remain privately owned; split-range growth
+detaches. Structural equality uses declared fields and an aggregate identity
+fast path, retaining stored float bits. Host state replies detach their reachable
+values. See the distribution's `docs/internal-snapshots.md` for the ownership and private-delta contract.
