@@ -301,14 +301,14 @@ fn demand_scan_evaluates_list_and_default_once_then_skips_tail_callbacks() {
 fn pred(x:u32,k:u32)->Bool{return x>=k;}
 fn mapper(x:u32,z:u32)->u32{return choose(x==1,z,x+z);}
 fn initial(z:u32)->u32{return z;}
-fn list(xs:List<u32>)->List<u32>{return xs;}
-fn run(xs:List<u32>,z:u32,k:u32)->u32{return fold_until(list(xs),initial(z),fn(x)=>fn(a)=>pred(x,k),fn(x)=>fn(a)=>choose(pred(x,k),mapper(x,z),a));}
+fn ingress(xs:List<u32>)->List<u32>{return xs;}
+fn run(xs:List<u32>,z:u32,k:u32)->u32{return fold_until(ingress(xs),initial(z),fn(x)=>fn(a)=>pred(x,k),fn(x)=>fn(a)=>choose(pred(x,k),mapper(x,z),a));}
 "#).unwrap();
     let mut source = ink_lowering_js::lower(&CheckedModule::from_source(p).unwrap())
         .unwrap()
         .javascript;
     // Counters are deliberately injected into emitted test code only.
-    for (i, key) in ["pred", "mapper", "initial", "list"].iter().enumerate() {
+    for (i, key) in ["pred", "mapper", "initial", "ingress"].iter().enumerate() {
         let start = source.find(&format!("function __fn{i}(")).unwrap();
         let at = start + source[start..].find('{').unwrap() + 1;
         source.insert_str(at, &format!("globalThis.visits.{key}++;"));
@@ -320,7 +320,7 @@ fn run(xs:List<u32>,z:u32,k:u32)->u32{return fold_until(list(xs),initial(z),fn(x
     let dir = directory("js-visits");
     fs::write(dir.join("output.mjs"), source).unwrap();
     fs::write(dir.join("test.mjs"),r#"import assert from 'node:assert/strict';import {functions} from './output.mjs';
-function check(xs,k,want,pred,mapper){globalThis.visits={pred:0,mapper:0,initial:0,list:0};assert.equal(functions.run(xs,7,k),want);assert.deepEqual(visits,{pred,mapper,initial:1,list:1});}
+function check(xs,k,want,pred,mapper){globalThis.visits={pred:0,mapper:0,initial:0,ingress:0};assert.equal(functions.run(xs,7,k),want);assert.deepEqual(visits,{pred,mapper,initial:1,ingress:1});}
 check([0,1,9],1,7,4,1); // replacement == default must terminate
 check([9,1,3],2,16,2,1);
 check([0,1,2],9,7,6,0);

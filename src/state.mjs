@@ -1,5 +1,4 @@
 // CALLER CONTRACT: arguments must match declared types; malformed data may throw or corrupt state.
-function __tick(ctx){if(--ctx.fuel<0)throw Error('Ink state execution budget exhausted');}
 // Fixed state primitives used by emitted action bodies, without an AST evaluator.
 class __Abort {constructor(value){this.value=value;}}
 function __try(value){if(Object.hasOwn(value,'Err'))throw new __Abort(value.Err);return value.Ok;}
@@ -13,6 +12,7 @@ function __mapValue(value,kind,method,fn){
  const tag=method==='map_err'?'Err':'Ok';return Object.hasOwn(value,tag)?{[tag]:fn(value[tag])}:value;
 }
 const __encoder=new TextEncoder();
+function __tick(ctx){if(--ctx.fuel<0)throw Error('Ink state execution budget exhausted');}
 function __keyCompare(a,b,type){
  if(type.kind==='string'){const x=__encoder.encode(a),y=__encoder.encode(b);for(let i=0;i<Math.min(x.length,y.length);i++)if(x[i]!==y[i])return x[i]-y[i];return x.length-y.length;}
  return a<b?-1:a>b?1:0;
