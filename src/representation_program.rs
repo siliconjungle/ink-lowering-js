@@ -76,7 +76,10 @@ pub fn lower(checked: &CheckedRepresentation) -> LangResult<String> {
         .projection()
         .types
         .iter()
-        .filter(|(_,sort)| match sort { Sort::Data(id)=>executable.contains_key(id), _=>true })
+        .filter(|(_, sort)| match sort {
+            Sort::Data(id) => executable.contains_key(id),
+            _ => true,
+        })
         .enumerate()
         .map(|(i, (key, sort))| {
             Ok((
@@ -155,7 +158,12 @@ pub fn lower(checked: &CheckedRepresentation) -> LangResult<String> {
             .unwrap();
             args.push(format!("a{i}"));
         }
-        writeln!(out,"const executed=f_{}({});const observed=f_{}(executed),next=f_{}(executed);if(observed.c===1)throw Error('commit sequence exhausted');const [reply,committed,newVersion,,events]=observed.a;const result={},staged=__events(events),published=[];",a.execute,args.join(","),a.observe,a.next,e.write(&source.result,"reply","0","false")?).unwrap();
+        let observation_fields = if a.compact.is_some() {
+            "reply,committed,newVersion,events"
+        } else {
+            "reply,committed,newVersion,,events"
+        };
+        writeln!(out,"const executed=f_{}({});const observed=f_{}(executed),next=f_{}(executed);if(observed.c===1)throw Error('commit sequence exhausted');const [{observation_fields}]=observed.a;const result={},staged=__events(events),published=[];",a.execute,args.join(","),a.compact.as_ref().map(|c|c.observe.as_str()).unwrap_or(&a.observe),a.next,e.write(&source.result,"reply","0","false")?).unwrap();
         out.push_str("if(committed){for(let i=0;i<staged.length;i++){const [channel,value,publicValue]=staged[i];outbox.push({commit:newVersion,position:BigInt(i),channel,value});published.push({commit:newVersion,position:BigInt(i),channel,value:publicValue});}}physical=next;version=newVersion;return {result,committed,version,events:published};}\n");
     }
     out.push_str("default:throw Error(`unknown action ${name}`);}}\nreturn Object.freeze({invoke:invoke_json,invoke_json,");
