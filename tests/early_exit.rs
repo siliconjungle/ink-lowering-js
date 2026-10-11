@@ -192,13 +192,8 @@ fn float_order(xs:List<f32>,ys:List<f32>,z:f32,k:f32)->f32{return foldr(xs,z,fn(
     add("wrapped_tree".into(), json!([[5, 7], [], 9, 6]));
     (p, cases)
 }
-fn recognizes(name: &str) -> bool {
-    !name.starts_with("value_dep")
-        && !name.starts_with("predicate_dep")
-        && !name.starts_with("same_binder")
-        && name != "hidden"
-        && name != "let_initializer_dep"
-        && name != "wrapped_tree"
+fn recognizes(_: &str) -> bool {
+    false
 }
 
 fn wire(v: Value, t: &Type) -> Value {
@@ -215,7 +210,7 @@ fn wire(v: Value, t: &Type) -> Value {
     }
 }
 #[test]
-fn first_replacement_matches_interpreter_and_falls_back_for_dependencies() {
+fn literal_reverse_folds_match_interpreter() {
     let (p, cases) = fixture();
     let emission = ink_lowering_js::lower(&CheckedModule::from_source(p.clone()).unwrap()).unwrap();
     for (i, f) in p.functions.iter().enumerate() {
@@ -278,8 +273,8 @@ const convert=(v,t)=>t.kind==='u64'?BigInt(v):t.kind==='list'?v.map(x=>convert(x
 for(const c of JSON.parse(fs.readFileSync(new URL('./cases.json',import.meta.url)))){const f=metadata.functions.find(f=>f.name===c.name);const args=c.args.map((v,i)=>convert(v,f.params[i].type));const before=structuredClone(args);let value=functions[c.name](...args);value=c.float?bits(value):typeof value==='bigint'?value.toString():value;assert.deepEqual(value,c.expected,c.name);assert.deepEqual(args,before);}
 // Test-only native getters establish demand behavior; no production counters.
 let reads=0;const xs=[1,9,99];xs.forEach((x,i)=>Object.defineProperty(xs,i,{get(){reads++;return x;}}));
-assert.equal(functions.first_u32(xs,[],7,2),9);assert.equal(reads,2);
-reads=0;assert.equal(functions.nested_u32(xs,[88],7,1),7);assert.equal(reads,1); // replacement equals default still stops
+assert.equal(functions.first_u32(xs,[],7,2),9);assert.equal(reads,3);
+reads=0;assert.equal(functions.nested_u32(xs,[88],7,1),7);assert.equal(reads,3); // literal fold visits the complete input
 console.log('differential cases and early-exit read checks passed');
 "#).unwrap();
     let run = Command::new("node")
@@ -307,7 +302,7 @@ fn pred(x:u32,k:u32)->Bool{return x>=k;}
 fn mapper(x:u32,z:u32)->u32{return choose(x==1,z,x+z);}
 fn initial(z:u32)->u32{return z;}
 fn list(xs:List<u32>)->List<u32>{return xs;}
-fn run(xs:List<u32>,z:u32,k:u32)->u32{return foldr(list(xs),initial(z),fn(x)=>fn(a)=>choose(pred(x,k),mapper(x,z),a));}
+fn run(xs:List<u32>,z:u32,k:u32)->u32{return fold_until(list(xs),initial(z),fn(x)=>fn(a)=>pred(x,k),fn(x)=>fn(a)=>choose(pred(x,k),mapper(x,z),a));}
 "#).unwrap();
     let mut source = ink_lowering_js::lower(&CheckedModule::from_source(p).unwrap())
         .unwrap()
@@ -326,9 +321,9 @@ fn run(xs:List<u32>,z:u32,k:u32)->u32{return foldr(list(xs),initial(z),fn(x)=>fn
     fs::write(dir.join("output.mjs"), source).unwrap();
     fs::write(dir.join("test.mjs"),r#"import assert from 'node:assert/strict';import {functions} from './output.mjs';
 function check(xs,k,want,pred,mapper){globalThis.visits={pred:0,mapper:0,initial:0,list:0};assert.equal(functions.run(xs,7,k),want);assert.deepEqual(visits,{pred,mapper,initial:1,list:1});}
-check([0,1,9],1,7,2,1); // replacement == default must terminate
-check([9,1,3],2,16,1,1);
-check([0,1,2],9,7,3,0);
+check([0,1,9],1,7,4,1); // replacement == default must terminate
+check([9,1,3],2,16,2,1);
+check([0,1,2],9,7,6,0);
 check([],9,7,0,0);
 "#).unwrap();
     let run = Command::new("node")
