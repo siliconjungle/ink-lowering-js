@@ -22,32 +22,33 @@ function __table(rt,index,method,args){
  if(method==='values')return [...table.entries()].sort((a,b)=>__keyCompare(a[0],b[0],rt.meta.roots[index].key)).map(([k,v])=>v);
  if(method==='get')return table.has(key)?{Some:table.get(key)}:{None:null};
  if(method==='contains')return table.has(key);
- if(method==='remove'){const old=table.has(key)?{Some:table.get(key)}:{None:null};table.delete(key);return old;}
+ if(method==='remove'){const present=table.has(key),value=table.get(key);if(present){rt.undo.push([index,key,true,value]);table.delete(key);}return present?{Some:value}:{None:null};}
  if(method==='insert'&&table.has(key))throw Error('insert key already present');
  if(method==='replace'&&!table.has(key))throw Error('replace key absent');
- table.set(key,args[1]);return null;
+ rt.undo.push([index,key,table.has(key),table.get(key)]);table.set(key,args[1]);return null;
 }
 function __createState(meta,implementations){
- const rt={meta,tables:meta.roots.map(()=>new Map()),version:0n,outbox:[],staged:[],busy:false};
+ const rt={meta,tables:meta.roots.map(()=>new Map()),version:0n,outbox:[],staged:[],undo:[],busy:false};
+ function rollback(){while(rt.undo.length){const [index,key,present,value]=rt.undo.pop();if(present)rt.tables[index].set(key,value);else rt.tables[index].delete(key);}}
  const actionMap=new Map(meta.actions.map(a=>[a.name,a]));
  function invoke(name,args){
   if(rt.busy)throw Error('state operation already in progress');
   const a=actionMap.get(name);if(!a)throw Error(`unknown action ${name}`);
   const captured=a.params.map((p,i)=>__stateInput(args[i],p.type));
-  const tables=a.change?rt.tables.map(t=>new Map(t)):rt.tables,version=rt.version,outbox=rt.outbox;
+  const version=rt.version,outbox=rt.outbox;
   rt.busy=true;rt.staged=[];
   try{
    const value=implementations[a.index]({fuel:100000000},rt,...captured);
    const result=__stateOutput(value,a.result,{cells:1000000});
    if(!a.change)return {result,committed:false,version,events:[]};
-   if(Object.hasOwn(value,'Err')){rt.tables=tables;return {result,committed:false,version,events:[]};}
+   if(Object.hasOwn(value,'Err')){rollback();return {result,committed:false,version,events:[]};}
    if(version===18446744073709551615n)throw Error('commit sequence exhausted');
    const next=version+1n;
    const events=rt.staged.map(([channel,value],i)=>({commit:next,position:BigInt(i),channel,value:__stateOutput(value,meta.events.find(e=>e.name===channel).type,{cells:1000000})}));
    const pending=rt.staged.map(([channel,value],i)=>({commit:next,position:BigInt(i),channel,value}));
-   rt.version=next;rt.outbox=outbox.concat(pending);
+   rt.version=next;rt.outbox=outbox.concat(pending);rt.undo.length=0;
    return {result,committed:true,version:next,events};
-  }catch(e){rt.tables=tables;rt.version=version;rt.outbox=outbox;throw e;}
+  }catch(e){rollback();rt.version=version;rt.outbox=outbox;throw e;}
   finally{rt.staged=[];rt.busy=false;}
  }
  return Object.freeze({
