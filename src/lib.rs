@@ -10,7 +10,6 @@ pub struct Emission {
 }
 mod state;
 pub mod definition;
-pub mod representation;
 type Env = BTreeMap<String, (String, Type)>;
 // Lexical occurrence, not identifier spelling alone: local binders shadow the
 // fold accumulator, while a let initializer still uses its enclosing scope.
