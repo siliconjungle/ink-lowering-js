@@ -127,9 +127,12 @@ pub(crate) fn lower(
     let exports = checked
         .exports()
         .iter()
-        .chain(queries.keys())
+        .chain(queries.iter().filter_map(|(id,d)| matches!(d,Declaration::Function{..}).then_some(id)))
         .collect::<Vec<_>>();
-    let mut out=String::from("const __node=(c,a)=>Object.freeze({c,a:Object.freeze(a)});\nfunction __run(call){const stack=[call];let result;while(stack.length){const frame=stack[stack.length-1],step=frame.next(result);if(step.done){result=step.value;stack.pop();}else{result=undefined;stack.push(step.value);}}return result;}\n");
+    // These constructors belong to the encapsulated representation. Literal
+    // definitions never mutate them; boundary codecs construct public values.
+    // Freezing each freshly owned field array added work to every rebuilt path.
+    let mut out=String::from("const __node=(c,a)=>({c,a});\nfunction __run(call){const stack=[call];let result;while(stack.length){const frame=stack[stack.length-1],step=frame.next(result);if(step.done){result=step.value;stack.pop();}else{result=undefined;stack.push(step.value);}}return result;}\n");
     fn calls(t: &Term, ids: &mut std::collections::BTreeSet<String>) {
         match t {
             Term::Call {
@@ -174,14 +177,15 @@ pub(crate) fn lower(
     let mut generators = ds
         .iter()
         .filter_map(|(id, d)| {
-            matches!(
-                d,
-                Declaration::Function {
-                    recursive: Some(_),
-                    ..
-                }
-            )
-            .then_some(id.clone())
+            let Declaration::Function { body, .. } = d else { return None };
+            // A structural annotation permits recursion; only a self-call
+            // needs suspension. Propagating unused annotations turned ordinary
+            // projections and their callers into generator frames.
+            let mut recursive = false;
+            ink_core::logic::walk_term(body, |t| {
+                recursive |= matches!(t, Term::SelfCall(_));
+            });
+            recursive.then_some(id.clone())
         })
         .collect::<std::collections::BTreeSet<_>>();
     loop {
