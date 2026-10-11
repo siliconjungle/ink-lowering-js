@@ -11,8 +11,6 @@ pub struct Emission {
 pub mod definition;
 pub mod portable_definition;
 mod state;
-pub mod definition;
-pub mod portable_definition;
 pub mod representation;
 type Env = BTreeMap<String, (String, Type)>;
 // Lexical occurrence, not identifier spelling alone: local binders shadow the

@@ -46,7 +46,7 @@ function __stateInput(value,type,budget={cells:1000000},depth=0){
       if(!tagged('Int')||typeof value.Int!=='string'||!/^(-?[0-9]+)$/.test(value.Int))throw Error('invalid Int');return BigInt(value.Int);
     }
     case 'f32':{
-      if(typeof value==='number'&&Number.isFinite(value))return __bits(value);
+      if(typeof value==='number'&&Number.isFinite(value)){const bits=__bits(value);if((bits&0x7fffffff)===0x7f800000)throw Error('f32 overflow requires F32Bits');return bits;}
       if(!tagged('F32Bits')||!Number.isInteger(value.F32Bits)||value.F32Bits<0||value.F32Bits>4294967295)throw Error('invalid f32');return value.F32Bits;
     }
     case 'bool':if(typeof value!=='boolean')throw Error('invalid Bool');return value;
