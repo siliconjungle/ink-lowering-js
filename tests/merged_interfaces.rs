@@ -42,7 +42,9 @@ query wide(x:u64)->u64{return wide_id(x);}
     let e = ink_lowering_js::lower(&module).unwrap();
     assert!(!e.javascript.contains("function __in("));
     assert!(!e.javascript.contains("function __out("));
-    assert!(!e.javascript.contains("budget.cells"));
+    // State invocation is a checked public boundary even when pure functions
+    // remain trusted direct entries.
+    assert!(e.javascript.contains("budget.cells"));
     let dir = std::env::temp_dir().join(format!("ink-merged-js-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("program.mjs"), e.javascript).unwrap();
@@ -56,7 +58,7 @@ assert.equal(Object.hasOwn(functions,'edit'),false);assert.throws(()=>call('edit
 const destination=new Array(8).fill('tail');assert.equal(callInto('run',[input],destination),3);assert.deepEqual(destination.slice(0,3),[2,8,3]);assert.equal(destination[3],'tail');
 assert.deepEqual(functions.opt({Some:{F32Bits:2143363909}}),{Some:{F32Bits:2143363909}});assert.equal(Object.is(functions.opt({Some:-0}).Some,-0),true);assert.deepEqual(functions.opt({None:null}),{None:null});
 assert.deepEqual(functions.exact({Int:'123456789012345678901234567890'}),{Int:'123456789012345678901234567890'});assert.equal(functions.text('😀hello'),'😀hello');assert.equal(functions.key('ABCDEF00000000000000000000000000'),'abcdef00000000000000000000000000');assert.deepEqual(functions.copied([{data:new Uint32Array([7,9])}],{data:[]}),[7,9]);
-const state=createState();assert.equal(state.invoke('answer',[41]).result,42);assert.equal(state.invoke('wide',['18446744073709551615']).result,18446744073709551615n);
+const state=createState();assert.equal(state.invoke('answer',[41]).result,42);assert.equal(state.invoke('wide',['18446744073709551615']).result,18446744073709551615n);assert.throws(()=>state.invoke('answer',[-1]),/invalid u32/);assert.throws(()=>state.invoke('wide',['18446744073709551616']),/invalid u64/);
 "#).unwrap();
     let output = Command::new("node")
         .arg(dir.join("run.mjs"))

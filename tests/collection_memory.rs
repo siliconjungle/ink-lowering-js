@@ -19,14 +19,20 @@ fn expected(v: &eval::Value) -> Value {
     }
 }
 #[test]
-fn composed_storage_facts_preserve_full_outputs_lifetimes_and_eager_stages() {
+fn literal_collection_stages_preserve_full_outputs_lifetimes_and_eager_stages() {
     let p = fixture();
     let m = CheckedModule::from_source(p.clone()).unwrap();
     let emitted = ink_lowering_js::lower(&m).unwrap();
     let cases = rows(&p);
     let cases:Vec<_>=cases.iter().map(|(n,a,v)|json!({"name":n,"args":a.iter().map(wire).collect::<Vec<_>>(),"expected":expected(v)})).collect();
     let dir = directory("js");
-    fs::write(dir.join("output.mjs"), emitted.javascript).unwrap();
+    // The allocation probe must also observe fresh filter arrays spelled as [].
+    // Instrument only the test artifact; array literals bypass the Array proxy.
+    fs::write(
+        dir.join("output.mjs"),
+        emitted.javascript.replace("=[];", "=new Array(0);"),
+    )
+    .unwrap();
     fs::write(dir.join("cases.json"), serde_json::to_vec(&cases).unwrap()).unwrap();
     fs::write(dir.join("test.mjs"),r#"import assert from'node:assert/strict';import fs from'node:fs';import{functions,functionsInto,metadata}from'./output.mjs';
 const view=new DataView(new ArrayBuffer(4));const bits=v=>{if(v&&typeof v==='object')return v.F32Bits;view.setFloat32(0,v,true);return view.getUint32(0,true);};
@@ -36,9 +42,9 @@ const rows=JSON.parse(fs.readFileSync(new URL('./cases.json',import.meta.url)));
 for(const row of rows){const f=metadata.functions.find(f=>f.name===row.name);const args=row.args.map((v,i)=>convert(v,f.params[i].type));const before=structuredClone(args);const regular=functions[row.name](...args);assert.deepEqual(result(regular,f.result),row.expected,row.name);comparisons++;
 const out=new Array(row.expected.length+5).fill('tail');for(let trial=0;trial<2;trial++){const n=functionsInto[row.name](...args,out);assert.equal(n,row.expected.length,row.name);assert.deepEqual(result(out.slice(0,n),f.result),row.expected,row.name);assert.deepEqual(out.slice(n),['tail','tail','tail','tail','tail']);assert.deepEqual(result(regular,f.result),row.expected,'retained ordinary output');assert.deepEqual(args,before,'borrowed inputs immutable');comparisons++;}out.fill(null);assert.deepEqual(result(regular,f.result),row.expected);}
 const NativeArray=globalThis.Array;let allocs=0;globalThis.Array=new Proxy(NativeArray,{construct(t,args){allocs++;return Reflect.construct(t,args);}});const xs=[1,2,3],ys=[5,7],out=new Uint32Array(32);
-for(const [name,count]of[['compact_u32',1],['compact_chain_u32',1],['chain_u32',1],['scan_u32',1],['branch_u32',1],['shadow_u32',1],['borrowed_u32',1],['capture_u32',2],['shared_u32',3],['observed_u32',2],['alias_u32',1]]){allocs=0;functions[name](xs,ys,1,3);assert.equal(allocs,count,name);assert.deepEqual(xs,[1,2,3]);}
-for(const [name,count]of[['compact_u32',1],['compact_chain_u32',1],['chain_u32',0],['scan_u32',0],['branch_u32',0],['shadow_u32',0],['borrowed_u32',0],['capture_u32',1],['shared_u32',2],['observed_u32',1],['alias_u32',0]]){allocs=0;functionsInto[name](xs,ys,1,3,out);assert.equal(allocs,count,'Into '+name);assert.deepEqual(xs,[1,2,3]);}globalThis.Array=NativeArray;
-console.log(`${rows.length} typed frames / ${comparisons} complete ordinary+Into comparisons; allocation reuse, helper capture, shared lifetimes, logical extent and tails passed`);
+for(const [name,count]of[['compact_u32',2],['compact_chain_u32',3],['chain_u32',2],['scan_u32',3],['branch_u32',2],['shadow_u32',2],['borrowed_u32',1],['capture_u32',2],['shared_u32',3],['observed_u32',2],['alias_u32',1]]){allocs=0;functions[name](xs,ys,1,3);assert.equal(allocs,count,name);assert.deepEqual(xs,[1,2,3]);}
+for(const [name,count]of[['compact_u32',1],['compact_chain_u32',2],['chain_u32',1],['scan_u32',2],['branch_u32',1],['shadow_u32',1],['borrowed_u32',0],['capture_u32',1],['shared_u32',2],['observed_u32',1],['alias_u32',0]]){allocs=0;functionsInto[name](xs,ys,1,3,out);assert.equal(allocs,count,'Into '+name);assert.deepEqual(xs,[1,2,3]);}globalThis.Array=NativeArray;
+console.log(`${rows.length} typed frames / ${comparisons} complete ordinary+Into comparisons; explicit destination allocation counts, helper capture, shared lifetimes, logical extent and tails passed`);
 "#).unwrap();
     let out = Command::new("node")
         .arg(dir.join("test.mjs"))

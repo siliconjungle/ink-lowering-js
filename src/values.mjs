@@ -2,7 +2,7 @@
 // Representation conversion only. Callers supply values matching metadata.
 const __view = new DataView(new ArrayBuffer(4));
 const __float = bits => { __view.setUint32(0, bits, true); return __view.getFloat32(0, true); };
-const __bits = number => { __view.setFloat32(0, number, true); return __view.getUint32(0, true); };
+const __bits = number => { if(Number.isNaN(number))return 0x7fc00000; __view.setFloat32(0, number, true); return __view.getUint32(0, true); };
 const __identity = value => value;
 function __representation(type, output) {
   switch (type.kind) {
@@ -27,15 +27,43 @@ function __representation(type, output) {
     default: return __identity;
   }
 }
-function __stateInput(value,type){
+// @helper state-validation
+function __stateInput(value,type,budget={cells:1000000},depth=0){
+  if(depth>64||--budget.cells<0)throw Error('state input resource limit');
+  const input=(v,t)=>__stateInput(v,t,budget,depth+1);
+  const integer=(min,max)=>{if(typeof value!=='number'||!Number.isInteger(value)||value<min||value>max)throw Error('invalid '+type.kind);return value===0?0:value;};
+  const tagged=tag=>value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).length===1&&Object.hasOwn(value,tag);
   switch(type.kind){
-    case 'ref':return __stateInput(value,__namedTypes[type.name]);
-    case 'u64':return BigInt(value);
-    case 'list':case 'vector':return Array.from(value,v=>__stateInput(v,type.element));
-    case 'record':return Object.fromEntries(type.fields.map(f=>[f.name,__stateInput(value[f.name],f.type)]));
-    case 'option':return Object.hasOwn(value,'Some')?{Some:__stateInput(value.Some,type.element)}:{None:null};
-    case 'result':return Object.hasOwn(value,'Ok')?{Ok:__stateInput(value.Ok,type.ok)}:{Err:__stateInput(value.Err,type.error)};
-    default:return __representation(type,false)(value);
+    case 'ref':return input(value,__namedTypes[type.name]);
+    case 'u32':return integer(0,4294967295);
+    case 'i32':return integer(-2147483648,2147483647);
+    case 'u64':{
+      if(typeof value==='number'&&!Number.isSafeInteger(value))throw Error('u64 requires an exact integer');
+      if(!['bigint','number','string'].includes(typeof value)||typeof value==='string'&&!/^(0|[1-9][0-9]*)$/.test(value))throw Error('invalid u64');
+      const n=BigInt(value);if(n<0n||n>18446744073709551615n)throw Error('invalid u64');return n;
+    }
+    case 'int':{
+      if(typeof value==='bigint')return value;
+      if(!tagged('Int')||typeof value.Int!=='string'||!/^(-?[0-9]+)$/.test(value.Int))throw Error('invalid Int');return BigInt(value.Int);
+    }
+    case 'f32':{
+      if(typeof value==='number'&&Number.isFinite(value)){const bits=__bits(value);if((bits&0x7fffffff)===0x7f800000)throw Error('f32 overflow requires F32Bits');return bits;}
+      if(!tagged('F32Bits')||!Number.isInteger(value.F32Bits)||value.F32Bits<0||value.F32Bits>4294967295)throw Error('invalid f32');return value.F32Bits;
+    }
+    case 'bool':if(typeof value!=='boolean')throw Error('invalid Bool');return value;
+    case 'unit':if(value!==null)throw Error('invalid Unit');return null;
+    case 'string':if(typeof value!=='string'||!value.isWellFormed())throw Error('invalid String');return value;
+    case 'id':if(typeof value!=='string'||! /^[0-9a-fA-F]{32}$/.test(value))throw Error('invalid ID');return value.toLowerCase();
+    case 'enum':if(!type.variants.includes(value))throw Error('invalid enum');return value;
+    case 'list':case 'vector':{
+      if(!Array.isArray(value)&&!(ArrayBuffer.isView(value)&&!(value instanceof DataView)))throw Error('invalid list');
+      if(type.kind==='vector'&&value.length!==type.size)throw Error('invalid vector length');
+      return Array.from(value,v=>input(v,type.element));
+    }
+    case 'record':if(!value||typeof value!=='object'||Array.isArray(value)||!type.fields.every(f=>Object.hasOwn(value,f.name)))throw Error('invalid record');return Object.fromEntries(type.fields.map(f=>[f.name,input(value[f.name],f.type)]));
+    case 'option':if(tagged('Some'))return {Some:input(value.Some,type.element)};if(tagged('None')&&value.None===null)return {None:null};throw Error('invalid Option');
+    case 'result':if(tagged('Ok'))return {Ok:input(value.Ok,type.ok)};if(tagged('Err'))return {Err:input(value.Err,type.error)};throw Error('invalid Result');
+    default:throw Error('unsupported public value type');
   }
 }
 function __stateOutput(value,type){return __representation(type,true)(value);}

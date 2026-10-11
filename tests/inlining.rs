@@ -230,7 +230,7 @@ fn expected(v: &eval::Value) -> Value {
     }
 }
 #[test]
-fn bounded_known_calls_match_interpreter_and_keep_exports_and_fallbacks() {
+fn literal_known_calls_match_interpreter_and_keep_exports() {
     let p = fixture();
     let m = CheckedModule::from_source(p.clone()).unwrap();
     let emitted = ink_lowering_js::lower(&m).unwrap();
@@ -238,9 +238,9 @@ fn bounded_known_calls_match_interpreter_and_keep_exports_and_fallbacks() {
     for name in ["run_u32", "fold_f32", "eager_u64", "rr", "vr"] {
         let index = p.functions.iter().position(|f| f.name == name).unwrap();
         let b = body(&source, &format!("function __fn{index}("));
-        assert!(b.contains("/* inline "), "{name}: {b}");
+        assert!(!b.contains("/* inline "), "{name}: {b}");
         assert!(
-            !b.split_once('{').unwrap().1.contains("__fn"),
+            b.split_once('{').unwrap().1.contains("__fn"),
             "{name}: helper remains: {b}"
         );
     }

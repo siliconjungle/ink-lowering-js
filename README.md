@@ -1,7 +1,7 @@
 # Ink JavaScript lowering
 
 Literal ES module emission for checked Ink programs. This package depends only
-on `ink-core`, JSON and hashing; it contains no optimisation laws, cost selection
+on `ink-core`, `ink-abi`, JSON and hashing; it contains no optimisation laws, cost selection
 or browser scheduling. Those responsibilities belong to `ink-knowledge`,
 `ink-planner` and `ink-runtime`.
 
@@ -31,9 +31,8 @@ still needs a compiler wrapper to accept newly edited Ink source.
 - `f32` is represented internally by binary32 bits. Every arithmetic operation
   rounds separately to binary32; negation flips the sign bit. Input/output uses
   Numbers or explicit `{F32Bits: bits}` for exceptional values. Zero signs,
-  subnormals and passed-through exceptional payloads survive. NaN payloads
-  produced by arithmetic remain engine-dependent, as they are on native CPU;
-  this package does not promise cross-engine NaN payload reproducibility.
+  subnormals and passed-through exceptional payloads survive. Arithmetic NaNs
+  use the canonical quiet payload `0x7fc00000`; F32 programs bind executable-core V7.
 - Bool, vectors, records and nested lists retain their checked types. Callers
   supply the declared types; collection operations do not mutate inputs. Typed
   word arrays are accepted as list inputs, and map/filter/scan produce ordinary
@@ -48,8 +47,9 @@ still needs a compiler wrapper to accept newly edited Ink source.
 
 `functions.name(...args)` binds directly to the generated synchronous function
 for signatures without f32 representation conversion. `call(name, args)` is
-only a compatibility name lookup. Generated modules have no runtime input
-validator, snapshot capture, fuel counter or cell budget. The checker still
+only a compatibility name lookup. Generated pure functions have no runtime input
+validator, snapshot capture, fuel counter or cell budget. Stateful `createState`
+invocation retains typed input checks and a bounded host execution policy. The checker still
 rejects ill-typed Ink programs and checks proof applications during compilation.
 
 Callers provide the arity, shapes and numeric ranges declared in `metadata`:
@@ -102,6 +102,11 @@ negative tests reject type errors and unsupported capabilities.
 
 Existing i32/f32 and fixed numerical vectors also cross state/action/keep/event boundaries. Scalar float comparisons use IEEE semantics; aggregate action equality compares stored float bits. Numerical checkpoints preserve payloads and signed zero. Arithmetic NaN payloads remain engine dependent.
 
+All targets consume [ink-abi](https://github.com/siliconjungle/ink-abi) for shared
+type/layout contracts. Early termination, owned-buffer transforms and helper
+unfolding are checked database choices. The backend emits the resulting general
+operations literally; it does not infer those transformations from source patterns.
+
 Standalone proof-selected representations use the compile-time checked witness
 and emit literal functions with native state retained between calls. Generated
 applications carry no proof package, checker context, source AST or Ink runtime
@@ -116,6 +121,4 @@ or produce incorrect results; raw native pointers also require valid alignment,
 length and lifetime. No malformed-input diagnostic or rollback is promised.
 Representation conversion/JSON parsing and explicit portable checkpoint integrity
 checks remain. Source/proof checking happens during compilation. Standalone
-representation calls skip whole-state checkpoint validation; read-only observation
-envelopes are erased when existing definitional computation establishes unchanged
-logical state/version and no events.
+representation calls skip whole-state checkpoint validation; query envelopes execute the literal proved physical step. Backend-specific envelope erasure has been removed.
