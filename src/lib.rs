@@ -8,8 +8,9 @@ pub struct Emission {
     pub javascript: String,
     pub manifest: Value,
 }
-mod state;
 pub mod definition;
+pub mod portable_definition;
+mod state;
 pub mod representation;
 type Env = BTreeMap<String, (String, Type)>;
 // Lexical occurrence, not identifier spelling alone: local binders shadow the
@@ -125,6 +126,31 @@ fn inline_body_nodes(e: &Expr) -> Option<usize> {
     Some(count)
 }
 
+fn needs_parallel(e: &Expr, p: &Program, seen: &mut std::collections::BTreeSet<String>) -> bool {
+    match e {
+        Expr::Call(n, args) => {
+            n == "parallel_map"
+                || args.iter().any(|a| needs_parallel(a, p, seen))
+                || p.functions
+                    .iter()
+                    .find(|f| &f.name == n)
+                    .is_some_and(|f| seen.insert(n.clone()) && needs_parallel(&f.body, p, seen))
+        }
+        Expr::Method(x, n, args) => {
+            n == "map_parallel"
+                || needs_parallel(x, p, seen)
+                || args.iter().any(|a| needs_parallel(a, p, seen))
+        }
+        Expr::Binary(_, a, b) | Expr::Let(_, _, a, b) => {
+            needs_parallel(a, p, seen) || needs_parallel(b, p, seen)
+        }
+        Expr::Lambda(_, x) | Expr::Neg(x) | Expr::Field(x, _) | Expr::Try(x) => {
+            needs_parallel(x, p, seen)
+        }
+        Expr::Record(_, fields) => fields.iter().any(|(_, x)| needs_parallel(x, p, seen)),
+        _ => false,
+    }
+}
 struct Emitter<'a> {
     p: &'a Program,
     next: usize,
@@ -133,6 +159,7 @@ struct Emitter<'a> {
     lines: String,
     inline_stack: Vec<String>,
     inline_remaining: usize,
+    callbacks: Vec<(String, String)>,
 }
 impl Emitter<'_> {
     fn fresh(&mut self) -> String {
@@ -148,6 +175,48 @@ impl Emitter<'_> {
         let name = self.fresh();
         self.line(format!("const {name}={value};"));
         name
+    }
+    fn parallel(
+        &mut self,
+        input: String,
+        grain: String,
+        callback: &Expr,
+        env: &Env,
+        inner: &Type,
+        result: &Type,
+    ) -> LangResult<String> {
+        let captures: Vec<_> = env
+            .iter()
+            .filter(|(n, (_, t))| {
+                references(callback, n) && !ink_core::local_collections::owned(t, self.p)
+            })
+            .collect();
+        let name = self.fresh();
+        let saved = std::mem::take(&mut self.lines);
+        let mut local = Env::new();
+        for (i, (n, (_, t))) in captures.iter().enumerate() {
+            local.insert((*n).clone(), (format!("captures[{i}]"), t.clone()));
+        }
+        let (body, local) = Self::callback(
+            callback,
+            &local,
+            &[("index".into(), Type::U32), ("item".into(), inner.clone())],
+        )?;
+        let value = self.expr(body, &local, Some(result))?;
+        let lines = std::mem::replace(&mut self.lines, saved);
+        self.callbacks.push((
+            name.clone(),
+            format!("function(captures,index,item){{{lines}return {value};}}"),
+        ));
+        Ok(format!(
+            "__parallel({}, {input}, {grain}, [{}])",
+            quote(&name),
+            captures
+                .iter()
+                .map(|(_, (v, _))| v.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        ))
     }
     fn types(env: &Env) -> check::Env {
         env.iter()
@@ -832,30 +901,17 @@ impl Emitter<'_> {
                 format!("({}).length", self.expr(&args[0], env, None)?)
             }
             Expr::Call(n, args) if n == "parallel_map" => {
-                // Evaluate inputs in source order; the JS target is sequential.
                 let input = self.expr(&args[0], env, None)?;
                 let input = self.bind(&input);
                 let grain = self.expr(&args[1], env, Some(&Type::U32))?;
-                self.bind(&grain);
-                let mut local = env.clone();
-                // The temporary source binder must not shadow a caller capture.
-                let mut source_name = "__parallel_input".to_owned();
-                while local.contains_key(&source_name) {
-                    source_name.push('_');
-                }
-                local.insert(
-                    source_name.clone(),
-                    (input, self.infer(&args[0], env, None)?),
-                );
-                self.expr(
-                    &Expr::Method(
-                        Box::new(Expr::Var(source_name)),
-                        "map_indexed".into(),
-                        vec![args[2].clone()],
-                    ),
-                    &local,
-                    Some(&t),
-                )?
+                let grain = self.bind(&grain);
+                let Type::List(inner) = self.infer(&args[0], env, None)? else {
+                    unreachable!()
+                };
+                let Type::List(result) = &t else {
+                    unreachable!()
+                };
+                self.parallel(input, grain, &args[2], env, &inner, result)?
             }
             Expr::Call(n, args) if n == "repeat_until" => {
                 let limit = self.expr(&args[0], env, Some(&Type::U32))?;
@@ -910,18 +966,8 @@ impl Emitter<'_> {
                         unreachable!()
                     };
                     let grain = self.expr(&args[0], env, Some(&Type::U32))?;
-                    self.bind(&grain);
-                    let i = self.fresh();
-                    self.line(format!("for(let {i}=0;{i}<{xv}.length;{i}++){{"));
-                    let element = self.bind(&format!("__tempCopy({xv}[{i}])"));
-                    let (body, local) = Self::callback(
-                        &args[1],
-                        env,
-                        &[(format!("({i}>>>0)"), Type::U32), (element, *inner.clone())],
-                    )?;
-                    let v = self.expr(body, &local, Some(inner))?;
-                    self.line(format!("{xv}[{i}]={v};}}"));
-                    return Ok(xv);
+                    let grain = self.bind(&grain);
+                    return self.parallel(xv, grain, &args[1], env, inner, inner);
                 }
                 if n == "split_at" {
                     let at = self.expr(&args[0], env, Some(&Type::U32))?;
@@ -1196,6 +1242,7 @@ fn lower_with_layout(
         lines: String::new(),
         inline_stack: Vec::new(),
         inline_remaining: INLINE_NODE_BUDGET,
+        callbacks: Vec::new(),
     };
     let mut javascript = String::new();
     let mut functions = vec![];
@@ -1237,7 +1284,7 @@ fn lower_with_layout(
         } else {
             Value::Null
         };
-        functions.push(json!({"index":i,"name":f.name,"params":params,"result":result,"destination":destination,"internal":ink_core::local_collections::owned(&f.result,p)||f.params.iter().any(|(_,t)|ink_core::local_collections::owned(t,p))}));
+        functions.push(json!({"index":i,"name":f.name,"params":params,"result":result,"parallel":needs_parallel(&f.body,p,&mut std::collections::BTreeSet::new()),"destination":destination,"internal":ink_core::local_collections::owned(&f.result,p)||f.params.iter().any(|(_,t)|ink_core::local_collections::owned(t,p))}));
     }
     // A separate budget ensures adding the destination capability does not
     // change the ordinary entrypoints' bounded inlining decisions.
@@ -1282,6 +1329,17 @@ fn lower_with_layout(
     let needs_conversion = interface.to_string().contains("\"kind\":\"f32\"")
         || interface.to_string().contains("\"kind\":\"int\"")
         || interface.to_string().contains("\"kind\":\"id\"");
+    if !emitter.callbacks.is_empty() {
+        javascript.push_str(&format!(
+            "const __parallelCallbacks=Object.freeze({{{}}});\n",
+            emitter
+                .callbacks
+                .iter()
+                .map(|(n, b)| format!("{}:{b}", quote(n)))
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
     let mut helpers = String::new();
     for section in include_str!("values.mjs").split("// @helper ").skip(1) {
         let (name, source) = section.split_once('\n').unwrap();
@@ -1449,6 +1507,9 @@ export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.f
         javascript.push_str(&format!("export function callInto(name,args,destination){{switch(name){{{internal_cases}throw new Error('temporary storage is internal to a pure invocation');}}return functionsInto[name](...args,destination);}}\n"));
     }
 
+    if !emitter.callbacks.is_empty() {
+        javascript.push_str(include_str!("parallel.mjs"));
+    }
     let mut manifest = interface;
     manifest["javascript_sha256"] = json!(format!("{:x}", Sha256::digest(javascript.as_bytes())));
     manifest["trusted"] = json!([
