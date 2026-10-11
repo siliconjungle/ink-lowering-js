@@ -745,7 +745,7 @@ impl Emitter<'_> {
                 };
                 if n == "buffer" {
                     format!(
-                        "__tempCopy(Array.from({}))",
+                        "new __InkBuffer(__tempCopy(Array.from({})))",
                         self.expr(&args[0], env, Some(&Type::List(inner.clone())))?
                     )
                 } else {
@@ -758,7 +758,7 @@ impl Emitter<'_> {
             }
             Expr::Method(x, _, _) if matches!(x.as_ref(),Expr::Var(v) if v=="Buffer" || v=="Map") => {
                 if matches!(t, Type::Buffer(_)) {
-                    "[]".into()
+                    "new __InkBuffer([])".into()
                 } else {
                     "new Map()".into()
                 }
@@ -778,12 +778,12 @@ impl Emitter<'_> {
                     self.line(format!(
                         "let {kept}=0;for(let {i}=0;{i}<{xv}.length;{i}++){{"
                     ));
-                    let element = self.bind(&format!("__tempCopy({xv}[{i}])"));
+                    let element = self.bind(&format!("__tempCopy({xv}.item({i}))"));
                     let (body, local) =
                         Self::callback(&args[0], env, &[(element.clone(), *inner.clone())])?;
                     let pred = self.expr(body, &local, Some(&Type::Bool))?;
                     self.line(format!(
-                        "if({pred}){{{xv}[{kept}++]={element};}}}}{xv}.length={kept};"
+                        "if({pred}){{{xv}.set({kept}++,{element});}}}}{xv}.length={kept};"
                     ));
                     return Ok(xv);
                 }
@@ -797,7 +797,7 @@ impl Emitter<'_> {
                         self.line(format!("let {acc}={};", zero(inner)));
                     }
                     self.line(format!("for(let {i}=0;{i}<{xv}.length;{i}++){{"));
-                    let element = self.bind(&format!("__tempCopy({xv}[{i}])"));
+                    let element = self.bind(&format!("__tempCopy({xv}.item({i}))"));
                     let value = if n == "scan" {
                         let add = arithmetic("+", &acc, &element, inner);
                         self.line(format!("{acc}={add};"));
@@ -811,7 +811,7 @@ impl Emitter<'_> {
                         let (body, local) = Self::callback(&args[0], env, &params)?;
                         self.expr(body, &local, Some(inner))?
                     };
-                    self.line(format!("{xv}[{i}]={value};}}"));
+                    self.line(format!("{xv}.set({i},{value});}}"));
                     return Ok(xv);
                 }
                 if n == "map_parallel" {
@@ -820,24 +820,29 @@ impl Emitter<'_> {
                     };
                     let grain = self.expr(&args[0], env, Some(&Type::U32))?;
                     let grain = self.bind(&grain);
-                    return self.parallel(xv, grain, &args[1], env, inner, inner);
+                    return Ok(format!(
+                        "new __InkBuffer({})",
+                        self.parallel(xv, grain, &args[1], env, inner, inner)?
+                    ));
                 }
                 if n == "split_at" {
                     let at = self.expr(&args[0], env, Some(&Type::U32))?;
                     let at = self.bind(&at);
-                    let right = self.bind(&format!("{xv}.splice(Math.min({at},{xv}.length))"));
-                    let (body, local) =
-                        Self::callback(&args[1], env, &[(xv, xt.clone()), (right, xt.clone())])?;
+                    let parts = self.bind(&format!("__bufferSplit({xv},{at})"));
+                    let (body, local) = Self::callback(
+                        &args[1],
+                        env,
+                        &[
+                            (format!("{parts}[0]"), xt.clone()),
+                            (format!("{parts}[1]"), xt.clone()),
+                        ],
+                    )?;
                     return self.expr(body, &local, Some(&xt));
                 }
                 if n == "append" {
                     let other = self.expr(&args[0], env, Some(&xt))?;
                     let other = self.bind(&other);
-                    let i = self.fresh();
-                    self.line(format!(
-                        "for(let {i}=0;{i}<{other}.length;{i}++){{{xv}.push({other}[{i}]);}}"
-                    ));
-                    return Ok(xv);
+                    return Ok(format!("__bufferAppend({xv},{other})"));
                 }
                 let (key, value) = match &xt {
                     Type::Buffer(inner) => (Type::U32, inner.as_ref()),
@@ -868,7 +873,7 @@ impl Emitter<'_> {
                             format!("{xv}.has({kv})")
                         };
                         let access = if n == "at_or" {
-                            format!("{xv}[{kv}]")
+                            format!("{xv}.item({kv})")
                         } else {
                             format!("{xv}.get({kv})")
                         };
@@ -881,7 +886,7 @@ impl Emitter<'_> {
                     }
                     "contains" => format!("({xv}).has({kv})"),
                     "keys" | "values" => format!("__mapEntries({xv}, {})", n == "keys"),
-                    "freeze" => xv,
+                    "freeze" => format!("{xv}.freeze()"),
                     "set" => format!(
                         "__tempSet({xv},{kv},{},{})",
                         self.expr(&args[1], env, Some(value))?,
@@ -1265,6 +1270,9 @@ fn lower_with_layout(
     }
     let temporary = include_str!("temporary.mjs");
     if [
+        "__InkBuffer",
+        "__bufferSplit",
+        "__bufferAppend",
         "__tempCopy",
         "__mapGet",
         "__mapEntries",
