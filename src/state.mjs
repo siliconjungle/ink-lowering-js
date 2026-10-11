@@ -23,8 +23,7 @@ function __table(rt,index,method,args){
  if(method==='values')return [...table.entries()].sort((a,b)=>__keyCompare(a[0],b[0],rt.meta.roots[index].key)).map(([k,v])=>v);
  if(method==='get')return table.has(key)?{Some:table.get(key)}:{None:null};
  if(method==='contains')return table.has(key);
- if(method==='remove')rt.undo.push([index,key,table.has(key),table.get(key)]);
- if(method==='remove'){const old=table.has(key)?{Some:table.get(key)}:{None:null};table.delete(key);return old;}
+ if(method==='remove'){const present=table.has(key),value=table.get(key);if(present){rt.undo.push([index,key,true,value]);table.delete(key);}return present?{Some:value}:{None:null};}
  if(method==='insert'&&table.has(key))throw Error('insert key already present');
  if(method==='replace'&&!table.has(key))throw Error('replace key absent');
  rt.undo.push([index,key,table.has(key),table.get(key)]);table.set(key,args[1]);return null;

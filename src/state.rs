@@ -144,7 +144,55 @@ impl StateEmitter<'_> {
                     format!("(({a}) {op} ({b}))")
                 }
             }
+            Expr::Let(n, annotation, value, body) => {
+                let t = self.infer(value, env, annotation.as_deref())?;
+                let value = self.expr(value, env, Some(&t))?;
+                let variable = self.fresh();
+                let mut local = env.clone();
+                local.insert(n.clone(), (variable.clone(), t));
+                format!(
+                    "(({variable})=>({}))({value})",
+                    self.expr(body, &local, want)?
+                )
+            }
             Expr::Call(n, args) => match n.as_str() {
+                name if ink_core::word::primitive(name) => {
+                    let ts = ink_core::word::arguments(name, &t);
+                    let vals = args
+                        .iter()
+                        .zip(ts)
+                        .map(|(a, t)| self.expr(a, env, Some(&t)))
+                        .collect::<LangResult<Vec<_>>>()?;
+                    format!(
+                        "__word({},{},{},{})",
+                        quote(name),
+                        vals[0],
+                        vals.get(1).map(String::as_str).unwrap_or("0"),
+                        match t {
+                            Type::I32 => -32,
+                            Type::U32 => 32,
+                            _ => 64,
+                        }
+                    )
+                }
+                "choose" => format!(
+                    "({}?{}:{})",
+                    self.expr(&args[0], env, Some(&Type::Bool))?,
+                    self.expr(&args[1], env, Some(&t))?,
+                    self.expr(&args[2], env, Some(&t))?
+                ),
+                "list" => {
+                    let Type::List(inner) = &t else {
+                        return Err("list type".into());
+                    };
+                    format!(
+                        "[{}]",
+                        args.iter()
+                            .map(|e| self.expr(e, env, Some(inner)))
+                            .collect::<LangResult<Vec<_>>>()?
+                            .join(",")
+                    )
+                }
                 "vec2" | "vec3" | "vec4" => format!(
                     "[{}]",
                     args.iter()
@@ -162,7 +210,10 @@ impl StateEmitter<'_> {
                 }
                 "Int" => format!("BigInt({})", self.expr(&args[0], env, None)?),
                 "checked_add" | "checked_sub" | "checked_mul" => {
-                    let at = self.infer(&args[0], env, None)?;
+                    let Type::Result(at, _) = &t else {
+                        return Err("checked arithmetic type".into());
+                    };
+                    let at = *at.clone();
                     format!(
                         "__checked({}, {}, {}, {})",
                         quote(n),
@@ -249,7 +300,30 @@ impl StateEmitter<'_> {
                     format!("__table(rt,{i},{},[{}])", quote(n), values.join(","))
                 } else {
                     let x = self.expr(xs, env, None)?;
-                    if n == "ok_or" {
+                    if n == "fold" {
+                        let (a, b, tag_a, tag_b) = match &xt {
+                            Type::Option(a) => (a.as_ref().clone(), Type::Unit, "Some", "None"),
+                            Type::Result(a, b) => {
+                                (a.as_ref().clone(), b.as_ref().clone(), "Ok", "Err")
+                            }
+                            _ => return Err("fold receiver".into()),
+                        };
+                        let value = self.fresh();
+                        let mut codes = vec![];
+                        for (arg, input) in args.iter().zip([a, b]) {
+                            let Expr::Lambda(v, body) = arg else {
+                                return Err("fold lambda".into());
+                            };
+                            let variable = self.fresh();
+                            let mut local = env.clone();
+                            local.insert(v.clone(), (variable.clone(), input));
+                            codes.push(format!(
+                                "({variable})=>({})",
+                                self.expr(body, &local, want)?
+                            ));
+                        }
+                        format!("(({value})=>Object.hasOwn({value},{})?({})({value}[{}]):({})({}))({x})",quote(tag_a),codes[0],quote(tag_a),codes[1],if tag_b=="None"{"null".into()}else{format!("{value}[{}]",quote(tag_b))})
+                    } else if n == "ok_or" {
                         format!("__okOr({x},{})", self.expr(&args[0], env, None)?)
                     } else {
                         let inner = match &xt {
