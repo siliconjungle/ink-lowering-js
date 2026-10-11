@@ -21,6 +21,8 @@ function __keyCompare(a,b,type){
 // fetched at traversal time, so replacement never leaves stale row payloads.
 const __tableOrder=new WeakMap();
 function __orderedKeys(rt,index){const table=rt.tables[index];let keys=__tableOrder.get(table);if(!keys){keys=[...table.keys()].sort((a,b)=>__keyCompare(a,b,rt.meta.roots[index].key));__tableOrder.set(table,keys);}return keys;}
+// The first before-image of each cell suffices for whole-transaction rollback.
+function __remember(rt,index,key,present,value){if(!rt.seen[index].has(key)){rt.seen[index].add(key);rt.undo.push([index,key,present,value]);}}
 function __table(rt,index,method,args){
  const table=rt.tables[index],key=args[0];
  if(method==='values'||method==='keys'){const keys=__orderedKeys(rt,index);return method==='keys'?keys.slice():keys.map(k=>table.get(k));}
@@ -30,15 +32,15 @@ function __table(rt,index,method,args){
  if(method==='remove_many'){for(const k of args[0])__table(rt,index,'remove',[k]);return null;}
  if(method==='get')return table.has(key)?{Some:table.get(key)}:{None:null};
  if(method==='contains')return table.has(key);
- if(method==='remove'){const present=table.has(key),value=table.get(key);if(present){__tableOrder.delete(table);rt.undo.push([index,key,true,value]);table.delete(key);}return present?{Some:value}:{None:null};}
+ if(method==='remove'){const present=table.has(key),value=table.get(key);if(present){__tableOrder.delete(table);__remember(rt,index,key,true,value);table.delete(key);}return present?{Some:value}:{None:null};}
  if(method==='insert'&&table.has(key))throw Error('insert key already present');
  if(method==='replace'&&!table.has(key))throw Error('replace key absent');
  if(!table.has(key))__tableOrder.delete(table);
- rt.undo.push([index,key,table.has(key),table.get(key)]);table.set(key,args[1]);return null;
+ __remember(rt,index,key,table.has(key),table.get(key));table.set(key,args[1]);return null;
 }
 function __rollback(rt,mark){for(let i=rt.undo.length-1;i>=mark;i--){const [index,key,present,value]=rt.undo[i];const table=rt.tables[index];if(table.has(key)!==present)__tableOrder.delete(table);if(present)table.set(key,value);else table.delete(key);}rt.undo.length=mark;}
 function __createState(meta,implementations){
- const rt={meta,tables:meta.roots.map(()=>new Map()),version:0n,outbox:[],staged:[],busy:false,undo:[],host:null};
+ const rt={meta,tables:meta.roots.map(()=>new Map()),version:0n,outbox:[],staged:[],busy:false,undo:[],seen:meta.roots.map(()=>new Set()),host:null};
  const actionMap=new Map(meta.actions.map(a=>[a.name,a]));
  function invoke(name,args){
   if(rt.busy)throw Error('state operation already in progress');
@@ -58,7 +60,7 @@ function __createState(meta,implementations){
    rt.version=next;for(const event of pending)rt.outbox.push(event);
    return {result,committed:true,version:next,events};
   }catch(e){__rollback(rt,mark);rt.version=version;rt.outbox=outbox;rt.outbox.length=outboxLength;throw e;}
-  finally{rt.staged=[];rt.busy=false;if(!rt.host)rt.undo.length=0;}
+  finally{rt.staged=[];rt.busy=false;for(const seen of rt.seen)seen.clear();if(!rt.host)rt.undo.length=0;}
  }
  return Object.freeze({
   invoke,invoke_json:invoke,
