@@ -52,8 +52,9 @@ fn needs_parallel(e: &Expr, p: &Program, seen: &mut std::collections::BTreeSet<S
     let mut found = false;
     ink_core::analysis::walk(e, |node: &Expr| match node {
         Expr::Call(name, _) => {
-            if name == "parallel_map" { found = true; }
-            else if seen.insert(name.clone()) {
+            if name == "parallel_map" {
+                found = true;
+            } else if seen.insert(name.clone()) {
                 if let Some(f) = p.functions.iter().find(|f| f.name == *name) {
                     found |= needs_parallel(&f.body, p, seen);
                 }
@@ -99,7 +100,8 @@ impl Emitter<'_> {
         let captures: Vec<_> = env
             .iter()
             .filter(|(n, (_, t))| {
-                ink_core::analysis::references_free(callback, n) && !ink_core::local_collections::owned(t, self.p)
+                ink_core::analysis::references_free(callback, n)
+                    && !ink_core::local_collections::owned(t, self.p)
             })
             .collect();
         let name = self.fresh();
@@ -595,7 +597,7 @@ impl Emitter<'_> {
                 }
                 format!("({{{}}})", values.join(","))
             }
-            Expr::Field(a, n) if matches!(a.as_ref(),Expr::Var(root) if self.p.enums.contains_key(root)||root=="ArithmeticError") =>
+            Expr::Field(a, n) if matches!(a.as_ref(),Expr::Var(root) if !env.contains_key(root) && (self.p.enums.contains_key(root)||root=="ArithmeticError")) =>
             {
                 let Expr::Var(root) = a.as_ref() else {
                     unreachable!()
@@ -619,7 +621,7 @@ impl Emitter<'_> {
             }
             Expr::Binary(op, a, b) => {
                 let ts = Self::types(env);
-                let context = if check::is_number(&t) {
+                let context = if check::is_numeric_value(&t) {
                     Some(t.clone())
                 } else {
                     check::hint(a, &ts, self.p).or_else(|| check::hint(b, &ts, self.p))
@@ -641,6 +643,8 @@ impl Emitter<'_> {
                 let bv = self.bind(&bv);
                 if ["+", "-", "*"].contains(&op.as_str()) {
                     arithmetic(op, &av, &bv, &at)
+                } else if (op == "==" || op == "!=") && at != Type::F32 {
+                    format!("{}__equal({av},{bv})", if op == "!=" { "!" } else { "" })
                 } else {
                     let (av, bv) = if at == Type::F32 {
                         (format!("__float({av})"), format!("__float({bv})"))
@@ -909,7 +913,7 @@ impl Emitter<'_> {
                 self.line(format!("{out}={value};}}"));
                 out
             }
-            Expr::Call(n, args) if n == "foldr" || n == "fold_until" => {
+            Expr::Call(n, args) if n == "foldr" || n == "foldl" || n == "fold_until" => {
                 let Type::List(inner) = self.infer(&args[0], env, None)? else {
                     unreachable!()
                 };
@@ -919,10 +923,10 @@ impl Emitter<'_> {
                 let out = self.fresh();
                 let index = self.fresh();
                 self.line(format!("let {out}={initial};"));
-                self.line(if n == "fold_until" {
-                    format!("for(let {index}=0;{index}<{xs}.length;{index}++){{")
-                } else {
+                self.line(if n == "foldr" {
                     format!("for(let {index}={xs}.length-1;{index}>=0;{index}--){{")
+                } else {
+                    format!("for(let {index}=0;{index}<{xs}.length;{index}++){{")
                 });
                 let element = self.bind(&format!("{xs}[{index}]"));
                 let values = [(element, *inner), (out.clone(), t.clone())];
@@ -965,6 +969,36 @@ impl Emitter<'_> {
                     out
                 }
             }
+            Expr::Call(n, args) if n == "list" => {
+                let Type::List(inner) = &t else {
+                    return Err("list type".into());
+                };
+                let mut values = Vec::new();
+                for e in args {
+                    let value = self.expr(e, env, Some(inner))?;
+                    values.push(self.bind(&value));
+                }
+                format!("[{}]", values.join(","))
+            }
+            Expr::Call(n, args) if ink_core::word::primitive(n) => {
+                let ts = ink_core::word::arguments(n, &t);
+                let mut vals = vec![];
+                for (a, t) in args.iter().zip(ts) {
+                    let v = self.expr(a, env, Some(&t))?;
+                    vals.push(self.bind(&v));
+                }
+                format!(
+                    "__word({},{},{},{})",
+                    quote(n),
+                    vals[0],
+                    vals.get(1).map(String::as_str).unwrap_or("0"),
+                    match t {
+                        Type::I32 => -32,
+                        Type::U32 => 32,
+                        _ => 64,
+                    }
+                )
+            }
             Expr::Call(n, args) if ["Some", "Ok", "Err"].contains(&n.as_str()) => {
                 let inner = match (&t, n.as_str()) {
                     (Type::Option(a), "Some") | (Type::Result(a, _), "Ok") => a.as_ref(),
@@ -981,7 +1015,10 @@ impl Emitter<'_> {
             Expr::Call(n, args)
                 if ["checked_add", "checked_sub", "checked_mul"].contains(&n.as_str()) =>
             {
-                let at = self.infer(&args[0], env, None)?;
+                let Type::Result(at, _) = &t else {
+                    return Err("checked arithmetic type".into());
+                };
+                let at = *at.clone();
                 let a = self.expr(&args[0], env, Some(&at))?;
                 let a = self.bind(&a);
                 let b = self.expr(&args[1], env, Some(&at))?;
@@ -1023,6 +1060,31 @@ impl Emitter<'_> {
                 let xt = self.infer(xs, env, None)?;
                 let value = self.expr(xs, env, None)?;
                 let value = self.bind(&value);
+                if method == "fold" {
+                    let (a, b, tag_a, tag_b) = match &xt {
+                        Type::Option(a) => (a.as_ref().clone(), Type::Unit, "Some", "None"),
+                        Type::Result(a, b) => (a.as_ref().clone(), b.as_ref().clone(), "Ok", "Err"),
+                        _ => unreachable!(),
+                    };
+                    let out = self.fresh();
+                    self.line(format!(
+                        "let {out};if(Object.hasOwn({value},{})){{",
+                        quote(tag_a)
+                    ));
+                    let item = self.bind(&format!("{value}[{}]", quote(tag_a)));
+                    let (body, local) = Self::callback(&args[0], env, &[(item, a)])?;
+                    let body = self.expr(body, &local, Some(&t))?;
+                    self.line(format!("{out}={body};}}else{{"));
+                    let item = self.bind(&if tag_b == "None" {
+                        "null".into()
+                    } else {
+                        format!("{value}[{}]", quote(tag_b))
+                    });
+                    let (body, local) = Self::callback(&args[1], env, &[(item, b)])?;
+                    let body = self.expr(body, &local, Some(&t))?;
+                    self.line(format!("{out}={body};}}"));
+                    return Ok(out);
+                }
                 let (tag, inner) = match (&xt, method.as_str()) {
                     (Type::Option(a), _) => ("Some", a.as_ref()),
                     (Type::Result(a, _), "map") => ("Ok", a.as_ref()),
@@ -1231,6 +1293,9 @@ fn lower_with_layout(
             .unwrap()
             .1;
         helpers.push_str(pure);
+    }
+    if has_state || javascript.contains("__word(") {
+        helpers.push_str(include_str!("word.mjs"));
     }
     javascript = helpers + &javascript;
     let named = p
