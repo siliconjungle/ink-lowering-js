@@ -241,10 +241,23 @@ impl StateEmitter<'_> {
                         .iter()
                         .position(|d| &d.name == root)
                         .ok_or("table index")?;
+                    if n=="sum_by" || n=="count_where" {
+                        let Expr::Lambda(parameter,body)=&args[0] else {return Err("scan callback".into());};
+                        let var=self.fresh();let mut local=env.clone();local.insert(parameter.clone(),(var.clone(),*vt));
+                        let callback=self.expr(body,&local,None)?;
+                        let add=if n=="count_where" {"acc+1n".into()} else if t==Type::Int {"acc+contribution".into()} else {arithmetic("+","acc","contribution",&t)};
+                        let step=if n=="count_where" {format!("if(contribution)acc={add};")} else {format!("acc={add};")};
+                        return Ok(format!("(()=>{{let acc={};for(const key of __orderedKeys(rt,{i})){{__tick(ctx);const {var}=rt.tables[{i}].get(key);const contribution={callback};{step}}}return acc;}})()",if t==Type::Int {"0n".into()}else{zero(&t)}));
+                    }
+                    if n=="shared_keys" {
+                        let Expr::Var(other)=&args[0] else{return Err("shared_keys root".into());};
+                        let j=self.p.states.iter().position(|s| &s.name==other).ok_or("shared_keys table")?;
+                        return Ok(format!("__table(rt,{i},\"intersect_table\",[{j}])"));
+                    }
                     let values = args
                         .iter()
                         .enumerate()
-                        .map(|(i, e)| self.expr(e, env, Some(if i == 0 { &kt } else { &vt })))
+                        .map(|(i, e)| self.expr(e, env, Some(&ink_core::table_argument(n, i, &kt, &vt))))
                         .collect::<LangResult<Vec<_>>>()?;
                     format!("__table(rt,{i},{},[{}])", quote(n), values.join(","))
                 } else {

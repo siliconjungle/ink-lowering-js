@@ -17,37 +17,47 @@ function __keyCompare(a,b,type){
  if(type.kind==='string'){const x=__encoder.encode(a),y=__encoder.encode(b);for(let i=0;i<Math.min(x.length,y.length);i++)if(x[i]!==y[i])return x[i]-y[i];return x.length-y.length;}
  return a<b?-1:a>b?1:0;
 }
+// A table's ordered key view is reused until membership changes. Values are
+// fetched at traversal time, so replacement never leaves stale row payloads.
+const __tableOrder=new WeakMap();
+function __orderedKeys(rt,index){const table=rt.tables[index];let keys=__tableOrder.get(table);if(!keys){keys=[...table.keys()].sort((a,b)=>__keyCompare(a,b,rt.meta.roots[index].key));__tableOrder.set(table,keys);}return keys;}
 function __table(rt,index,method,args){
  const table=rt.tables[index],key=args[0];
- if(method==='values')return [...table.entries()].sort((a,b)=>__keyCompare(a[0],b[0],rt.meta.roots[index].key)).map(([k,v])=>v);
+ if(method==='values'||method==='keys'){const keys=__orderedKeys(rt,index);return method==='keys'?keys.slice():keys.map(k=>table.get(k));}
+ if(method==='intersect_table'){const other=rt.tables[args[0]],small=table.size<=other.size?table:other,large=small===table?other:table;const result=[];for(const k of small.keys())if(large.has(k))result.push(k);return result.sort((a,b)=>__keyCompare(a,b,rt.meta.roots[index].key));}
+ if(method==='intersect_keys'){const selected=new Set(args[0]);return __orderedKeys(rt,index).filter(k=>selected.has(k));}
+ if(method==='put_many'){const keys=args[0],values=args[1];if(keys.length!==values.length)return {Err:'table bulk length mismatch'};for(let i=0;i<keys.length;i++)__table(rt,index,'put',[keys[i],values[i]]);return {Ok:null};}
+ if(method==='remove_many'){for(const k of args[0])__table(rt,index,'remove',[k]);return null;}
  if(method==='get')return table.has(key)?{Some:table.get(key)}:{None:null};
  if(method==='contains')return table.has(key);
- if(method==='remove'){const old=table.has(key)?{Some:table.get(key)}:{None:null};table.delete(key);return old;}
+ if(method==='remove'){const present=table.has(key),value=table.get(key);if(present){__tableOrder.delete(table);rt.undo.push([index,key,true,value]);table.delete(key);}return present?{Some:value}:{None:null};}
  if(method==='insert'&&table.has(key))throw Error('insert key already present');
  if(method==='replace'&&!table.has(key))throw Error('replace key absent');
- table.set(key,args[1]);return null;
+ if(!table.has(key))__tableOrder.delete(table);
+ rt.undo.push([index,key,table.has(key),table.get(key)]);table.set(key,args[1]);return null;
 }
+function __rollback(rt){for(let i=rt.undo.length-1;i>=0;i--){const [index,key,present,value]=rt.undo[i];__tableOrder.delete(rt.tables[index]);if(present)rt.tables[index].set(key,value);else rt.tables[index].delete(key);}rt.undo.length=0;}
 function __createState(meta,implementations){
- const rt={meta,tables:meta.roots.map(()=>new Map()),version:0n,outbox:[],staged:[],busy:false};
+ const rt={meta,tables:meta.roots.map(()=>new Map()),version:0n,outbox:[],staged:[],undo:[],busy:false};
  const actionMap=new Map(meta.actions.map(a=>[a.name,a]));
  function invoke(name,args){
   if(rt.busy)throw Error('state operation already in progress');
   const a=actionMap.get(name);if(!a)throw Error(`unknown action ${name}`);
   const captured=a.params.map((p,i)=>__stateInput(args[i],p.type));
-  const tables=a.change?rt.tables.map(t=>new Map(t)):rt.tables,version=rt.version,outbox=rt.outbox;
+  const version=rt.version,outbox=rt.outbox;rt.undo.length=0;
   rt.busy=true;rt.staged=[];
   try{
    const value=implementations[a.index]({fuel:100000000},rt,...captured);
    const result=__stateOutput(value,a.result,{cells:1000000});
    if(!a.change)return {result,committed:false,version,events:[]};
-   if(Object.hasOwn(value,'Err')){rt.tables=tables;return {result,committed:false,version,events:[]};}
+   if(Object.hasOwn(value,'Err')){__rollback(rt);return {result,committed:false,version,events:[]};}
    if(version===18446744073709551615n)throw Error('commit sequence exhausted');
    const next=version+1n;
    const events=rt.staged.map(([channel,value],i)=>({commit:next,position:BigInt(i),channel,value:__stateOutput(value,meta.events.find(e=>e.name===channel).type,{cells:1000000})}));
    const pending=rt.staged.map(([channel,value],i)=>({commit:next,position:BigInt(i),channel,value}));
-   rt.version=next;rt.outbox=outbox.concat(pending);
+   rt.version=next;rt.outbox=outbox.concat(pending);rt.undo.length=0;
    return {result,committed:true,version:next,events};
-  }catch(e){rt.tables=tables;rt.version=version;rt.outbox=outbox;throw e;}
+  }catch(e){__rollback(rt);rt.version=version;rt.outbox=outbox;throw e;}
   finally{rt.staged=[];rt.busy=false;}
  }
  return Object.freeze({
