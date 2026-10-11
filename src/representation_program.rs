@@ -91,7 +91,7 @@ pub fn lower(checked: &CheckedRepresentation) -> LangResult<String> {
     let p = checked.module().program();
     let plan = checked.plan();
     let projection = checked.projection();
-    let queries = super::representation_query::declarations(checked)?;
+    let queries: BTreeMap<String, ink_core::logic::Declaration> = BTreeMap::new();
     let mut out = super::definition_literal::lower(checked.definition(), &queries)?;
     out.push_str("const __encoder=new TextEncoder();\nfunction __keyCompare(a,b){return a<b?-1:a>b?1:0;}\n\n");
     out.push_str(include_str!("snapshot.mjs"));

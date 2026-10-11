@@ -26,7 +26,9 @@ fn literal_collection_stages_preserve_full_outputs_lifetimes_and_eager_stages() 
     let cases = rows(&p);
     let cases:Vec<_>=cases.iter().map(|(n,a,v)|json!({"name":n,"args":a.iter().map(wire).collect::<Vec<_>>(),"expected":expected(v)})).collect();
     let dir = directory("js");
-    fs::write(dir.join("output.mjs"), emitted.javascript).unwrap();
+    // The allocation probe must also observe fresh filter arrays spelled as [].
+    // Instrument only the test artifact; array literals bypass the Array proxy.
+    fs::write(dir.join("output.mjs"), emitted.javascript.replace("=[];", "=new Array(0);")).unwrap();
     fs::write(dir.join("cases.json"), serde_json::to_vec(&cases).unwrap()).unwrap();
     fs::write(dir.join("test.mjs"),r#"import assert from'node:assert/strict';import fs from'node:fs';import{functions,functionsInto,metadata}from'./output.mjs';
 const view=new DataView(new ArrayBuffer(4));const bits=v=>{if(v&&typeof v==='object')return v.F32Bits;view.setFloat32(0,v,true);return view.getUint32(0,true);};

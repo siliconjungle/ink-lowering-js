@@ -8,9 +8,9 @@ pub struct Emission {
     pub javascript: String,
     pub manifest: Value,
 }
-mod state;
 pub mod definition;
 pub mod representation;
+mod state;
 type Env = BTreeMap<String, (String, Type)>;
 // Lexical occurrence, not identifier spelling alone: local binders shadow the
 // fold accumulator, while a let initializer still uses its enclosing scope.
@@ -390,13 +390,6 @@ impl Emitter<'_> {
                 } else {
                     format!("new Array({len})")
                 });
-                let compact_count = if method == "filter" && reuse {
-                    let count = self.fresh();
-                    self.line(format!("let {count}=0;"));
-                    Some(count)
-                } else {
-                    None
-                };
                 let i = self.fresh();
                 self.line(format!("for(let {i}=0;{i}<{len};{i}++){{"));
                 let element = self.bind(&format!("{xs}[{i}]"));
@@ -428,18 +421,11 @@ impl Emitter<'_> {
                 let (body, local) = Self::callback(callback, env, &params)?;
                 let value = self.expr(body, &local, Some(result))?;
                 if method == "filter" {
-                    if let Some(count) = &compact_count {
-                        self.line(format!("if({value}){{{out}[{count}++]={element};}}"));
-                    } else {
-                        self.line(format!("if({value}){{{out}.push({element});}}"));
-                    }
+                    self.line(format!("if({value}){{{out}.push({element});}}"));
                 } else {
                     self.line(format!("{out}[{i}]={value};"));
                 }
                 self.line("}");
-                if let Some(count) = compact_count {
-                    self.line(format!("{out}.length={count};"));
-                }
                 out
             }
             _ => return Err(format!("unsupported JavaScript method {method}")),
@@ -1109,7 +1095,7 @@ fn lower_with_layout(
         functions.push(json!({"index":i,"name":f.name,"params":params,"result":result,"destination":destination,"internal":ink_core::local_collections::owned(&f.result,p)||f.params.iter().any(|(_,t)|ink_core::local_collections::owned(t,p))}));
     }
     // A separate budget ensures adding the destination capability does not
-    // change the ordinary entrypoints' bounded inlining decisions.
+    // change the ordinary entrypoints' emission resource limits.
     emitter.budget = 200_000;
     for (i, f) in p.functions.iter().enumerate() {
         if !matches!(f.result, Type::List(_)) {
@@ -1333,6 +1319,3 @@ export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.f
 
 mod definition_literal;
 pub mod representation_program;
-
-/// Compile-time read-only observation projection.
-pub mod representation_query;
