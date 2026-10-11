@@ -72,8 +72,72 @@ struct Emitter<'a> {
     depth: usize,
     lines: String,
     callbacks: Vec<(String, String)>,
+    equalities: BTreeMap<String, (String, String)>,
 }
 impl Emitter<'_> {
+    // Fixed structural equality over checked types. Contained F32 values are
+    // bit carriers; only top-level scalar F32 equality uses IEEE comparison.
+    fn value_equal(&mut self, t: &Type, a: &str, b: &str) -> LangResult<String> {
+        let key = serde_json::to_string(t).map_err(|e| e.to_string())?;
+        if let Some((name, _)) = self.equalities.get(&key) {
+            return Ok(format!("{name}({a},{b})"));
+        }
+        let composite = matches!(
+            t,
+            Type::List(_) | Type::Vector(..) | Type::Option(_) | Type::Result(..)
+        ) || matches!(t, Type::Named(n) if self.p.records.contains_key(n));
+        if !composite {
+            return Ok(format!("({a}==={b})"));
+        }
+        let name = format!("__valueEqual{}", self.equalities.len());
+        self.equalities
+            .insert(key.clone(), (name.clone(), String::new()));
+        let body = match t {
+            Type::List(inner) | Type::Vector(inner, _) => {
+                let item = self.value_equal(inner, "a[i]", "b[i]")?;
+                format!("if(a.length!==b.length)return false;for(let i=0;i<a.length;i++)if(!({item}))return false;return true;")
+            }
+            Type::Option(inner) => {
+                let item = self.value_equal(inner, "a.Some", "b.Some")?;
+                format!("const x=Object.hasOwn(a,'Some');return x===Object.hasOwn(b,'Some')&&(!x||{item});")
+            }
+            Type::Result(ok, err) => {
+                let yes = self.value_equal(ok, "a.Ok", "b.Ok")?;
+                let no = self.value_equal(err, "a.Err", "b.Err")?;
+                format!("const x=Object.hasOwn(a,'Ok');return x===Object.hasOwn(b,'Ok')&&(x?{yes}:{no});")
+            }
+            Type::Named(n) => {
+                let fields = self.p.records[n].clone();
+                let checks = fields
+                    .iter()
+                    .map(|(field, ty)| {
+                        self.value_equal(
+                            ty,
+                            &format!("a[{}]", quote(field)),
+                            &format!("b[{}]", quote(field)),
+                        )
+                    })
+                    .collect::<LangResult<Vec<_>>>()?;
+                format!(
+                    "return {};",
+                    if checks.is_empty() {
+                        "true".into()
+                    } else {
+                        checks.join("&&")
+                    }
+                )
+            }
+            _ => unreachable!(),
+        };
+        self.equalities.insert(
+            key,
+            (
+                name.clone(),
+                format!("function {name}(a,b){{if(a===b)return true;{body}}}\n"),
+            ),
+        );
+        Ok(format!("{name}({a},{b})"))
+    }
     fn fresh(&mut self) -> String {
         let n = format!("v{}", self.next);
         self.next += 1;
@@ -627,6 +691,35 @@ impl Emitter<'_> {
                     check::hint(a, &ts, self.p).or_else(|| check::hint(b, &ts, self.p))
                 };
                 let at = self.infer(a, env, context.as_ref())?;
+                // Literal record equality evaluates every field in source order,
+                // then compares stored values without allocating either wrapper.
+                if op == "==" || op == "!=" {
+                    if let (Expr::Record(an, aa), Expr::Record(bn, ba)) = (a.as_ref(), b.as_ref()) {
+                        if an == bn {
+                            let fields = self.p.records[an].clone();
+                            let mut values = Vec::new();
+                            for args in [aa, ba] {
+                                let mut row = BTreeMap::new();
+                                for (field, expr) in args {
+                                    let ft = &fields.iter().find(|(n, _)| n == field).unwrap().1;
+                                    let v = self.expr(expr, env, Some(ft))?;
+                                    row.insert(field.clone(), self.bind(&v));
+                                }
+                                values.push(row);
+                            }
+                            let checks = fields
+                                .iter()
+                                .map(|(n, ft)| self.value_equal(ft, &values[0][n], &values[1][n]))
+                                .collect::<LangResult<Vec<_>>>()?;
+                            let eq = if checks.is_empty() {
+                                "true".into()
+                            } else {
+                                checks.join("&&")
+                            };
+                            return Ok(format!("{}({eq})", if op == "!=" { "!" } else { "" }));
+                        }
+                    }
+                }
                 let av = self.expr(a, env, Some(&at))?;
                 let av = self.bind(&av);
                 if op == "&&" || op == "||" {
@@ -644,7 +737,11 @@ impl Emitter<'_> {
                 if ["+", "-", "*"].contains(&op.as_str()) {
                     arithmetic(op, &av, &bv, &at)
                 } else if (op == "==" || op == "!=") && at != Type::F32 {
-                    format!("{}__equal({av},{bv})", if op == "!=" { "!" } else { "" })
+                    format!(
+                        "{}{}",
+                        if op == "!=" { "!" } else { "" },
+                        self.value_equal(&at, &av, &bv)?
+                    )
                 } else {
                     let (av, bv) = if at == Type::F32 {
                         (format!("__float({av})"), format!("__float({bv})"))
@@ -745,7 +842,7 @@ impl Emitter<'_> {
                 };
                 if n == "buffer" {
                     format!(
-                        "new __InkBuffer(__tempCopy(Array.from({})))",
+                        "new __InkBuffer(Array.from({}))",
                         self.expr(&args[0], env, Some(&Type::List(inner.clone())))?
                     )
                 } else {
@@ -778,7 +875,7 @@ impl Emitter<'_> {
                     self.line(format!(
                         "let {kept}=0;for(let {i}=0;{i}<{xv}.length;{i}++){{"
                     ));
-                    let element = self.bind(&format!("__tempCopy({xv}.item({i}))"));
+                    let element = self.bind(&format!("{xv}.item({i})"));
                     let (body, local) =
                         Self::callback(&args[0], env, &[(element.clone(), *inner.clone())])?;
                     let pred = self.expr(body, &local, Some(&Type::Bool))?;
@@ -797,7 +894,7 @@ impl Emitter<'_> {
                         self.line(format!("let {acc}={};", zero(inner)));
                     }
                     self.line(format!("for(let {i}=0;{i}<{xv}.length;{i}++){{"));
-                    let element = self.bind(&format!("__tempCopy({xv}.item({i}))"));
+                    let element = self.bind(&format!("{xv}.item({i})"));
                     let value = if n == "scan" {
                         let add = arithmetic("+", &acc, &element, inner);
                         self.line(format!("{acc}={add};"));
@@ -878,7 +975,7 @@ impl Emitter<'_> {
                             format!("{xv}.get({kv})")
                         };
                         self.line(format!(
-                            "let {out};if({condition}){{{out}=__tempCopy({access});}}else{{"
+                            "let {out};if({condition}){{{out}={access};}}else{{"
                         ));
                         let fallback = self.expr(&args[1], env, Some(value))?;
                         self.line(format!("{out}={fallback};}}"));
@@ -1152,6 +1249,7 @@ fn lower_with_layout(
         depth: 0,
         lines: String::new(),
         callbacks: Vec::new(),
+        equalities: BTreeMap::new(),
     };
     let mut javascript = String::new();
     let mut functions = vec![];
@@ -1228,6 +1326,9 @@ fn lower_with_layout(
             vars.join(","),
             emitter.lines
         ));
+    }
+    for (_, source) in emitter.equalities.values() {
+        javascript.push_str(source);
     }
     let mut interface = json!({"schema":1,"backend":"javascript","abi":"ink-javascript-trusted-values-v2","destination_abi":{"name":"ink-javascript-into-v1","count_unit":"elements","ownership":"caller-owned","capacity":"trusted","aliasing":"destination-disjoint-from-all-reachable-inputs","tail":"unwritten"},"core_semantics":module.semantics(),"core_sha256":module.identity()?,"functions":functions});
     // Emit only helpers referenced by the compiled expressions. Descriptor
@@ -1356,7 +1457,7 @@ export const functions = Object.freeze(Object.fromEntries(metadata.functions.fil
   const implementation=__implementations[f.index];
   const needsInput=input.some(c=>c!==__identity);
   const entry=!needsInput && output===__identity ? implementation :
-    (...args)=>output(implementation(...(needsInput ? args.map((v,i)=>input[i](v)) : args)));
+    (...args)=>{const context=new WeakMap();return output(implementation(...(needsInput ? args.map((v,i)=>input[i](v,context)) : args)));};
   return [f.name,entry];
 })));
 "#,
@@ -1408,7 +1509,7 @@ export const functions = Object.freeze(Object.fromEntries(metadata.functions.fil
 export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal&&f.result.kind==='list').map(f=>{
   const input=f.params.map(p=>__representation(p.type,false));
   const implementation=__intoImplementations[f.index];
-  const entry=input.every(c=>c===__identity)?implementation:(...values)=>implementation(...input.map((convert,i)=>convert(values[i])),values[f.params.length]);
+  const entry=input.every(c=>c===__identity)?implementation:(...values)=>{const context=new WeakMap();return implementation(...input.map((convert,i)=>convert(values[i],context)),values[f.params.length]);};
   return [f.name,entry];
 })));
 "#);

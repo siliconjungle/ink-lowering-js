@@ -5,24 +5,45 @@ const __float = bits => { __view.setUint32(0, bits, true); return __view.getFloa
 const __bits = number => { if(Number.isNaN(number))return 0x7fc00000; __view.setFloat32(0, number, true); return __view.getUint32(0, true); };
 const __identity = value => value;
 function __representation(type, output) {
+  const convert=__representationRaw(type,output);
+  if(convert===__identity)return convert;
+  // Conversion identity is invocation-local: callers may reuse a mutable host
+  // object in a later call. Distinct declared schemas have distinct memo keys.
+  const key=JSON.stringify(type);
+  return (value,context)=>{
+    if(!context||!value||typeof value!=='object')return convert(value,context);
+    let entries=context.get(value);
+    if(entries?.has(key))return entries.get(key);
+    const result=convert(value,context);
+    if(!entries){entries=new Map();context.set(value,entries);}
+    entries.set(key,result);return result;
+  };
+}
+function __representationRaw(type, output) {
   switch (type.kind) {
-    case 'ref': return value => __representation(__namedTypes[type.name],output)(value);
+    case 'ref': return (value,context)=>__representation(__namedTypes[type.name],output)(value,context);
     case 'id': return value=>value.toLowerCase();
     case 'int': return output ? value=>({Int:value.toString()}) : value=>BigInt(value && typeof value==='object' ? value.Int : value);
-    case 'option': return value=>Object.hasOwn(value,'Some')?{Some:__representation(type.element,output)(value.Some)}:{None:null};
-    case 'result': return value=>Object.hasOwn(value,'Ok')?{Ok:__representation(type.ok,output)(value.Ok)}:{Err:__representation(type.error,output)(value.Err)};
+    case 'option': {
+      const item=__representation(type.element,output);
+      return item===__identity?__identity:(value,context)=>Object.hasOwn(value,'Some')?{Some:item(value.Some,context)}:{None:null};
+    }
+    case 'result': {
+      const ok=__representation(type.ok,output),err=__representation(type.error,output);
+      return ok===__identity&&err===__identity?__identity:(value,context)=>Object.hasOwn(value,'Ok')?{Ok:ok(value.Ok,context)}:{Err:err(value.Err,context)};
+    }
     case 'f32': return output ? value => {
       const number = __float(value);
       return Number.isFinite(number) ? number : {F32Bits:value};
     } : value => typeof value === 'number' ? __bits(value) : value.F32Bits;
     case 'list': case 'vector': {
       const element = __representation(type.element, output);
-      return element === __identity ? __identity : value => Array.from(value, element);
+      return element === __identity ? __identity : (value,context) => Array.from(value, item=>element(item,context));
     }
     case 'record': {
       const fields = type.fields.map(field => [field.name, __representation(field.type, output)]);
       return fields.every(([,convert]) => convert === __identity) ? __identity :
-        value => Object.fromEntries(fields.map(([name,convert]) => [name,convert(value[name])]));
+        (value,context) => Object.fromEntries(fields.map(([name,convert]) => [name,convert(value[name],context)]));
     }
     default: return __identity;
   }
@@ -66,7 +87,8 @@ function __stateInput(value,type,budget={cells:1000000},depth=0){
     default:throw Error('unsupported public value type');
   }
 }
-function __stateOutput(value,type){return __representation(type,true)(value);}
+// Mutable host replies must not retain references into compiled state or its outbox.
+function __stateOutput(value,type){return __representation(type,true)(structuredClone(value));}
 // @helper __u64
 const __u64 = n => BigInt.asUintN(64, n);
 // @helper __div

@@ -122,3 +122,9 @@ length and lifetime. No malformed-input diagnostic or rollback is promised.
 Representation conversion/JSON parsing and explicit portable checkpoint integrity
 checks remain. Source/proof checking happens during compilation. Standalone
 representation calls skip whole-state checkpoint validation; query envelopes execute the literal proved physical step. Backend-specific envelope erasure has been removed.
+
+Pure buffer elements are immutable logical values and may share nested records
+with inputs and outputs. Slot arrays remain privately owned; split-range growth
+detaches. Structural equality uses declared fields and an aggregate identity
+fast path, retaining stored float bits. Host state replies detach their reachable
+values. See the distribution's `docs/internal-snapshots.md` for the ownership and private-delta contract.

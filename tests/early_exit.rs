@@ -301,20 +301,28 @@ fn demand_scan_evaluates_list_and_default_once_then_skips_tail_callbacks() {
 fn pred(x:u32,k:u32)->Bool{return x>=k;}
 fn mapper(x:u32,z:u32)->u32{return choose(x==1,z,x+z);}
 fn initial(z:u32)->u32{return z;}
-fn list(xs:List<u32>)->List<u32>{return xs;}
-fn run(xs:List<u32>,z:u32,k:u32)->u32{return fold_until(list(xs),initial(z),fn(x)=>fn(a)=>pred(x,k),fn(x)=>fn(a)=>choose(pred(x,k),mapper(x,z),a));}
+fn input_list(xs:List<u32>)->List<u32>{return xs;}
+fn run(xs:List<u32>,z:u32,k:u32)->u32{return fold_until(input_list(xs),initial(z),fn(x)=>fn(a)=>pred(x,k),fn(x)=>fn(a)=>choose(pred(x,k),mapper(x,z),a));}
 "#).unwrap();
     let mut source = ink_lowering_js::lower(&CheckedModule::from_source(p).unwrap())
         .unwrap()
         .javascript;
     // Counters are deliberately injected into emitted test code only.
-    for (i, key) in ["pred", "mapper", "initial", "list"].iter().enumerate() {
+    for (i, (name, key)) in [
+        ("pred", "pred"),
+        ("mapper", "mapper"),
+        ("initial", "initial"),
+        ("input_list", "list"),
+    ]
+    .iter()
+    .enumerate()
+    {
         let start = source.find(&format!("function __fn{i}(")).unwrap();
         let at = start + source[start..].find('{').unwrap() + 1;
         source.insert_str(at, &format!("globalThis.visits.{key}++;"));
         source = source.replace(
-            &format!("/* inline {key} */"),
-            &format!("/* inline {key} */globalThis.visits.{key}++;"),
+            &format!("/* inline {name} */"),
+            &format!("/* inline {name} */globalThis.visits.{key}++;"),
         );
     }
     let dir = directory("js-visits");
