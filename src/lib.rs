@@ -320,8 +320,11 @@ impl Emitter<'_> {
                 let Type::List(inner) = self.infer(receiver, env, context)? else {
                     return Err("list receiver required".into());
                 };
-                let reuse = conversion.is_empty()
-                    && ink_core::collection_facts::reusable_receiver(
+                // Compaction may shrink below the source extent; the trusted
+                // destination contract only guarantees room for the result.
+                let reuse = method != "filter"
+                    && conversion.is_empty()
+                    && ink_core::collection_facts::reusable_private_receiver(
                         self.p,
                         e,
                         &Self::types(env),
@@ -461,7 +464,7 @@ impl Emitter<'_> {
         t: &Type,
     ) -> LangResult<String> {
         let reuse =
-            ink_core::collection_facts::reusable_receiver(self.p, e, &Self::types(env), Some(t));
+            ink_core::collection_facts::reusable_private_receiver(self.p, e, &Self::types(env), Some(t));
         let context = if method == "filter" || method == "concat" {
             Some(t)
         } else {
@@ -551,6 +554,13 @@ impl Emitter<'_> {
                 } else {
                     format!("new Array({len})")
                 });
+                let compact_count = if method == "filter" && reuse {
+                    let count = self.fresh();
+                    self.line(format!("let {count}=0;"));
+                    Some(count)
+                } else {
+                    None
+                };
                 let i = self.fresh();
                 self.line(format!("for(let {i}=0;{i}<{len};{i}++){{"));
                 let element = self.bind(&format!("{xs}[{i}]"));
@@ -582,11 +592,18 @@ impl Emitter<'_> {
                 let (body, local) = Self::callback(callback, env, &params)?;
                 let value = self.expr(body, &local, Some(result))?;
                 if method == "filter" {
-                    self.line(format!("if({value}){{{out}.push({element});}}"));
+                    if let Some(count) = &compact_count {
+                        self.line(format!("if({value}){{{out}[{count}++]={element};}}"));
+                    } else {
+                        self.line(format!("if({value}){{{out}.push({element});}}"));
+                    }
                 } else {
                     self.line(format!("{out}[{i}]={value};"));
                 }
                 self.line("}");
+                if let Some(count) = compact_count {
+                    self.line(format!("{out}.length={count};"));
+                }
                 out
             }
             _ => return Err(format!("unsupported JavaScript method {method}")),

@@ -11,6 +11,10 @@ fn fixture() -> Program {
             s.push_str(&format!("fn scan_{t}(xs:List<{t}>,ys:List<{t}>,z:{t},k:{t})->List<{t}>{{return make_{t}(xs,z).scan().map(fn(x)=>x*k);}}"));
         }
         for (name, body) in [
+            ("compact", format!("return make_{t}(xs,z).filter(fn(x)=>x>z);")),
+            ("compact_chain", format!("return make_{t}(xs,z).filter(fn(x)=>x>z).map(fn(x)=>x*k);")),
+            ("compact_shared", format!("let a=make_{t}(xs,z);return a.filter(fn(x)=>x>z).concat(a);")),
+            ("compact_capture", format!("return make_{t}(xs,z).filter(fn(x)=>peek_{t}(xs,x)>z);")),
             (
                 "chain",
                 format!("return make_{t}(xs,z).map_indexed(fn(i)=>fn(x)=>x*k);"),
@@ -99,6 +103,7 @@ fn rows(p: &Program) -> Vec<(String, Vec<eval::Value>, eval::Value)> {
             let k = number(&t, if t == Type::F32 { 0x3f000000 } else { 3 });
             for family in [
                 "chain", "branch", "borrowed", "capture", "shared", "alias", "observed", "shadow",
+                "compact", "compact_chain", "compact_shared", "compact_capture",
             ] {
                 let name = format!("{family}_{tag}");
                 let args = vec![xs.clone(), ys.clone(), z.clone(), k.clone()];
