@@ -140,3 +140,8 @@ with inputs and outputs. Slot arrays remain privately owned; split-range growth
 detaches. Structural equality uses declared fields and an aggregate identity
 fast path, retaining stored float bits. Host state replies detach their reachable
 values. See the distribution's `docs/internal-snapshots.md` for the ownership and private-delta contract.
+
+## License
+
+Project code and documentation are [MIT licensed](LICENSE). Third-party dependencies,
+vendored projects and research data retain their own licenses and notices.
