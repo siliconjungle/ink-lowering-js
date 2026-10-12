@@ -25,8 +25,8 @@ assert.equal(f.key(row),7);assert.equal(f.total([row,row]),14);assert.equal(gets
 const visible=f.filtered([row,row]);assert.equal(gets,1);assert.deepStrictEqual(visible[0],visible[1]);assert.ok(Object.is(visible[0].value,-0));
 assert.ok(Object.is(f.identity(row).value,-0));assert.equal(gets,2);
 assert.equal(f.equal(row,row),true);assert.equal(gets,3);
-assert.equal(f.indirect(row),7);assert.equal(gets,4);
-const destination=new Array(2);assert.equal(functionsInto.filtered([row,row],destination),2);assert.equal(gets,5);assert.ok(Object.is(destination[0].value,-0));
+assert.equal(f.indirect(row),7);assert.equal(gets,3);
+const destination=new Array(2);assert.equal(functionsInto.filtered([row,row],destination),2);assert.equal(gets,4);assert.ok(Object.is(destination[0].value,-0));
 "#).unwrap();
     let output = Command::new("node")
         .arg(root.join("test.mjs"))
