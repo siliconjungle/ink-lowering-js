@@ -313,7 +313,9 @@ impl StateEmitter<'_> {
                     format!("__table(rt,{i},{},[{}])", quote(n), values.join(","))
                 } else {
                     let x = self.expr(xs, env, None)?;
-                    if n == "fold" {
+                    if n == "concat" {
+                        format!("({x}).concat({})", self.expr(&args[0], env, Some(&xt))?)
+                    } else if n == "fold" {
                         let (a, b, tag_a, tag_b) = match &xt {
                             Type::Option(a) => (a.as_ref().clone(), Type::Unit, "Some", "None"),
                             Type::Result(a, b) => {
