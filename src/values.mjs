@@ -4,19 +4,24 @@ const __view = new DataView(new ArrayBuffer(4));
 const __float = bits => { __view.setUint32(0, bits, true); return __view.getFloat32(0, true); };
 const __bits = number => { if(Number.isNaN(number))return 0x7fc00000; __view.setFloat32(0, number, true); return __view.getUint32(0, true); };
 const __identity = value => value;
+// Intern declared conversion schemas once. An invocation owns one WeakMap per
+// schema instead of allocating a Map for every converted record/list node.
+const __conversionKeys = new Map();
 function __representation(type, output) {
   const convert=__representationRaw(type,output);
   if(convert===__identity)return convert;
   // Conversion identity is invocation-local: callers may reuse a mutable host
   // object in a later call. Distinct declared schemas have distinct memo keys.
-  const key=JSON.stringify(type);
+  const schema=(output?'out:':'in:')+JSON.stringify(type);
+  let key=__conversionKeys.get(schema);
+  if(!key){key={};__conversionKeys.set(schema,key);}
   return (value,context)=>{
     if(!context||!value||typeof value!=='object')return convert(value,context);
-    let entries=context.get(value);
-    if(entries?.has(key))return entries.get(key);
+    let entries=context.get(key);
+    if(!entries){entries=new WeakMap();context.set(key,entries);}
+    if(entries.has(value))return entries.get(value);
     const result=convert(value,context);
-    if(!entries){entries=new Map();context.set(value,entries);}
-    entries.set(key,result);return result;
+    entries.set(value,result);return result;
   };
 }
 function __representationRaw(type, output) {
@@ -43,7 +48,17 @@ function __representationRaw(type, output) {
     case 'record': {
       const fields = type.fields.map(field => [field.name, __representation(field.type, output)]);
       return fields.every(([,convert]) => convert === __identity) ? __identity :
-        (value,context) => Object.fromEntries(fields.map(([name,convert]) => [name,convert(value[name],context)]));
+        (value,context) => {
+          const result={};
+          for(const [name,convert] of fields){
+            const field=convert(value[name],context);
+            // Assignment treats __proto__ specially; records require an own
+            // ordinary writable data property, as Object.fromEntries supplied.
+            if(name==='__proto__')Object.defineProperty(result,name,{value:field,writable:true,enumerable:true,configurable:true});
+            else result[name]=field;
+          }
+          return result;
+        };
     }
     default: return __identity;
   }
