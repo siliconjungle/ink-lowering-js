@@ -941,6 +941,22 @@ impl Emitter<'_> {
                     let other = self.bind(&other);
                     return Ok(format!("__bufferAppend({xv},{other})"));
                 }
+                if n == "fill_range" || n == "copy_within" {
+                    let Type::Buffer(inner) = &xt else {
+                        unreachable!()
+                    };
+                    let a = self.expr(&args[0], env, Some(&Type::U32))?;
+                    let a = self.bind(&a);
+                    let b = self.expr(&args[1], env, Some(&Type::U32))?;
+                    let b = self.bind(&b);
+                    let c = self.expr(
+                        &args[2],
+                        env,
+                        Some(if n == "fill_range" { inner } else { &Type::U32 }),
+                    )?;
+                    let c = self.bind(&c);
+                    return Ok(format!("{xv}.{n}({a},{b},{c})"));
+                }
                 let (key, value) = match &xt {
                     Type::Buffer(inner) => (Type::U32, inner.as_ref()),
                     Type::Map(k, v) => (*k.clone(), v.as_ref()),
