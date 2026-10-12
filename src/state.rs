@@ -452,11 +452,11 @@ pub(crate) fn emit_with_layout(
         code.push_str(&format!("function __action{i}(ctx,rt{}){{__tick(ctx);try{{{body}}}catch(e){{if(e instanceof __Abort)return {{Err:e.value}};throw e;}}}}\n",if vars.is_empty(){String::new()}else{format!(",{}",vars.join(","))}));
         actions.push(json!({"index":i,"name":a.name,"change":a.kind==ActionKind::Change,"params":a.params.iter().map(|(n,t)|Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?}))).collect::<LangResult<Vec<_>>>()?,"result":descriptor(&a.result,p,&mut BTreeSet::new())?}));
     }
-    let roots=p.states.iter().map(|s|{let Type::Table(k,v)=&s.ty else{return Err("state root".into())};Ok(json!({"name":s.name,"key":descriptor(k,p,&mut BTreeSet::new())?,"value":descriptor(v,p,&mut BTreeSet::new())?}))}).collect::<LangResult<Vec<_>>>()?;
+    let roots=p.states.iter().map(|s|{let Type::Table(k,v)=&s.ty else{return Err("state root".into())};Ok(json!({"name":s.name,"key":descriptor(k,p,&mut BTreeSet::new())?,"value":descriptor(v,p,&mut BTreeSet::new())?,"snapshotKey":ink_core::snapshot_wire::descriptor(&layout.roots.iter().find(|(name,_,_)|name==&s.name).unwrap().1),"snapshotValue":ink_core::snapshot_wire::descriptor(&layout.roots.iter().find(|(name,_,_)|name==&s.name).unwrap().2)}))}).collect::<LangResult<Vec<_>>>()?;
     let events = p
         .events
         .iter()
-        .map(|(n, t)| Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?})))
+        .map(|(n, t)| Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?,"snapshotType":ink_core::snapshot_wire::descriptor(&layout.events.iter().find(|(name,_)|name==n).unwrap().1)})))
         .collect::<LangResult<Vec<_>>>()?;
     let state = json!({"actions":actions,"roots":roots,"events":events,"snapshot":{"program":layout.program,"schema":layout.schema}});
     code.push_str(&format!(
