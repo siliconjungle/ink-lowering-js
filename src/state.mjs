@@ -57,15 +57,15 @@ function __table(rt,index,method,args){
 }
 function __rollback(rt,mark){for(let i=rt.undo.length-1;i>=mark;i--){const [index,key,present,value]=rt.undo[i];const table=rt.tables[index];if(table.has(key)!==present)__tableOrder.delete(table);if(present)table.set(key,value);else table.delete(key);}rt.undo.length=mark;}
 function __createState(meta,implementations){
- const rt={meta,tables:meta.roots.map(()=>new Map()),version:0n,outbox:[],staged:[],busy:false,undo:[],seen:meta.roots.map(()=>new Set()),host:null,keeps:new Array(meta.keeps.length),keepUndo:[],keepSeen:new Set(),ctx:{fuel:100000000}};
+ const rt={meta,tables:meta.roots.map(()=>new Map()),version:0n,outbox:[],staged:[],busy:false,undo:[],seen:meta.roots.map(()=>new Set()),host:null,keeps:new Array(meta.keeps.length),keepUndo:[],keepSeen:new Set()};
  const actionMap=new Map(meta.actions.map(a=>[a.name,{...a,output:__stateResult(a.result)}]));
  const eventOutput=new Map(meta.events.map(e=>[e.name,__stateResult(e.type)]));
  function invoke(name,args){const a=actionMap.get(name);if(!a)throw Error(`unknown action ${name}`);return run(a,args);}
  function read(a,args,inputs,output,resultOnly){
   if(rt.busy)throw Error('state operation already in progress');
   const captured=inputs?inputs.map((convert,i)=>convert(args[i])):a.params.map((p,i)=>__stateInput(args[i],p.type));
-  rt.busy=true;rt.ctx.fuel=100000000;
-  try{const result=(output||a.output)(implementations[a.index](rt.ctx,rt,...captured));return resultOnly?result:{result,committed:false,version:rt.version,events:[]};}
+  rt.busy=true;const ctx={fuel:100000000};
+  try{const result=(output||a.output)(implementations[a.index](ctx,rt,...captured));return resultOnly?result:{result,committed:false,version:rt.version,events:[]};}
   finally{rt.busy=false;}
  }
  function run(a,args,inputs=null,output=null,resultOnly=false){
@@ -73,9 +73,9 @@ function __createState(meta,implementations){
   if(rt.busy)throw Error('state operation already in progress');
   const captured=inputs?inputs.map((convert,i)=>convert(args[i])):a.params.map((p,i)=>__stateInput(args[i],p.type));
   const mark=rt.undo.length,version=rt.version,outbox=rt.outbox,outboxLength=rt.outbox.length;
-  rt.busy=true;rt.staged.length=0;rt.ctx.fuel=100000000;
+  rt.busy=true;rt.staged.length=0;const ctx={fuel:100000000};
   try{
-   const value=implementations[a.index](rt.ctx,rt,...captured);
+   const value=implementations[a.index](ctx,rt,...captured);
    const result=(output||a.output)(value);
    if(Object.hasOwn(value,'Err')){__rollback(rt,mark);__restoreKeeps(rt);return resultOnly?result:{result,committed:false,version,events:[]};}
    if(version===18446744073709551615n)throw Error('commit sequence exhausted');
@@ -95,8 +95,8 @@ function __createState(meta,implementations){
    const a=actionMap.get(name);if(!a)throw Error(`unknown action ${name}`);
    const inputs=a.params.map(p=>['u32','i32','u64','bool','unit','string','f32','id','enum','int'].includes(p.type.kind)?__representation(p.type,false):value=>__stateInput(value,p.type));
    if(!a.change&&inputs.length===0)return ()=>{
-    if(rt.busy)throw Error('state operation already in progress');rt.busy=true;rt.ctx.fuel=100000000;
-    try{const result=a.output(implementations[a.index](rt.ctx,rt));return resultOnly?result:{result,committed:false,version:rt.version,events:[]};}finally{rt.busy=false;}
+    if(rt.busy)throw Error('state operation already in progress');rt.busy=true;const ctx={fuel:100000000};
+    try{const result=a.output(implementations[a.index](ctx,rt));return resultOnly?result:{result,committed:false,version:rt.version,events:[]};}finally{rt.busy=false;}
    };
    return (...args)=>run(a,args,inputs,a.output,resultOnly);
   },
