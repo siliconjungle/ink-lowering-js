@@ -1485,6 +1485,8 @@ export const functions = Object.freeze(Object.fromEntries(metadata.functions.fil
 })));
 "#,
         );
+    } else if p.contracts.precondition_checks.is_empty() {
+        javascript.push_str("export const functions = Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal).map(f=>[f.name,__implementations[f.index]])));\n");
     } else {
         javascript.push_str("export const functions = Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal).map(f=>[f.name,f.precondition==null?__implementations[f.index]:(...args)=>{if(__implementations[f.precondition](...args)!==true)throw Error('contract precondition failed');return __implementations[f.index](...args);}])));\n");
     }
@@ -1537,6 +1539,8 @@ export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.f
   return [f.name,entry];
 })));
 "#);
+    } else if p.contracts.precondition_checks.is_empty() {
+        javascript.push_str("export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal&&f.result.kind==='list').map(f=>[f.name,__intoImplementations[f.index]])));\n");
     } else {
         javascript.push_str("export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal&&f.result.kind==='list').map(f=>[f.name,f.precondition==null?__intoImplementations[f.index]:(...args)=>{if(__implementations[f.precondition](...args.slice(0,f.params.length))!==true)throw Error('contract precondition failed');return __intoImplementations[f.index](...args);}])) );\n");
     }
