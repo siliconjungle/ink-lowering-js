@@ -1229,6 +1229,12 @@ impl Emitter<'_> {
 pub fn lower(module: &CheckedModule) -> LangResult<Emission> {
     lower_with_layout(module, None)
 }
+pub fn lower_planned(plan: &ink_core::planning::CheckedPlan) -> LangResult<Emission> {
+    let layout=ink_core::snapshot::layout(plan.original().program())?;
+    let mut emission=lower_with_layout(plan.module(),Some(&layout))?;
+    emission.manifest["compiled_plan"]=json!({"source":plan.original().identity()?,"plan":ink_core::registry::identity(plan.package())?});
+    Ok(emission)
+}
 /// Emit selected code with the snapshot origin authenticated by the core.
 pub fn lower_selected(selected: &ink_core::optimisation::CheckedSelection) -> LangResult<Emission> {
     let layout = ink_core::snapshot::selected_layout(selected)?;
@@ -1542,8 +1548,3 @@ export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.f
 
 mod definition_literal;
 pub mod representation_program;
-
-/// Compile-time read-only observation projection.
-pub mod representation_query;
-
-pub mod representation_transition;
