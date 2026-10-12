@@ -1312,7 +1312,7 @@ fn lower_with_layout(
         } else {
             Value::Null
         };
-        functions.push(json!({"index":i,"name":f.name,"params":params,"result":result,"parallel":needs_parallel(&f.body,p,&mut std::collections::BTreeSet::new()),"destination":destination,"internal":ink_core::local_collections::owned(&f.result,p)||f.params.iter().any(|(_,t)|ink_core::local_collections::owned(t,p))}));
+        functions.push(json!({"index":i,"name":f.name,"precondition":p.contracts.precondition_checks.get(&f.name).and_then(|n|p.functions.iter().position(|f|&f.name==n)),"params":params,"result":result,"parallel":needs_parallel(&f.body,p,&mut std::collections::BTreeSet::new()),"destination":destination,"internal":ink_core::local_collections::owned(&f.result,p)||f.params.iter().any(|(_,t)|ink_core::local_collections::owned(t,p))}));
     }
     // A separate budget ensures adding the destination capability does not
     // change the ordinary entrypoints' emission resource limits.
@@ -1476,7 +1476,8 @@ __freeze(metadata);
 export const functions = Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal).map(f=> {
   const input=f.params.map(p=>__representation(p.type,false));
   const output=__representation(f.result,true);
-  const implementation=__implementations[f.index];
+  const body=__implementations[f.index];
+  const implementation=f.precondition==null?body:(...args)=>{if(__implementations[f.precondition](...args)!==true)throw Error('contract precondition failed');return body(...args);};
   const needsInput=input.some(c=>c!==__identity);
   const entry=!needsInput && output===__identity ? implementation :
     (...args)=>{const context=new WeakMap();return output(implementation(...(needsInput ? args.map((v,i)=>input[i](v,context)) : args)));};
@@ -1485,7 +1486,7 @@ export const functions = Object.freeze(Object.fromEntries(metadata.functions.fil
 "#,
         );
     } else {
-        javascript.push_str("export const functions = Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal).map(f=>[f.name,__implementations[f.index]])));\n");
+        javascript.push_str("export const functions = Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal).map(f=>[f.name,f.precondition==null?__implementations[f.index]:(...args)=>{if(__implementations[f.precondition](...args)!==true)throw Error('contract precondition failed');return __implementations[f.index](...args);}])));\n");
     }
     // Owned temporaries are an internal capability, not a caller-value check.
     // Public trusted numeric entries remain direct functions without guards.
@@ -1530,13 +1531,14 @@ export const functions = Object.freeze(Object.fromEntries(metadata.functions.fil
         javascript.push_str(r#"
 export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal&&f.result.kind==='list').map(f=>{
   const input=f.params.map(p=>__representation(p.type,false));
-  const implementation=__intoImplementations[f.index];
+  const body=__intoImplementations[f.index];
+  const implementation=f.precondition==null?body:(...args)=>{if(__implementations[f.precondition](...args.slice(0,f.params.length))!==true)throw Error('contract precondition failed');return body(...args);};
   const entry=input.every(c=>c===__identity)?implementation:(...values)=>{const context=new WeakMap();return implementation(...input.map((convert,i)=>convert(values[i],context)),values[f.params.length]);};
   return [f.name,entry];
 })));
 "#);
     } else {
-        javascript.push_str("export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal&&f.result.kind==='list').map(f=>[f.name,__intoImplementations[f.index]])));\n");
+        javascript.push_str("export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal&&f.result.kind==='list').map(f=>[f.name,f.precondition==null?__intoImplementations[f.index]:(...args)=>{if(__implementations[f.precondition](...args.slice(0,f.params.length))!==true)throw Error('contract precondition failed');return __intoImplementations[f.index](...args);}])) );\n");
     }
     if internal_cases.is_empty() {
         javascript.push_str("export function callInto(name,args,destination){return functionsInto[name](...args,destination);}\n");

@@ -171,7 +171,8 @@ pub fn lower(checked: &CheckedRepresentation) -> LangResult<String> {
         plan.encode
     )
     .unwrap();
-    out.push_str("function boundary(){if(busy)throw Error('state operation already in progress');}\nfunction invoke_native(name,args,resultOnly=false){boundary();switch(name){\n");
+    writeln!(out,"const preconditions={};",serde_json::to_string(&p.contracts.precondition_checks).map_err(|e|e.to_string())?).unwrap();
+    out.push_str("function boundary(){if(busy)throw Error('state operation already in progress');}\nfunction invoke_native(name,args,resultOnly=false){boundary();if(preconditions[name] && invoke_native(preconditions[name],args,true)!==true)throw Error('contract precondition failed');switch(name){\n");
     for source in &p.actions {
         let a = &plan.actions[&source.name];
         writeln!(out, "case {}:{{", super::quote(&source.name)).unwrap();
@@ -203,7 +204,13 @@ pub fn lower(checked: &CheckedRepresentation) -> LangResult<String> {
     out.push_str("return Object.freeze({invoke:invoke_json,invoke_json,bind(name,{resultOnly=false}={}){if(!actionNames.has(name))throw Error(`unknown action ${name}`);return (...args)=>invoke_native(name,args,resultOnly);},beginTransaction(){boundary();if(transaction)throw Error('state transaction already in progress');transaction={physical,version,outbox,length:outbox.length};return true;},commitTransaction(){boundary();if(!transaction)throw Error('no state transaction');transaction=null;},rollbackTransaction(){boundary();if(!transaction)throw Error('no state transaction');physical=transaction.physical;version=transaction.version;outbox=transaction.outbox;outbox.length=transaction.length;transaction=null;},");
 
     out.push_str("get version(){return version;},get outbox(){return outbox.map(e=>({...e,value:__publicEvent(e.channel,e.value)}));},acknowledge_through(commit,position){boundary();commit=BigInt(commit);position=BigInt(position);outbox=outbox.filter(e=>e.commit>commit||(e.commit===commit&&e.position>position));},async checkpoint(limits){boundary();\n");
-    writeln!(out,"const logical=f_{}(physical);return __snapshotEncode(__meta,{{version,tables:__tables(logical),outbox}},limits);}},async restore(bytes,limits){{boundary();if(transaction)throw Error('restore during state transaction');busy=true;try{{const saved=await __snapshotDecode(__meta,bytes,limits);const logical=__fromTables(saved.tables);const next=f_{}(logical);physical=next;version=saved.version;outbox=saved.outbox;}}finally{{busy=false;}}}}}});}}",plan.decode,plan.encode).unwrap();
+    writeln!(out,"const logical=f_{}(physical);return __snapshotEncode(__meta,{{version,tables:__tables(logical),outbox}},limits);}},async restore(bytes,limits){{boundary();if(transaction)throw Error('restore during state transaction');busy=true;try{{const saved=await __snapshotDecode(__meta,bytes,limits);const logical=__fromTables(saved.tables);const next=f_{}(logical);",plan.decode,plan.encode).unwrap();
+    for guard in &p.contracts.invariant_checks{
+        let a=&plan.actions[guard];let q=format!("q_{}",a.execute);
+        let test=if queries.contains_key(&q){format!("f_{q}(next,saved.version)")}else{format!("f_{}(f_{}(next,saved.version)).a[0]",a.compact.as_ref().map(|c|c.observe.as_str()).unwrap_or(&observers[guard]),a.execute)};
+        writeln!(out,"if(({test})!==true)throw Error('snapshot violates state invariant');").unwrap();
+    }
+    out.push_str("physical=next;version=saved.version;outbox=saved.outbox;}finally{busy=false;}}});}\n");
     out.push_str("function __publicEvent(channel,value){switch(channel){\n");
     for (name, t) in &p.events {
         writeln!(
