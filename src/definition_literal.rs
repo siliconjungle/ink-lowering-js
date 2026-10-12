@@ -9,6 +9,7 @@ use std::{collections::BTreeMap, fmt::Write};
 struct Lower {
     next: usize,
     generators: std::collections::BTreeSet<String>,
+    direct: bool,
 }
 impl Lower {
     fn expr(
@@ -38,7 +39,11 @@ impl Lower {
                     .iter()
                     .map(|a| self.expr(a, env, current, out))
                     .collect::<LangResult<Vec<_>>>()?;
-                format!("__node({constructor},[{}])", xs.join(","))
+                if xs.is_empty() {
+                    format!("__nullaryNode({constructor})")
+                } else {
+                    format!("__node({constructor},[{}])", xs.join(","))
+                }
             }
             Term::Call { arguments, .. } | Term::SelfCall(arguments) => {
                 let id = if let Term::Call { function, .. } = t {
@@ -50,15 +55,11 @@ impl Lower {
                     .iter()
                     .map(|a| self.expr(a, env, current, out))
                     .collect::<LangResult<Vec<_>>>()?;
-                format!(
-                    "{}d_{id}({})",
-                    if self.generators.contains(id) {
-                        "yield "
-                    } else {
-                        ""
-                    },
-                    xs.join(",")
-                )
+                let recursive_lane = self.generators.contains(id);
+                format!("{}{}_{id}({})",
+                    if recursive_lane && !self.direct { "yield " } else { "" },
+                    if recursive_lane && self.direct { "dFast" } else { "d" },
+                    xs.join(","))
             }
             Term::Binary { op, left, right } => {
                 let a = self.expr(left, env, current, out)?;
@@ -129,63 +130,24 @@ pub(crate) fn lower(
         .iter()
         .chain(queries.iter().filter_map(|(id,d)| matches!(d,Declaration::Function{..}).then_some(id)))
         .collect::<Vec<_>>();
-    // These constructors belong to the encapsulated representation. Literal
-    // definitions never mutate them; boundary codecs construct public values.
-    // Freezing each freshly owned field array added work to every rebuilt path.
-    let mut out=String::from("const __node=(c,a)=>({c,a});\nfunction __run(call){const stack=[call];let result;while(stack.length){const frame=stack[stack.length-1],step=frame.next(result);if(step.done){result=step.value;stack.pop();}else{result=undefined;stack.push(step.value);}}return result;}\n");
+    // Carriers remain private. Codecs capture inputs and construct owned public
+    // outputs; literal bodies only construct/read nodes. No node is mutated.
+    let mut out=String::from("const __nullaryNodes=[];\nfunction __nullaryNode(c){return __nullaryNodes[c]??=({c,a:[]});}\nfunction __node(c,a){return a.length===0?__nullaryNode(c):{c,a};}\nconst __deepCall=Symbol('private direct-call depth');let __directDepth=0;\nfunction __run(call){const stack=[call];let result;while(stack.length){const frame=stack[stack.length-1],step=frame.next(result);if(step.done){result=step.value;stack.pop();}else{result=undefined;stack.push(step.value);}}return result;}\n");
     fn calls(t: &Term, ids: &mut std::collections::BTreeSet<String>) {
-        match t {
-            Term::Call {
-                function,
-                arguments,
-            } => {
-                ids.insert(function.clone());
-                for a in arguments {
-                    calls(a, ids);
-                }
-            }
-            Term::Construct { arguments, .. } | Term::SelfCall(arguments) => {
-                for a in arguments {
-                    calls(a, ids);
-                }
-            }
-            Term::Binary { left, right, .. } => {
-                calls(left, ids);
-                calls(right, ids);
-            }
-            Term::If {
-                condition,
-                on_true,
-                on_false,
-            } => {
-                calls(condition, ids);
-                calls(on_true, ids);
-                calls(on_false, ids);
-            }
-            Term::Match {
-                scrutinee,
-                branches,
-            } => {
-                calls(scrutinee, ids);
-                for b in branches {
-                    calls(&b.body, ids);
-                }
-            }
-            _ => (),
-        }
+        ink_core::logic::walk_term(t, |node| {
+            if let Term::Call { function, .. } = node { ids.insert(function.clone()); }
+        });
+    }
+    fn self_call(t: &Term) -> bool {
+        let mut found = false;
+        ink_core::logic::walk_term(t, |node| found |= matches!(node, Term::SelfCall(_)));
+        found
     }
     let mut generators = ds
         .iter()
         .filter_map(|(id, d)| {
-            let Declaration::Function { body, .. } = d else { return None };
-            // A structural annotation permits recursion; only a self-call
-            // needs suspension. Propagating unused annotations turned ordinary
-            // projections and their callers into generator frames.
-            let mut recursive = false;
-            ink_core::logic::walk_term(body, |t| {
-                recursive |= matches!(t, Term::SelfCall(_));
-            });
-            recursive.then_some(id.clone())
+            matches!(d, Declaration::Function { body, .. } if self_call(body))
+            .then_some(id.clone())
         })
         .collect::<std::collections::BTreeSet<_>>();
     loop {
@@ -206,6 +168,7 @@ pub(crate) fn lower(
     let mut lower = Lower {
         next: 0,
         generators,
+        direct: false,
     };
     out.push_str(include_str!("definition-f32.mjs.txt"));
     for (id, d) in &ds {
@@ -233,6 +196,24 @@ pub(crate) fn lower(
             .unwrap();
         }
     }
+    // Checked definitions are pure and carriers remain private. Shallow
+    // recursion can use ordinary JS calls. A private depth sentinel unwinds the
+    // whole attempted evaluation and replays it on the existing explicit stack;
+    // neither source errors nor arbitrary host exceptions trigger replay.
+    let mut fast_code = String::new();
+    let mut direct = Lower { next: 0, generators: lower.generators.clone(), direct: true };
+    for (id, d) in &ds {
+        if !direct.generators.contains(id) { continue; }
+        if let Declaration::Function { params, body, .. } = d {
+            let env = params.iter().enumerate().map(|(i,(n,_))|(n.clone(),format!("a{i}"))).collect();
+            let inputs = (0..params.len()).map(|i|format!("a{i}")).collect::<Vec<_>>().join(",");
+            let mut code = String::new();
+            let result = direct.expr(body, &env, id, &mut code)?;
+            writeln!(fast_code,"function dFast_{id}({inputs}){{if(__directDepth>=128)throw __deepCall;__directDepth++;try{{{code}return {result};}}finally{{__directDepth--;}}}}").unwrap();
+        }
+    }
+    let mut fast_exports = String::new();
+    let mut stack_exports = String::new();
     for id in exports {
         let target = checked.choices().get(id).unwrap_or(id);
         let Declaration::Function { params, .. } = &ds[target] else {
@@ -242,16 +223,22 @@ pub(crate) fn lower(
             .map(|i| format!("a{i}"))
             .collect::<Vec<_>>()
             .join(",");
-        writeln!(
-            out,
-            "function f_{id}({args}){{return {};}}",
-            if lower.generators.contains(target) {
-                format!("__run(d_{target}({args}))")
-            } else {
-                format!("d_{target}({args})")
-            }
-        )
-        .unwrap();
+        let stack_call = if lower.generators.contains(target) {
+            format!("__run(d_{target}({args}))")
+        } else { format!("d_{target}({args})") };
+        writeln!(stack_exports,"function f_{id}({args}){{return {stack_call};}}").unwrap();
+        if lower.generators.contains(target) {
+            writeln!(fast_exports,"function f_{id}({args}){{try{{return dFast_{target}({args});}}catch(error){{if(error!==__deepCall)throw error;return __run(d_{target}({args}));}}}}").unwrap();
+        } else {
+            writeln!(fast_exports,"function f_{id}({args}){{return d_{target}({args});}}").unwrap();
+        }
+    }
+    if out.len() + fast_code.len() + fast_exports.len() <= 16_000_000 {
+        out.push_str(&fast_code);
+        out.push_str(&fast_exports);
+    } else {
+        // The optional fast lane cannot reduce previously supported source size.
+        out.push_str(&stack_exports);
     }
     if out.len() > 16_000_000 {
         return Err("literal JS source limit".into());
