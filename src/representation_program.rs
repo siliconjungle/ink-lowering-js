@@ -122,15 +122,13 @@ pub fn lower(checked: &CheckedRepresentation) -> LangResult<String> {
     let plan = checked.plan();
     let projection = checked.projection();
     let (mut queries, observers) = ink_core::field_projection::host_observers(checked)?;
-    queries.extend( super::representation_query::declarations(checked)?);
-    let transitions = super::representation_transition::declarations(checked)?;
-    queries.extend(transitions.clone());
     queries.extend(checked.projection().codec_declarations()?);
+    let transitions: BTreeMap<String,ink_core::logic::Declaration> = BTreeMap::new();
     let mut out = super::definition_literal::lower(checked.definition(), &queries)?;
     out.push_str("const __encoder=new TextEncoder();\nfunction __keyCompare(a,b){if(typeof a==='string'&&typeof b==='string'){const x=__encoder.encode(a),y=__encoder.encode(b);for(let i=0;i<Math.min(x.length,y.length);i++)if(x[i]!==y[i])return x[i]<y[i]?-1:1;return x.length-y.length;}return a<b?-1:a>b?1:0;}\n\n");
     out.push_str(include_str!("snapshot.mjs"));
     out.push_str(&e.codecs()?);
-    let layout = ink_core::snapshot::layout(p)?;
+    let layout = ink_core::snapshot::layout(checked.snapshot_module().program())?;
     let roots=p.states.iter().map(|s|{let Type::Table(k,v)=&s.ty else{return Err("representation state root".into())};Ok(serde_json::json!({"name":s.name,"key":super::descriptor(k,p,&mut BTreeSet::new())?,"value":super::descriptor(v,p,&mut BTreeSet::new())?,"snapshotKey":ink_core::snapshot_wire::descriptor(&layout.roots.iter().find(|(name,_,_)|name==&s.name).unwrap().1),"snapshotValue":ink_core::snapshot_wire::descriptor(&layout.roots.iter().find(|(name,_,_)|name==&s.name).unwrap().2)}))}).collect::<LangResult<Vec<_>>>()?;
     let events = p
         .events
