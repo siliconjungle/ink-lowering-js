@@ -1275,6 +1275,7 @@ fn lower_with_layout(
     };
     let mut javascript = String::new();
     let mut functions = vec![];
+    let mut input_types = vec![];
     for (i, f) in p.functions.iter().enumerate() {
         let params = f
             .params
@@ -1282,6 +1283,26 @@ fn lower_with_layout(
             .map(|(n, t)| Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?})))
             .collect::<LangResult<Vec<_>>>()?;
         let result = descriptor(&f.result, p, &mut BTreeSet::new())?;
+        // Conversion follows actual lexical field demand in the checked body.
+        // Unknown calls/whole values retain the complete declared representation.
+        // Contract predicates execute at the public boundary and therefore keep
+        // full inputs as well. Exported logical type metadata never narrows.
+        let demand = ink_core::input_demand::fields(f,p);
+        let projected = params.iter().zip(demand).map(|(param,fields)| {
+            let mut ty=param["type"].clone();
+            if !p.contracts.precondition_checks.contains_key(&f.name) {
+                if let Some(fields)=fields {
+                    let carrier=if ty["kind"]=="list" { &mut ty["element"] } else { &mut ty };
+                    if carrier["kind"]=="record" {
+                        if let Some(values)=carrier["fields"].as_array_mut() {
+                            values.retain(|field|field["name"].as_str().is_some_and(|name|fields.contains(name)));
+                        }
+                    }
+                }
+            }
+            ty
+        }).collect::<Vec<_>>();
+        input_types.push(projected);
         let mut env = Env::new();
         let mut vars = vec![];
         for (n, t) in &f.params {
@@ -1470,11 +1491,12 @@ function __freeze(v) { if(v && typeof v==='object') {Object.values(v).forEach(__
 __freeze(metadata);
 "#);
     if needs_conversion {
+        javascript.push_str(&format!("const __inputTypes={};\n",serde_json::to_string(&input_types).map_err(|e|e.to_string())?));
         javascript.push_str(
             r#"
 // Descriptor work occurs once at module initialisation, never per word-list call.
 export const functions = Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal).map(f=> {
-  const input=f.params.map(p=>__representation(p.type,false));
+  const input=__inputTypes[f.index].map(t=>__representation(t,false));
   const output=__representation(f.result,true);
   const body=__implementations[f.index];
   const implementation=f.precondition==null?body:(...args)=>{if(__implementations[f.precondition](...args)!==true)throw Error('contract precondition failed');return body(...args);};
@@ -1532,7 +1554,7 @@ export const functions = Object.freeze(Object.fromEntries(metadata.functions.fil
     if needs_conversion {
         javascript.push_str(r#"
 export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal&&f.result.kind==='list').map(f=>{
-  const input=f.params.map(p=>__representation(p.type,false));
+  const input=__inputTypes[f.index].map(t=>__representation(t,false));
   const body=__intoImplementations[f.index];
   const implementation=f.precondition==null?body:(...args)=>{if(__implementations[f.precondition](...args.slice(0,f.params.length))!==true)throw Error('contract precondition failed');return body(...args);};
   const entry=input.every(c=>c===__identity)?implementation:(...values)=>{const context=new WeakMap();return implementation(...input.map((convert,i)=>convert(values[i],context)),values[f.params.length]);};
