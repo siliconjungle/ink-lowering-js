@@ -42,7 +42,14 @@ impl Emit<'_> {
     Type::Unit=>"return __node(0,[]);".into(),
     Type::Int=>"const text=v&&typeof v.Int==='string'?v.Int:typeof v==='bigint'?v.toString():'';const n=BigInt(text);let magnitude=n<0n?-n:n;if(magnitude===0n)return __node(0,[]);const bits=magnitude.toString(2);let tail=__node(0,[]);for(const bit of bits)tail=__node(bit==='0'?1:2,[tail]);return __node(n<0n?2:1,[tail]);".into(),
     Type::Named(n)if p.enums.contains_key(n)=>{let cases=p.enums[n].iter().enumerate().map(|(i,v)|format!("case {}:return __node({i},[]);",super::quote(&format!("{n}.{v}")))).collect::<String>();format!("switch(v){{{cases}default:return undefined;}}", )},
-    Type::Named(n)if p.records.contains_key(n)=>{let fs=&p.records[n];let args=fs.iter().map(|(name,t)|self.read_mode(t,&format!("v[{}]",super::quote(name)),"d+1","internal")).collect::<LangResult<Vec<_>>>()?;format!("return __node(0,[{}]);",args.join(","))},
+    Type::Named(n)if p.records.contains_key(n)=>{
+        let fs=&p.records[n];let args=fs.iter().map(|(name,t)|self.read_mode(t,&format!("v[{}]",super::quote(name)),"d+1","internal")).collect::<LangResult<Vec<_>>>()?;
+        if let Some(record)=self.checked.projection().recursive_records.get(n) {
+            let args=args.into_iter().zip(&record.fields).map(|(x,f)|f.encode.as_ref().map(|id|format!("f_{id}({x})")).unwrap_or(x)).collect::<Vec<_>>();
+            let mut list="__node(0,[])".to_owned();for x in args.into_iter().rev(){list=format!("__node(3,[{x},{list}])");}
+            format!("return __node(4,[{}n,{list}]);",record.tag)
+        } else {format!("return __node(0,[{}]);",args.join(","))}
+    },
     Type::Option(a)=>format!("if(Object.hasOwn(v,'Some'))return __node(1,[{}]);return __node(0,[]);",self.read_mode(a,"v.Some","d+1","internal")?),
     Type::Result(a,b)=>format!("if(Object.hasOwn(v,'Ok'))return __node(0,[{}]);return __node(1,[{}]);",self.read_mode(a,"v.Ok","d+1","internal")?,self.read_mode(b,"v.Err","d+1","internal")?),
     Type::Vector(a,n)=>{let args=(0..*n).map(|i|self.read_mode(a,&format!("v[{i}]"),"d+1","internal")).collect::<LangResult<Vec<_>>>()?;format!("return __node(0,[{}]);",args.join(","))},
@@ -57,7 +64,19 @@ impl Emit<'_> {
     Type::Named(n)if p.ids.contains(n)=>"return ((v.a[0]<<64n)|v.a[1]).toString(16).padStart(32,'0');".into(),
     Type::Int=>"if(v.c===0)return snapshot?0n:{Int:'0'};let cursor=v.a[0],magnitude=0n,bits=0;while(cursor.c!==0){if(cursor.c===2)magnitude|=1n<<BigInt(bits);bits++;cursor=cursor.a[0];}const n=v.c===2?-magnitude:magnitude;return snapshot?n:{Int:n.toString()};".into(),
     Type::Named(n)if p.enums.contains_key(n)=>format!("return [{}][v.c];",p.enums[n].iter().map(|v|super::quote(&format!("{n}.{v}"))).collect::<Vec<_>>().join(",")),
-    Type::Named(n)if p.records.contains_key(n)=>{let fs=p.records[n].iter().enumerate().map(|(i,(name,t))|Ok(format!("[{},{}]",super::quote(name),self.write(t,&format!("v.a[{i}]"),"d+1","snapshot")?))).collect::<LangResult<Vec<_>>>()?;format!("return Object.fromEntries([{}]);",fs.join(","))},
+    Type::Named(n)if p.records.contains_key(n)=>{
+        let recursive=self.checked.projection().recursive_records.get(n);let mut prefix=String::new();
+        if let Some(record)=recursive {
+            write!(prefix,"if(v.c!==4||v.a[0]!=={}n)throw Error('recursive record tag');let cursor=v.a[1];",record.tag).unwrap();
+            for i in 0..record.fields.len(){write!(prefix,"if(cursor.c!==3)throw Error('recursive record fields');const field{i}=cursor.a[0];cursor=cursor.a[1];").unwrap();}
+            prefix.push_str("if(cursor.c!==0)throw Error('recursive record field tail');");
+        }
+        let fs=p.records[n].iter().enumerate().map(|(i,(name,t))| {
+            let x=if let Some(record)=recursive {record.fields[i].decode.as_ref().map(|id|format!("f_{id}(field{i})")).unwrap_or_else(||format!("field{i}"))}else{format!("v.a[{i}]")};
+            Ok(format!("[{},{}]",super::quote(name),self.write(t,&x,"d+1","snapshot")?))
+        }).collect::<LangResult<Vec<_>>>()?;
+        format!("{prefix}return Object.fromEntries([{}]);",fs.join(","))
+    },
     Type::Option(a)=>format!("return v.c===0?{{None:null}}:{{Some:{}}};",self.write(a,"v.a[0]","d+1","snapshot")?),
     Type::Result(a,b)=>format!("return v.c===0?{{Ok:{}}}:{{Err:{}}};",self.write(a,"v.a[0]","d+1","snapshot")?,self.write(b,"v.a[0]","d+1","snapshot")?),
     Type::Vector(a,n)=>{let xs=(0..*n).map(|i|self.write(a,&format!("v.a[{i}]"),"d+1","snapshot")).collect::<LangResult<Vec<_>>>()?;format!("return [{}];",xs.join(","))},
@@ -76,7 +95,8 @@ impl Emit<'_> {
     }
 }
 pub fn lower(checked: &CheckedRepresentation) -> LangResult<String> {
-    let executable = checked.definition().reachable_executable_declarations()?;
+    let mut executable = checked.definition().reachable_executable_declarations()?;
+    executable.extend(checked.projection().codec_declarations()?);
     let types = checked
         .projection()
         .types
@@ -101,19 +121,20 @@ pub fn lower(checked: &CheckedRepresentation) -> LangResult<String> {
     let p = checked.module().program();
     let plan = checked.plan();
     let projection = checked.projection();
-    let (queries, observers) = ink_core::field_projection::host_observers(checked)?;
+    let (mut queries, observers) = ink_core::field_projection::host_observers(checked)?;
+    queries.extend(checked.projection().codec_declarations()?);
     let transitions: BTreeMap<String,ink_core::logic::Declaration> = BTreeMap::new();
     let mut out = super::definition_literal::lower(checked.definition(), &queries)?;
     out.push_str("const __encoder=new TextEncoder();\nfunction __keyCompare(a,b){if(typeof a==='string'&&typeof b==='string'){const x=__encoder.encode(a),y=__encoder.encode(b);for(let i=0;i<Math.min(x.length,y.length);i++)if(x[i]!==y[i])return x[i]<y[i]?-1:1;return x.length-y.length;}return a<b?-1:a>b?1:0;}\n\n");
     out.push_str(include_str!("snapshot.mjs"));
     out.push_str(&e.codecs()?);
     let layout = ink_core::snapshot::layout(checked.snapshot_module().program())?;
-    let roots=p.states.iter().map(|s|{let Type::Table(k,v)=&s.ty else{return Err("representation state root".into())};Ok(serde_json::json!({"name":s.name,"key":super::descriptor(k,p,&mut BTreeSet::new())?,"value":super::descriptor(v,p,&mut BTreeSet::new())?}))}).collect::<LangResult<Vec<_>>>()?;
+    let roots=p.states.iter().map(|s|{let Type::Table(k,v)=&s.ty else{return Err("representation state root".into())};Ok(serde_json::json!({"name":s.name,"key":super::descriptor(k,p,&mut BTreeSet::new())?,"value":super::descriptor(v,p,&mut BTreeSet::new())?,"snapshotKey":ink_core::snapshot_wire::descriptor(&layout.roots.iter().find(|(name,_,_)|name==&s.name).unwrap().1),"snapshotValue":ink_core::snapshot_wire::descriptor(&layout.roots.iter().find(|(name,_,_)|name==&s.name).unwrap().2)}))}).collect::<LangResult<Vec<_>>>()?;
     let events = p
         .events
         .iter()
         .map(|(n, t)| {
-            Ok(serde_json::json!({"name":n,"type":super::descriptor(t,p,&mut BTreeSet::new())?}))
+            Ok(serde_json::json!({"name":n,"type":super::descriptor(t,p,&mut BTreeSet::new())?,"snapshotType":ink_core::snapshot_wire::descriptor(&layout.events.iter().find(|(name,_)|name==n).unwrap().1)}))
         })
         .collect::<LangResult<Vec<_>>>()?;
     writeln!(out,"const __meta={};",serde_json::json!({"roots":roots,"events":events,"snapshot":{"program":layout.program,"schema":layout.schema}})).unwrap();
