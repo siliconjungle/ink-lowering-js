@@ -74,7 +74,7 @@ dependencies = [
 [[package]]
 name = "ink-core"
 version = "0.1.0"
-source = "git+https://github.com/siliconjungle/ink-lang?rev=1a7a64559d0acf8c91c386bbbc8471ce327b68b4#1a7a64559d0acf8c91c386bbbc8471ce327b68b4"
+source = "git+https://github.com/siliconjungle/ink-lang?rev=54db6b2ff194dd452d8cc224e13089a31da712c6#54db6b2ff194dd452d8cc224e13089a31da712c6"
 dependencies = [
  "num-bigint",
  "num-traits",
@@ -214,9 +214,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.8"
+version = "3.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01016da373cd8f7ef12624f796309f5c31ba8d646dd08856c02cd741d823c622"
+checksum = "d62a2e0561533f2ca2561d0cf27fd9fedb640a1bf2616ff5d5c80d99017faadc"
 dependencies = [
  "proc-macro2",
  "quote",
