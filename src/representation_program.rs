@@ -122,15 +122,13 @@ pub fn lower(checked: &CheckedRepresentation) -> LangResult<String> {
     let plan = checked.plan();
     let projection = checked.projection();
     let (mut queries, observers) = ink_core::field_projection::host_observers(checked)?;
-    queries.extend( super::representation_query::declarations(checked)?);
-    let transitions = super::representation_transition::declarations(checked)?;
-    queries.extend(transitions.clone());
     queries.extend(checked.projection().codec_declarations()?);
+    let transitions: BTreeMap<String,ink_core::logic::Declaration> = BTreeMap::new();
     let mut out = super::definition_literal::lower(checked.definition(), &queries)?;
     out.push_str("const __encoder=new TextEncoder();\nfunction __keyCompare(a,b){if(typeof a==='string'&&typeof b==='string'){const x=__encoder.encode(a),y=__encoder.encode(b);for(let i=0;i<Math.min(x.length,y.length);i++)if(x[i]!==y[i])return x[i]<y[i]?-1:1;return x.length-y.length;}return a<b?-1:a>b?1:0;}\n\n");
     out.push_str(include_str!("snapshot.mjs"));
     out.push_str(&e.codecs()?);
-    let layout = ink_core::snapshot::layout(p)?;
+    let layout = ink_core::snapshot::layout(checked.snapshot_module().program())?;
     let roots=p.states.iter().map(|s|{let Type::Table(k,v)=&s.ty else{return Err("representation state root".into())};Ok(serde_json::json!({"name":s.name,"key":super::descriptor(k,p,&mut BTreeSet::new())?,"value":super::descriptor(v,p,&mut BTreeSet::new())?,"snapshotKey":ink_core::snapshot_wire::descriptor(&layout.roots.iter().find(|(name,_,_)|name==&s.name).unwrap().1),"snapshotValue":ink_core::snapshot_wire::descriptor(&layout.roots.iter().find(|(name,_,_)|name==&s.name).unwrap().2)}))}).collect::<LangResult<Vec<_>>>()?;
     let events = p
         .events
@@ -173,7 +171,7 @@ pub fn lower(checked: &CheckedRepresentation) -> LangResult<String> {
         plan.encode
     )
     .unwrap();
-    out.push_str("function boundary(){if(busy)throw Error('state operation already in progress');}\nasync function invoke_json(name,args){boundary();switch(name){\n");
+    out.push_str("function boundary(){if(busy)throw Error('state operation already in progress');}\nfunction invoke_native(name,args,resultOnly=false){boundary();switch(name){\n");
     for source in &p.actions {
         let a = &plan.actions[&source.name];
         writeln!(out, "case {}:{{", super::quote(&source.name)).unwrap();
@@ -189,7 +187,7 @@ pub fn lower(checked: &CheckedRepresentation) -> LangResult<String> {
         }
         let query = format!("q_{}", a.execute);
         if queries.contains_key(&query) {
-            writeln!(out,"const reply=f_{query}({});return {{result:{},committed:false,version,events:[]}};}}",args.join(","),e.write(&source.result,"reply","0","false")?).unwrap();
+            writeln!(out,"const reply=f_{query}({});const result={};return resultOnly?result:{{result,committed:false,version,events:[]}};}}",args.join(","),e.write(&source.result,"reply","0","false")?).unwrap();
             continue;
         }
         let observation_fields = if a.compact.is_some() {
@@ -198,9 +196,11 @@ pub fn lower(checked: &CheckedRepresentation) -> LangResult<String> {
             "reply,committed,newVersion,,events"
         };
         writeln!(out,"const executed=f_{}({});const observed=f_{}(executed),next=f_{}(executed);if(observed.c===1)throw Error('commit sequence exhausted');const [{observation_fields}]=observed.a;const result={},staged=__events(events),published=[];",if transitions.contains_key(&format!("t_{}",a.execute)) {format!("t_{}",a.execute)}else{a.execute.clone()},args.join(","),a.compact.as_ref().map(|c|c.observe.as_str()).unwrap_or(&observers[&source.name]),a.next,e.write(&source.result,"reply","0","false")?).unwrap();
-        out.push_str("if(committed){for(let i=0;i<staged.length;i++){const [channel,value,publicValue]=staged[i];outbox.push({commit:newVersion,position:BigInt(i),channel,value});published.push({commit:newVersion,position:BigInt(i),channel,value:publicValue});}}physical=next;version=newVersion;return {result,committed,version,events:published};}\n");
+        out.push_str("if(committed){for(let i=0;i<staged.length;i++){const [channel,value,publicValue]=staged[i];outbox.push({commit:newVersion,position:BigInt(i),channel,value});if(!resultOnly)published.push({commit:newVersion,position:BigInt(i),channel,value:publicValue});}}physical=next;version=newVersion;return resultOnly?result:{result,committed,version,events:published};}\n");
     }
-    out.push_str("default:throw Error(`unknown action ${name}`);}}\nreturn Object.freeze({invoke:invoke_json,invoke_json,beginTransaction(){boundary();if(transaction)throw Error('state transaction already in progress');transaction={physical,version,outbox,length:outbox.length};return true;},commitTransaction(){boundary();if(!transaction)throw Error('no state transaction');transaction=null;},rollbackTransaction(){boundary();if(!transaction)throw Error('no state transaction');physical=transaction.physical;version=transaction.version;outbox=transaction.outbox;outbox.length=transaction.length;transaction=null;},");
+    out.push_str("default:throw Error(`unknown action ${name}`);}}\nasync function invoke_json(name,args){return invoke_native(name,args);}\n");
+    writeln!(out,"const actionNames=new Set({});",serde_json::to_string(&p.actions.iter().map(|a|&a.name).collect::<Vec<_>>()).map_err(|e|e.to_string())?).unwrap();
+    out.push_str("return Object.freeze({invoke:invoke_json,invoke_json,bind(name,{resultOnly=false}={}){if(!actionNames.has(name))throw Error(`unknown action ${name}`);return (...args)=>invoke_native(name,args,resultOnly);},beginTransaction(){boundary();if(transaction)throw Error('state transaction already in progress');transaction={physical,version,outbox,length:outbox.length};return true;},commitTransaction(){boundary();if(!transaction)throw Error('no state transaction');transaction=null;},rollbackTransaction(){boundary();if(!transaction)throw Error('no state transaction');physical=transaction.physical;version=transaction.version;outbox=transaction.outbox;outbox.length=transaction.length;transaction=null;},");
 
     out.push_str("get version(){return version;},get outbox(){return outbox.map(e=>({...e,value:__publicEvent(e.channel,e.value)}));},acknowledge_through(commit,position){boundary();commit=BigInt(commit);position=BigInt(position);outbox=outbox.filter(e=>e.commit>commit||(e.commit===commit&&e.position>position));},async checkpoint(limits){boundary();\n");
     writeln!(out,"const logical=f_{}(physical);return __snapshotEncode(__meta,{{version,tables:__tables(logical),outbox}},limits);}},async restore(bytes,limits){{boundary();if(transaction)throw Error('restore during state transaction');busy=true;try{{const saved=await __snapshotDecode(__meta,bytes,limits);const logical=__fromTables(saved.tables);const next=f_{}(logical);physical=next;version=saved.version;outbox=saved.outbox;}}finally{{busy=false;}}}}}});}}",plan.decode,plan.encode).unwrap();

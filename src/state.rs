@@ -416,7 +416,9 @@ pub(crate) fn emit_with_layout(
     layout: &ink_core::snapshot_wire::Layout,
 ) -> LangResult<(String, Value)> {
     let p = module.program();
-    let execution = ink_core::action_ir::CheckedActions::elaborate(module)?.execution()?;
+    let checked_actions = ink_core::action_ir::CheckedActions::elaborate(module)?;
+    let effects = ink_core::effects::CheckedEffects::derive(&checked_actions)?;
+    let execution = checked_actions.execution()?;
     let mut emitter = StateEmitter {
         p,
         next: 0,
@@ -424,10 +426,27 @@ pub(crate) fn emit_with_layout(
     };
     let mut code = include_str!("state.mjs").to_string();
     let mut actions = vec![];
+    let mut keeps = vec![];
+    let mut keep_invalidations = vec![Vec::<usize>::new(); p.states.len()];
     for (i, k) in execution.keeps().iter().enumerate() {
         let e = emitter.expr(&k.value, &Env::new(), Some(&k.ty))?;
+        // Retained values cannot carry mutable host aliases. Composite values
+        // keep their existing ownership/observation path; scalar Int/F32 values
+        // retain their internal exact carrier and convert at the public boundary.
+        let cached = matches!(k.ty, Type::U32 | Type::U64 | Type::I32 | Type::F32 | Type::Int | Type::Bool | Type::String | Type::Unit)
+            || matches!(&k.ty, Type::Named(n) if p.ids.contains(n) || p.enums.contains_key(n));
+        let reads = &effects.keep(&k.name).ok_or("missing checked keep effects")?.access.reads;
+        if cached {
+            for (root, state) in p.states.iter().enumerate() {
+                if reads.contains(&state.name) {
+                    keep_invalidations[root].push(i);
+                }
+            }
+        }
+        keeps.push(json!({"name": k.name, "cached": cached}));
         code.push_str(&format!(
-            "function __keep{i}(ctx,rt){{__tick(ctx);{}return {e};{}}}\n",
+            "function {}{i}(ctx,rt){{__tick(ctx);{}return {e};{}}}\n",
+            if cached { "__computeKeep" } else { "__keep" },
             if matches!(k.ty, Type::Result(..)) {
                 "try{"
             } else {
@@ -439,6 +458,9 @@ pub(crate) fn emit_with_layout(
                 ""
             }
         ));
+        if cached {
+            code.push_str(&format!("function __keep{i}(ctx,rt){{return __cachedKeep(ctx,rt,{i},__computeKeep{i});}}\n"));
+        }
     }
     for (i, a) in execution.actions().iter().enumerate() {
         let mut env = Env::new();
@@ -458,7 +480,7 @@ pub(crate) fn emit_with_layout(
         .iter()
         .map(|(n, t)| Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?,"snapshotType":ink_core::snapshot_wire::descriptor(&layout.events.iter().find(|(name,_)|name==n).unwrap().1)})))
         .collect::<LangResult<Vec<_>>>()?;
-    let state = json!({"actions":actions,"roots":roots,"events":events,"snapshot":{"program":layout.program,"schema":layout.schema}});
+    let state = json!({"actions":actions,"roots":roots,"events":events,"keeps":keeps,"keepInvalidations":keep_invalidations,"snapshot":{"program":layout.program,"schema":layout.schema}});
     code.push_str(&format!(
         "const __stateMetadata={state};const __actions=[{}];\n",
         (0..p.actions.len())
