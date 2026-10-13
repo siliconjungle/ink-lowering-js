@@ -133,7 +133,7 @@ pub(crate) fn maintained_support(module: &ink_core::core::CheckedModule, views:&
         ];
         write!(entries,"{{root:{root},keep:{keep},zero:{zero}").unwrap();
         for (name,params,body,ordinary) in candidates {
-            let code=match super::definition_native::function(module.program(),&projection,&ds,&params,&body){
+            let code=match super::definition_native::function(module.program(),&projection,&ds,elisions,&params,&body){
                 Ok(code)=>code,
                 Err(_)=>{if ["insert","remove","replace"].contains(&name){native_roots[root]=false;}if ordinary!="null"{fallback=true;}ordinary},
             };

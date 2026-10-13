@@ -80,7 +80,7 @@ impl Emit<'_>{
         })
     }
 }
-fn input(p:&Program,projection:&Projection,t:&Type,name:&str,depth:usize)->LangResult<Value>{
+fn input(p:&Program,projection:&Projection,elisions:&BTreeSet<String>,t:&Type,name:&str,depth:usize)->LangResult<Value>{
     if depth>64{return Err("native source codec depth".into());}
     Ok(match t{
         Type::U64=>Value::Word(name.into(),64),
@@ -88,15 +88,15 @@ fn input(p:&Program,projection:&Projection,t:&Type,name:&str,depth:usize)->LangR
         Type::I32=>Value::Word(format!("BigInt.asUintN(32,BigInt({name}))"),64),
         Type::Bool=>Value::Bool(name.into()),
         Type::Unit=>Value::Fields(0,vec![]),
-        Type::Named(n)if p.records.contains_key(n)&&!projection.recursive_records.contains_key(n)=>Value::Fields(0,p.records[n].iter().map(|(f,t)|input(p,projection,t,&format!("({name})[{}]",super::quote(f)),depth+1)).collect::<LangResult<_>>()?),
-        Type::Vector(t,n)=>Value::Fields(0,(0..*n).map(|i|input(p,projection,t,&format!("({name})[{i}]"),depth+1)).collect::<LangResult<_>>()?),
+        Type::Named(n)if p.records.contains_key(n)&&!projection.recursive_records.contains_key(n)=>Value::Fields(0,p.records[n].iter().map(|(f,t)|input(p,projection,elisions,t,&if elisions.contains(n){name.to_string()}else{format!("({name})[{}]",super::quote(f))},depth+1)).collect::<LangResult<_>>()?),
+        Type::Vector(t,n)=>Value::Fields(0,(0..*n).map(|i|input(p,projection,elisions,t,&format!("({name})[{i}]"),depth+1)).collect::<LangResult<_>>()?),
         _=>Value::Opaque,
     })
 }
-pub(crate) fn function(p:&Program,projection:&Projection,ds:&BTreeMap<String,Declaration>,params:&[(&str,&Type)],body:&Term)->LangResult<String>{
+pub(crate) fn function(p:&Program,projection:&Projection,ds:&BTreeMap<String,Declaration>,elisions:&BTreeSet<String>,params:&[(&str,&Type)],body:&Term)->LangResult<String>{
     let mut emitter=Emit{ds,active:BTreeSet::new(),next:0,work:0};
     let mut out=String::new();
-    let env=params.iter().map(|(n,t)|Ok((n.to_string(),input(p,projection,t,n,0)?))).collect::<LangResult<BTreeMap<_,_>>>()?;
+    let env=params.iter().map(|(n,t)|Ok((n.to_string(),input(p,projection,elisions,t,n,0)?))).collect::<LangResult<BTreeMap<_,_>>>()?;
     let value=emitter.expr(body,&env,&mut out,0)?;
     Ok(format!("({})=>{{{out}return {};}}",params.iter().map(|p|p.0).collect::<Vec<_>>().join(","),value.scalar()?))
 }
@@ -115,7 +115,7 @@ mod tests {
         let params=[("x",&Type::U64),("y",&Type::U64)];
         let difference=bin("-",v("x"),v("y"));
         let bodies=[bin("+",difference.clone(),v("y")),bin("quot",difference.clone(),v("y")),bin("<",difference.clone(),v("x")),bin("&",difference.clone(),bin("*",v("x"),v("y")))];
-        let funcs=bodies.iter().map(|b|function(module.program(),&projection,&ds,&params,b).unwrap()).collect::<Vec<_>>();
+        let funcs=bodies.iter().map(|b|function(module.program(),&projection,&ds,&BTreeSet::new(),&params,b).unwrap()).collect::<Vec<_>>();
         let dir=std::env::temp_dir().join(format!("ink-native-definitions-{}",std::process::id()));fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("check.mjs"),format!(r#"import assert from 'node:assert/strict';
 const fs=[{}],w=x=>BigInt.asUintN(64,x);
@@ -125,12 +125,12 @@ for(const x of values)for(const y of values){{const d=w(x-y);const expected=[x,y
 "#,funcs.join(","))).unwrap();
         let out=Command::new("node").arg(dir.join("check.mjs")).output().unwrap();assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));
         // Recursion and operators with different primitive meanings decline.
-        assert!(function(module.program(),&projection,&ds,&params,&Term::SelfCall(vec![v("x")])).is_err());
-        assert!(function(module.program(),&projection,&ds,&params,&bin("f32:+",v("x"),v("y"))).is_err());
+        assert!(function(module.program(),&projection,&ds,&BTreeSet::new(),&params,&Term::SelfCall(vec![v("x")])).is_err());
+        assert!(function(module.program(),&projection,&ds,&BTreeSet::new(),&params,&bin("f32:+",v("x"),v("y"))).is_err());
         let row=Type::Named("Row".into());
         let selection=Term::Match{scrutinee:Box::new(v("row")),branches:vec![ink_core::logic::Branch{bindings:vec!["value".into(),"flag".into(),"note".into()],body:v("value")}]};
-        assert!(function(module.program(),&projection,&ds,&[("row",&row)],&selection).is_ok());
+        assert!(function(module.program(),&projection,&ds,&BTreeSet::new(),&[("row",&row)],&selection).is_ok());
         let string=Term::Match{scrutinee:Box::new(v("row")),branches:vec![ink_core::logic::Branch{bindings:vec!["value".into(),"flag".into(),"note".into()],body:v("note")}]};
-        assert!(function(module.program(),&projection,&ds,&[("row",&row)],&string).is_err());
+        assert!(function(module.program(),&projection,&ds,&BTreeSet::new(),&[("row",&row)],&string).is_err());
     }
 }
