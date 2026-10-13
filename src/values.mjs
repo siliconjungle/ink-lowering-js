@@ -90,6 +90,21 @@ function __compileStateCapture(type){
  };
  const tagged=(value,tag)=>value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).length===1&&Object.hasOwn(value,tag);
  switch(type.kind){
+  case 'ref':{
+   // Resolve lazily so recursive schemas compile to recursive validators rather
+   // than reverting to descriptor interpretation at every referenced node.
+   let resolved;
+   return limited((value,budget,depth)=>(resolved??=__stateCapture(__namedTypes[type.name]))(value,budget,depth+1));
+  }
+  case 'u32':case 'i32':{
+   const min=type.kind==='u32'?0:-2147483648,max=type.kind==='u32'?4294967295:2147483647;
+   return limited(value=>{if(typeof value!=='number'||!Number.isInteger(value)||value<min||value>max)throw Error('invalid '+type.kind);return value===0?0:value;});
+  }
+  case 'bool':return limited(value=>{if(typeof value!=='boolean')throw Error('invalid Bool');return value;});
+  case 'unit':return limited(value=>{if(value!==null)throw Error('invalid Unit');return null;});
+  case 'string':return limited(value=>{if(typeof value!=='string'||!value.isWellFormed())throw Error('invalid String');return value;});
+  case 'enum':return limited(value=>{if(!type.variants.includes(value))throw Error('invalid enum');return value;});
+  case 'id':return limited(value=>{if(typeof value!=='string'||! /^[0-9a-fA-F]{32}$/.test(value))throw Error('invalid ID');return value.toLowerCase();});
   case 'list':case 'vector':{
    const item=__stateCapture(type.element),size=type.kind==='vector'?type.size:null;
    return limited((value,budget,depth)=>{

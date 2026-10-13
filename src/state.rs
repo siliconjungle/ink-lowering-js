@@ -430,6 +430,8 @@ pub(crate) fn emit_with_layout(
     };
     let mut code = include_str!("state.mjs").to_string();
     let mut actions = vec![];
+    let mut captures = super::state_capture::Captures::new(p);
+    let mut capture_lists = Vec::new();
     let mut keeps = vec![];
     let mut keep_invalidations = vec![Vec::<usize>::new(); p.states.len()];
     for (i, k) in execution.keeps().iter().enumerate() {
@@ -467,6 +469,7 @@ pub(crate) fn emit_with_layout(
         }
     }
     for (i, a) in execution.actions().iter().enumerate() {
+        capture_lists.push(format!("[{}]", a.params.iter().map(|(_, ty)| captures.for_type(ty)).collect::<LangResult<Vec<_>>>()?.join(",")));
         let mut env = Env::new();
         let mut vars = vec![];
         for (n, t) in &a.params {
@@ -479,6 +482,7 @@ pub(crate) fn emit_with_layout(
         actions.push(json!({"index":i,"name":a.name,"precondition":p.contracts.precondition_checks.get(&a.name),"change":a.kind==ActionKind::Change,"fallible":matches!(a.result,Type::Result(..)),"params":a.params.iter().map(|(n,t)|Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?}))).collect::<LangResult<Vec<_>>>()?,"result":descriptor(&a.result,p,&mut BTreeSet::new())?}));
     }
     code.push_str(&emitter.equality.source());
+    code.push_str(&captures.source());
     let roots=p.states.iter().map(|s|{let Type::Table(k,v)=&s.ty else{return Err("state root".into())};Ok(json!({"name":s.name,"key":descriptor(k,p,&mut BTreeSet::new())?,"value":descriptor(v,p,&mut BTreeSet::new())?,"snapshotKey":ink_core::snapshot_wire::descriptor(&layout.roots.iter().find(|(name,_,_)|name==&s.name).unwrap().1),"snapshotValue":ink_core::snapshot_wire::descriptor(&layout.roots.iter().find(|(name,_,_)|name==&s.name).unwrap().2)}))}).collect::<LangResult<Vec<_>>>()?;
     let events = p
         .events
@@ -487,14 +491,15 @@ pub(crate) fn emit_with_layout(
         .collect::<LangResult<Vec<_>>>()?;
     let state = json!({"actions":actions,"roots":roots,"events":events,"keeps":keeps,"keepInvalidations":keep_invalidations,"invariantChecks":p.contracts.invariant_checks,"snapshot":{"program":layout.program,"schema":layout.schema}});
     code.push_str(&format!(
-        "const __stateMetadata={state};const __actions=[{}];\n",
+        "const __stateMetadata={state};const __actions=[{}];const __stateInputCaptures=[{}];\n",
         (0..p.actions.len())
             .map(|i| format!("__action{i}"))
             .collect::<Vec<_>>()
-            .join(",")
+            .join(","),
+        capture_lists.join(",")
     ));
     code.push_str(
-        "export function createState(){return __createState(__stateMetadata,__actions);}\n",
+        "export function createState(){return __createState(__stateMetadata,__actions,__stateInputCaptures);}\n",
     );
     Ok((code, state))
 }

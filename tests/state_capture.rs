@@ -5,6 +5,7 @@ fn compiled_capture_matches_validation_and_preserves_owned_boundaries() {
     let helper = include_str!("../src/values.mjs").split("// @helper __u64").next().unwrap();
     let script = r#"
 const assert=require('node:assert/strict');
+const __namedTypes={Node:{kind:'record',fields:[{name:'value',type:{kind:'u32'}},{name:'next',type:{kind:'option',element:{kind:'ref',name:'Node'}}}]}};
 const cases=[
  [{kind:'u32'},[0,4294967295,-1,1.5,'1',NaN]],
  [{kind:'i32'},[-2147483648,2147483647,-0,2147483648]],
@@ -18,6 +19,11 @@ const cases=[
  [{kind:'vector',size:2,element:{kind:'u32'}},[[1,2],[1],[1,-2],new Uint32Array([1,2]),new DataView(new ArrayBuffer(8))]],
  [{kind:'list',element:{kind:'u32'}},[[],[0,1,4294967295],[1,-1],new Uint32Array([1,2])]],
 ];
+cases.push([{kind:'ref',name:'Node'},[
+ {value:7,next:{Some:{value:9,next:{None:null}}}},
+ {value:7,next:{Some:{value:-1,next:{None:null}}}},
+ {value:7,next:{None:null}},
+]]);
 const row={kind:'record',name:'Row',fields:[{name:'values',type:{kind:'list',element:{kind:'f32'}}},{name:'__proto__',type:{kind:'string'}}]};
 const host={values:[-0,{F32Bits:0x7fc12345}],['__proto__']:'own'};
 cases.push([row,[host,{values:[]},{values:[],['__proto__']:'own',extra:1},null]]);
