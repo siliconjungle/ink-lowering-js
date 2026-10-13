@@ -109,7 +109,7 @@ impl StateEmitter<'_> {
                 }
                 format!("({{{}}})", fields.join(","))
             }
-            Expr::Try(x) => format!("__try({})", self.expr(x, env, None)?),
+            Expr::Try(x) => {let value=self.expr(x,env,None)?;let ty=self.infer(x,env,None)?;format!("__try({})",self.equality.sums.view_type(self.p,&ty,&value)?)},
             Expr::Binary(op, a, b) => {
                 let mut at = self.infer(
                     a,
@@ -216,7 +216,7 @@ impl StateEmitter<'_> {
                         (Type::Result(_, b), "Err") => Some(&**b),
                         _ => None,
                     };
-                    format!("({{{n}:{}}})", self.expr(&args[0], env, inner)?)
+                    let payload=self.expr(&args[0],env,inner)?;self.equality.sums.make_type(self.p,&t,n,&payload)?
                 }
                 "Int" => format!("BigInt({})", self.expr(&args[0], env, None)?),
                 "checked_add" | "checked_sub" | "checked_mul" => {
@@ -284,7 +284,9 @@ impl StateEmitter<'_> {
                         format!(",{}", values.join(","))
                     };
                     if isaction {
-                        format!("__nested(__action{index}(ctx,rt{argv}),{change})")
+                        let result=format!("__action{index}(ctx,rt{argv})");
+                        let ty=&self.p.actions[index].result;
+                        if change && self.equality.sums.selected(&descriptor(ty,self.p,&mut BTreeSet::new())?){format!("((v)=>{{__nested({},true);return v;}})({result})",self.equality.sums.view_type(self.p,ty,"v")?)}else{format!("__nested({result},{change})")}
                     } else {
                         format!("__fn{index}({})", values.join(","))
                     }
@@ -332,7 +334,8 @@ impl StateEmitter<'_> {
                     }
                     format!("__table(rt,{i},{},[{}])", quote(n), values.join(","))
                 } else {
-                    let x = self.expr(xs, env, None)?;
+                    let raw = self.expr(xs, env, None)?;
+                    let x=self.equality.sums.view_type(self.p,&xt,&raw)?;
                     if n == "concat" {
                         format!("({x}).concat({})", self.expr(&args[0], env, Some(&xt))?)
                     } else if n == "fold" {
@@ -361,7 +364,8 @@ impl StateEmitter<'_> {
                     } else if n == "unwrap_or" {
                         format!("((v,fallback)=>Object.hasOwn(v,'Some')?v.Some:fallback)({x},{})", self.expr(&args[0], env, Some(&t))?)
                     } else if n == "ok_or" {
-                        format!("__okOr({x},{})", self.expr(&args[0], env, None)?)
+                        let result=format!("__okOr({x},{})", self.expr(&args[0], env, None)?);
+                        if self.equality.sums.selected(&descriptor(&t,self.p,&mut BTreeSet::new())?){format!("((v)=>Object.hasOwn(v,'Ok')?{}:{})({result})",self.equality.sums.make_type(self.p,&t,"Ok","v.Ok")?,self.equality.sums.make_type(self.p,&t,"Err","v.Err")?)}else{result}
                     } else {
                         let inner = match &xt {
                             Type::List(t) | Type::Option(t) => t.clone(),
@@ -386,11 +390,8 @@ impl StateEmitter<'_> {
                             Type::Option(_) => "option",
                             _ => "result",
                         };
-                        format!(
-                            "__mapValue({x},{},{},({var})=>{{__tick(ctx);return {body};}})",
-                            quote(kind),
-                            quote(n)
-                        )
+                        let mapped=format!("__mapValue({x},{},{},({var})=>{{__tick(ctx);return {body};}})",quote(kind),quote(n));
+                        if matches!(t,Type::Result(..)){format!("((v)=>Object.hasOwn(v,'Ok')?{}:{})({mapped})",self.equality.sums.make_type(self.p,&t,"Ok","v.Ok")?,self.equality.sums.make_type(self.p,&t,"Err","v.Err")?)}else{mapped}
                     }
                 }
             }
@@ -429,10 +430,11 @@ impl StateEmitter<'_> {
         Ok(code)
     }
 }
-pub(crate) fn emit_with_elisions(
+pub(crate) fn emit_with_sums(
     module: &ink_core::core::CheckedModule,
     layout: &ink_core::snapshot_wire::Layout,
     elisions: &BTreeSet<String>,
+    sums:&super::sum_layout::Sums,
 ) -> LangResult<(String, Value)> {
     let p = module.program();
     let checked_actions = ink_core::action_ir::CheckedActions::elaborate(module)?;
@@ -445,9 +447,10 @@ pub(crate) fn emit_with_elisions(
         equality: super::TypedEquality::new(p, "__stateValueEqual"),
     };
     emitter.equality.elisions=elisions.clone();
+    emitter.equality.sums=sums.clone();
     let mut code = include_str!("observers.mjs").to_string()+include_str!("state.mjs");
     let mut actions = vec![];
-    let mut captures = super::state_capture::Captures::with_elisions(p,elisions);
+    let mut captures = super::state_capture::Captures::with_elisions(p,elisions).with_sums(sums);
     let mut capture_lists = Vec::new();
     let mut keeps = vec![];
     let mut equal_results=vec![];
@@ -469,6 +472,7 @@ pub(crate) fn emit_with_elisions(
                 }
             }
         }
+        let keep_abort=if matches!(k.ty,Type::Result(..)){format!("}}catch(e){{if(e instanceof __Abort)return {};throw e;}}",sums.make_type(p,&k.ty,"Err","e.value")?)}else{String::new()};
         keeps.push(json!({"name": k.name, "cached": cached}));
         code.push_str(&format!(
             "function {}{i}(ctx,rt){{__tick(ctx);{}return {e};{}}}\n",
@@ -479,7 +483,7 @@ pub(crate) fn emit_with_elisions(
                 ""
             },
             if matches!(k.ty, Type::Result(..)) {
-                "}catch(e){if(e instanceof __Abort)return {Err:e.value};throw e;}"
+                &keep_abort
             } else {
                 ""
             }
@@ -512,14 +516,15 @@ pub(crate) fn emit_with_elisions(
         }
         let body = emitter.block(&a.body, &mut env, &a.result)?;
         let fallible=matches!(a.result,Type::Result(..));
-        code.push_str(&format!("function __action{i}(ctx,rt{}){{__tick(ctx);{}{body}{}}}\n",if vars.is_empty(){String::new()}else{format!(",{}",vars.join(","))},if fallible{"try{"}else{""},if fallible{"}catch(e){if(e instanceof __Abort)return {Err:e.value};throw e;}"}else{""}));
+        let abort=format!("}}catch(e){{if(e instanceof __Abort)return {};throw e;}}",sums.make_type(p,&a.result,"Err","e.value")?);
+        code.push_str(&format!("function __action{i}(ctx,rt{}){{__tick(ctx);{}{body}{}}}\n",if vars.is_empty(){String::new()}else{format!(",{}",vars.join(","))},if fallible{"try{"}else{""},if fallible{&abort}else{""}));
         let summary=effects.action(&a.name).ok_or("missing action effects")?;
         let mut reads=summary.access.reads.clone();
         if let Some(guard)=p.contracts.precondition_checks.get(&a.name){reads.extend(effects.action(guard).ok_or("missing precondition effects")?.access.reads.clone());}
         let roots=p.states.iter().enumerate().filter(|(_,s)|reads.contains(&s.name)).map(|(i,_)|i).collect::<Vec<_>>();
         let single_cell=ink_core::action_shape::maximum_cell_writes(&checked_actions,i).is_some_and(|n|n<=1);
-        let fresh_result=ink_core::action_shape::fresh_native_result(&checked_actions,i);
-        actions.push(json!({"index":i,"name":a.name,"singleCell":single_cell,"freshResult":fresh_result,"roots":roots,"precondition":p.contracts.precondition_checks.get(&a.name),"change":a.kind==ActionKind::Change,"fallible":matches!(a.result,Type::Result(..)),"params":a.params.iter().map(|(n,t)|Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?}))).collect::<LangResult<Vec<_>>>()?,"result":descriptor(&a.result,p,&mut BTreeSet::new())?}));
+        let fresh_result=ink_core::action_shape::fresh_native_result(&checked_actions,i) && !sums.contains_type(p,&a.result)?;
+        actions.push(json!({"index":i,"name":a.name,"singleCell":single_cell,"freshResult":fresh_result,"roots":roots,"precondition":p.contracts.precondition_checks.get(&a.name),"change":a.kind==ActionKind::Change,"fallible":matches!(a.result,Type::Result(..)),"flatFailure":sums.selected(&descriptor(&a.result,p,&mut BTreeSet::new())?),"params":a.params.iter().map(|(n,t)|Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?}))).collect::<LangResult<Vec<_>>>()?,"result":descriptor(&a.result,p,&mut BTreeSet::new())?}));
     }
     code.push_str(&emitter.equality.source());
     code.push_str(&captures.source());
@@ -533,7 +538,7 @@ pub(crate) fn emit_with_elisions(
         .map(|(n, t)| Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?,"snapshotType":ink_core::snapshot_wire::descriptor(&layout.events.iter().find(|(name,_)|name==n).unwrap().1)})))
         .collect::<LangResult<Vec<_>>>()?;
     let mut state = json!({"actions":actions,"roots":roots,"events":events,"keeps":keeps,"keepInvalidations":keep_invalidations,"invariantChecks":p.contracts.invariant_checks,"snapshot":{"program":layout.program,"schema":layout.schema}});
-    super::value_layout::snapshots(p,&mut state,elisions)?;
+    super::value_layout::snapshots(p,&mut state,elisions,sums)?;
     code.push_str(&format!(
         "const __stateMetadata={state};const __actions=[{}];const __stateInputCaptures=[{}];\n",
         (0..p.actions.len())

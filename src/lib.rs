@@ -13,6 +13,7 @@ pub mod portable_definition;
 mod state;
 mod state_capture;
 mod value_layout;
+mod sum_layout;
 mod owned_values;
 mod wire_values;
 mod compiled_values;
@@ -77,11 +78,12 @@ struct TypedEquality<'a> {
     prefix: &'static str,
     native_f32: bool,
     elisions: BTreeSet<String>,
+    sums:sum_layout::Sums,
     equalities: BTreeMap<String, (String, String)>,
 }
 impl<'a> TypedEquality<'a> {
     fn new(p: &'a Program, prefix: &'static str) -> Self {
-        Self { p, prefix, native_f32: false, elisions: BTreeSet::new(), equalities: BTreeMap::new() }
+        Self { p, prefix, native_f32: false, elisions: BTreeSet::new(), sums:Default::default(), equalities: BTreeMap::new() }
     }
     fn source(&self) -> String {
         self.equalities.values().map(|(_, source)| source.as_str()).collect()
@@ -116,9 +118,10 @@ impl<'a> TypedEquality<'a> {
                 format!("const x=Object.hasOwn(a,'Some');return x===Object.hasOwn(b,'Some')&&(!x||{item});")
             }
             Type::Result(ok, err) => {
-                let yes = self.expr(ok, "a.Ok", "b.Ok")?;
-                let no = self.expr(err, "a.Err", "b.Err")?;
-                format!("const x=Object.hasOwn(a,'Ok');return x===Object.hasOwn(b,'Ok')&&(x?{yes}:{no});")
+                let yes = self.expr(ok, "xv.Ok", "yv.Ok")?;
+                let no = self.expr(err, "xv.Err", "yv.Err")?;
+                let av=self.sums.view_type(self.p,t,"a")?;let bv=self.sums.view_type(self.p,t,"b")?;
+                format!("const xv={av},yv={bv},x=Object.hasOwn(xv,'Ok');return x===Object.hasOwn(yv,'Ok')&&(x?{yes}:{no});")
             }
             Type::Named(n) => {
                 let fields = self.p.records[n].clone();
@@ -683,7 +686,7 @@ impl Emitter<'_> {
             Expr::Unit => "null".into(),
             Expr::Try(a) => {
                 let value = self.expr(a, env, None)?;
-                format!("__try({value})")
+                format!("__try({})",self.equality.sums.view_type(self.p,&self.infer(a,env,None)?,&value)?)
             }
             Expr::Var(n) if n == "None" => "({None:null})".into(),
             Expr::Var(n) => env.get(n).ok_or("unbound JavaScript variable")?.0.clone(),
@@ -1198,7 +1201,7 @@ impl Emitter<'_> {
                     _ => return Err("variant type".into()),
                 };
                 let value = self.expr(&args[0], env, Some(inner))?;
-                format!("({{{n}:{value}}})")
+                self.equality.sums.make_type(self.p,&t,n,&value)?
             }
             Expr::Call(n, args) if n == "Int" => {
                 let value = self.expr(&args[0], env, None)?;
@@ -1251,6 +1254,7 @@ impl Emitter<'_> {
             {
                 let xt = self.infer(xs, env, None)?;
                 let value = self.expr(xs, env, None)?;
+                let value=self.equality.sums.view_type(self.p,&xt,&value)?;
                 let value = self.bind(&value);
                 if method == "fold" {
                     let (a, b, tag_a, tag_b) = match &xt {
@@ -1285,7 +1289,8 @@ impl Emitter<'_> {
                 };
                 if method == "ok_or" {
                     let error = self.expr(&args[0], env, None)?;
-                    format!("__okOr({value},{error})")
+                    let result=format!("__okOr({value},{error})");
+                    if self.equality.sums.selected(&descriptor(&t,self.p,&mut BTreeSet::new())?){format!("((r)=>Object.hasOwn(r,'Ok')?{}:{})({result})",self.equality.sums.make_type(self.p,&t,"Ok","r.Ok")?,self.equality.sums.make_type(self.p,&t,"Err","r.Err")?)}else{result}
                 } else {
                     let out = self.fresh();
                     self.line(format!(
@@ -1300,9 +1305,10 @@ impl Emitter<'_> {
                     };
                     let (body, local) = Self::callback(&args[0], env, &[(item, inner.clone())])?;
                     let mapped = self.expr(body, &local, Some(result))?;
-                    self.line(format!(
-                        "{out}=({{{tag}:{mapped}}});}}else{{{out}={value};}}"
-                    ));
+                    let mapped=self.equality.sums.make_type(self.p,&t,tag,&mapped)?;
+                    let other=if tag=="Ok"{"Err"}else if tag=="Err"{"Ok"}else{"None"};
+                    let passthrough=if other=="None"{value.clone()}else{self.equality.sums.make_type(self.p,&t,other,&format!("{value}.{other}"))?};
+                    self.line(format!("{out}={mapped};}}else{{{out}={passthrough};}}"));
                     out
                 }
             }
@@ -1317,13 +1323,15 @@ impl Emitter<'_> {
 /// Emit an ES module. Backend implementation and the JavaScript engine are
 /// trusted; checked source/rewrite evidence does not certify emitted machine code.
 pub fn lower(module: &CheckedModule) -> LangResult<Emission> {
-    lower_with_layout(module, None, &BTreeSet::new())
+    lower_with_layout(module, None, &BTreeSet::new(),&[])
 }
 pub fn lower_planned(plan: &ink_core::planning::CheckedPlan) -> LangResult<Emission> {
+    plan.require_source_layout_capabilities(true,true)?;
     plan.require_source_storage_capability(true,true)?;
     let layout=ink_core::snapshot::layout(plan.original().program())?;
     let elisions=plan.physical().map(|p|p.plan().record_elisions.iter().map(|l|l.record.clone()).collect()).unwrap_or_default();
-    let mut emission=lower_with_layout(plan.module(),Some(&layout),&elisions)?;
+    let sums=plan.physical().map(|p|p.plan().sum_spines.iter().map(|l|l.sum_type.clone()).collect::<Vec<_>>()).unwrap_or_default();
+    let mut emission=lower_with_layout(plan.module(),Some(&layout),&elisions,&sums)?;
     if let Some(physical)=plan.physical(){
         if !physical.plan().dense_prefixes.is_empty(){
             let prefixes=plan.module().program().states.iter().map(|s|physical.plan().dense_prefixes.iter().find(|p|p.table==s.name).map(|p|p.capacity).unwrap_or(0)).collect::<Vec<_>>();
@@ -1332,7 +1340,7 @@ pub fn lower_planned(plan: &ink_core::planning::CheckedPlan) -> LangResult<Emiss
         }
     }
     if let Some(views)=plan.maintained(){
-        let support=representation_program::maintained_support(plan.module(),views,&elisions)?;
+        let support=representation_program::maintained_support(plan.module(),views,&elisions,&sum_layout::Sums::new(plan.module().program(),&sums)?)?;
         emission.javascript=format!("{support}{}",emission.javascript);
         emission.javascript=emission.javascript.replace("__createState(__stateMetadata,__actions,__stateInputCaptures)","__createState(__stateMetadata,__actions,__stateInputCaptures,__compiledMaintained)");
         emission.javascript=emission.javascript.replace("__createState(__stateMetadata,__actions,__stateInputCaptures,[],__densePrefixes)","__createState(__stateMetadata,__actions,__stateInputCaptures,__compiledMaintained,__densePrefixes)");
@@ -1344,7 +1352,7 @@ pub fn lower_planned(plan: &ink_core::planning::CheckedPlan) -> LangResult<Emiss
 /// Emit selected code with the snapshot origin authenticated by the core.
 pub fn lower_selected(selected: &ink_core::optimisation::CheckedSelection) -> LangResult<Emission> {
     let layout = ink_core::snapshot::selected_layout(selected)?;
-    let mut emission = lower_with_layout(selected.module(), Some(&layout), &BTreeSet::new())?;
+    let mut emission = lower_with_layout(selected.module(), Some(&layout), &BTreeSet::new(),&[])?;
     emission.manifest["selection"] =
         serde_json::to_value(selected.evidence()).map_err(|e| e.to_string())?;
     Ok(emission)
@@ -1353,6 +1361,7 @@ fn lower_with_layout(
     module: &CheckedModule,
     layout: Option<&ink_core::snapshot_wire::Layout>,
     elisions: &BTreeSet<String>,
+    sum_types:&[Type],
 ) -> LangResult<Emission> {
     let p = module.program();
     // Stateful functions share the exact-bit carrier with actions/snapshots.
@@ -1361,6 +1370,7 @@ fn lower_with_layout(
     let mut equality=TypedEquality::new(p,"__valueEqual");
     equality.native_f32=native_f32;
     equality.elisions=elisions.clone();
+    equality.sums=sum_layout::Sums::new(p,sum_types)?;
     let mut emitter = Emitter {
         p,
         next: 0,
@@ -1464,7 +1474,7 @@ fn lower_with_layout(
         } else {
             ink_core::in_place::analyse_with_result(&f.body, &f.params, Some(&f.result), p)
         };
-        let conversion = if !elisions.is_empty() || functions[i]["result"]["element"]
+        let conversion = if !elisions.is_empty() || !sum_types.is_empty() || functions[i]["result"]["element"]
             .to_string()
             .contains("\"kind\":\"f32\"")
             || functions[i]["result"]["element"]
@@ -1486,7 +1496,7 @@ fn lower_with_layout(
     let mut interface = json!({"schema":1,"backend":"javascript","abi":"ink-javascript-trusted-values-v2","destination_abi":{"name":"ink-javascript-into-v1","count_unit":"elements","ownership":"caller-owned","capacity":"trusted","aliasing":"destination-disjoint-from-all-reachable-inputs","tail":"unwritten"},"core_semantics":module.semantics(),"core_sha256":module.identity()?,"functions":functions});
     // Emit only helpers referenced by the compiled expressions. Descriptor
     // conversion is needed solely for signatures containing binary32 values.
-    let needs_conversion = !elisions.is_empty() || interface.to_string().contains("\"kind\":\"f32\"")
+    let needs_conversion = !elisions.is_empty() || !sum_types.is_empty() || interface.to_string().contains("\"kind\":\"f32\"")
         || interface.to_string().contains("\"kind\":\"int\"")
         || interface.to_string().contains("\"kind\":\"id\"");
     if !emitter.callbacks.is_empty() {
@@ -1561,7 +1571,7 @@ fn lower_with_layout(
     if has_state || javascript.contains("__word(") {
         helpers.push_str(include_str!("word.mjs"));
     }
-    javascript = format!("const __recordElisions=new Set({});\nconst __nativeF32={native_f32};\n",serde_json::to_string(elisions).map_err(|e|e.to_string())?) + &helpers + &javascript;
+    javascript = emitter.equality.sums.source()+&format!("const __recordElisions=new Set({});\nconst __nativeF32={native_f32};\n",serde_json::to_string(elisions).map_err(|e|e.to_string())?) + &helpers + &javascript;
     let named = p
         .records
         .keys()
@@ -1578,9 +1588,9 @@ fn lower_with_layout(
     ));
     let state = if !p.actions.is_empty() || !p.states.is_empty() || !p.keeps.is_empty() {
         let (code, metadata) = if let Some(layout) = layout {
-            state::emit_with_elisions(module, layout, elisions)?
+            state::emit_with_sums(module, layout, elisions,&emitter.equality.sums)?
         } else {
-            state::emit_with_elisions(module, &ink_core::snapshot::layout(p)?, elisions)?
+            state::emit_with_sums(module, &ink_core::snapshot::layout(p)?, elisions,&emitter.equality.sums)?
         };
         javascript.push_str(include_str!("snapshot.mjs"));
         javascript.push_str(&code);
@@ -1589,6 +1599,7 @@ fn lower_with_layout(
         None
     };
     interface["private_record_elisions"]=json!(elisions);
+    interface["private_sum_spines"]=json!(sum_types);
     interface["f32_storage"] = json!(if native_f32 {"native-number-with-exact-nonfinite-tags"} else {"exact-u32-bits"});
     interface["wire"] = ink_abi::wire_contract::source_contract(p)?;
     interface["state"] = serde_json::to_value(state).map_err(|e| e.to_string())?;
@@ -1643,7 +1654,7 @@ export const functions = Object.freeze(Object.fromEntries(metadata.functions.fil
     }
     javascript.push_str(ink_abi::VALUE_WIRE_JS_SOURCE);
     javascript.push_str(ink_abi::JSON_VALUE_JS_SOURCE);
-    let mut owned = owned_values::OwnedValues::private(p,elisions,native_f32);
+    let mut owned = owned_values::OwnedValues::private(p,elisions,native_f32).with_sums(&emitter.equality.sums);
     let mut owned_entries = Vec::new();
     let mut unsupported_owned = Vec::new();
     for (i, function) in p.functions.iter().enumerate() {
@@ -1704,10 +1715,10 @@ export function callOwned(name,args,limits={}){
  const result=__ownedImplementations[name](...args);return __ownedFunctions[name](result,createValueCaptureBudget(limits),0);
 }
 "#);
-    javascript.push_str(&compiled_values::emit(p,elisions,native_f32)?);
+    javascript.push_str(&compiled_values::emit(p,elisions,native_f32,&emitter.equality.sums)?);
     for (i, f) in p.functions.iter().enumerate() {
         if matches!(f.result, Type::List(_))
-            && (!elisions.is_empty() || interface["functions"][i]["result"]["element"]
+            && (!elisions.is_empty() || !sum_types.is_empty() || interface["functions"][i]["result"]["element"]
                 .to_string()
                 .contains("\"kind\":\"f32\"")
             || interface["functions"][i]["result"]["element"]

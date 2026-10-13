@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(super) struct Captures<'a> {
     elisions: &'a BTreeSet<String>,
     native_f32: bool,
+    sums:super::sum_layout::Sums,
     functions: BTreeMap<String, (String, String)>,
 }
 impl<'a> Captures<'a> {
@@ -15,9 +16,11 @@ impl<'a> Captures<'a> {
         Self {
             elisions,
             native_f32,
+            sums:Default::default(),
             functions: BTreeMap::new(),
         }
     }
+    pub fn with_sums(mut self,sums:&super::sum_layout::Sums)->Self{self.sums=sums.clone();self}
     pub fn source(&self) -> String {
         self.functions.values().map(|(_, s)| s.as_str()).collect()
     }
@@ -88,7 +91,19 @@ impl<'a> Captures<'a> {
                 format!("if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).length!=={}){{{bad}}}{checks}return {output};",fs.len())
             }
             "option"=>{let next=self.compile(&ty["element"],named)?;format!("budget.add(1);if(({})&&value.None===null)return {{None:null}};if({})return {{Some:{next}(value.Some,budget,depth+1)}};{bad}",tagged("None"),tagged("Some"))}
-            "result"=>{let ok=self.compile(&ty["ok"],named)?;let err=self.compile(&ty["error"],named)?;format!("budget.add(1);if({})return {{Ok:{ok}(value.Ok,budget,depth+1)}};if({})return {{Err:{err}(value.Err,budget,depth+1)}};{bad}",tagged("Ok"),tagged("Err"))}
+            "result"=>{
+                if self.sums.selected(ty){
+                    let leaves=super::sum_layout::Sums::leaves(ty);let count=leaves.len()-1;let mut body="let cursor=value;".to_string();
+                    for i in 0..count {
+                        let next=self.compile(&leaves[i],named)?;
+                        let is_tag=|tag:&str|format!("cursor!==null&&typeof cursor==='object'&&Object.hasOwn(cursor,'{tag}')&&Object.keys(cursor).length===1");
+                        if i>0 {body.push_str(&format!("budget.enter(depth+{i},4);"));}
+                        body.push_str(&format!("budget.add(1);if({})return {{tag:{i},payload:{next}(cursor.Ok,budget,depth+{})}};if(!({})){{{bad}}}",is_tag("Ok"),i+1,is_tag("Err")));
+                        if i+1==count {let last=self.compile(&leaves[count],named)?;body.push_str(&format!("return {{tag:{count},payload:{last}(cursor.Err,budget,depth+{count})}};"));}else{body.push_str("cursor=cursor.Err;");}
+                    }
+                    body
+                }else{let ok=self.compile(&ty["ok"],named)?;let err=self.compile(&ty["error"],named)?;format!("budget.add(1);if({})return {{Ok:{ok}(value.Ok,budget,depth+1)}};if({})return {{Err:{err}(value.Err,budget,depth+1)}};{bad}",tagged("Ok"),tagged("Err"))}
+            }
             _=>return Err("unsupported literal capture type".into()),
         };
         self.functions.insert(

@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 struct Writers<'a> {
     elisions: &'a BTreeSet<String>,
     native_f32: bool,
+    sums:super::sum_layout::Sums,
     functions: BTreeMap<String, (String, String)>,
 }
 impl Writers<'_> {
@@ -78,9 +79,16 @@ impl Writers<'_> {
                 format!("if(Object.hasOwn(value,'Some')){{writer.byte(1);{next}(writer,value.Some,compact);}}else{{writer.byte(0);}}")
             }
             "result" => {
-                let ok = self.compile(&ty["ok"], named)?;
-                let err = self.compile(&ty["error"], named)?;
-                format!("if(Object.hasOwn(value,'Ok')){{writer.byte(0);{ok}(writer,value.Ok,compact);}}else{{writer.byte(1);{err}(writer,value.Err,compact);}}")
+                if self.sums.selected(ty){
+                    let leaves=super::sum_layout::Sums::leaves(ty);let count=leaves.len()-1;let mut cases=String::new();
+                    for (i,leaf) in leaves.iter().enumerate(){let next=self.compile(leaf,named)?;let levels=if i<count{i+1}else{count};
+                        let mut body=format!("writer.byte({});{next}(writer,value.payload,compact);",if i<count{0}else{1});
+                        for _ in 1..levels{body=format!("writer.byte(1);writer.frame(()=>{{{body}}});");}
+                        cases.push_str(&format!("case {i}:{{{body}break;}}"));
+                    }
+                    format!("switch(value.tag){{{cases}default:throw Error('private sum tag');}}")
+                }else{let ok=self.compile(&ty["ok"],named)?;let err=self.compile(&ty["error"],named)?;
+                    format!("if(Object.hasOwn(value,'Ok')){{writer.byte(0);{ok}(writer,value.Ok,compact);}}else{{writer.byte(1);{err}(writer,value.Err,compact);}}")}
             }
             _ => return Err("unsupported private writer type".into()),
         };
@@ -98,6 +106,7 @@ pub(super) fn emit(
     p: &Program,
     elisions: &BTreeSet<String>,
     native_f32: bool,
+    sums:&super::sum_layout::Sums,
 ) -> LangResult<String> {
     let named = p
         .records
@@ -109,12 +118,13 @@ pub(super) fn emit(
             ))
         })
         .collect::<LangResult<BTreeMap<_, _>>>()?;
-    let mut capture = super::value_capture::Captures::new(elisions, native_f32);
-    let mut read = super::wire_values::WireValues::private(elisions, native_f32);
-    let mut owned = super::owned_values::OwnedValues::private(p, elisions, native_f32);
+    let mut capture = super::value_capture::Captures::new(elisions, native_f32).with_sums(sums);
+    let mut read = super::wire_values::WireValues::private(elisions, native_f32).with_sums(sums);
+    let mut owned = super::owned_values::OwnedValues::private(p, elisions, native_f32).with_sums(sums);
     let mut write = Writers {
         elisions,
         native_f32,
+        sums:sums.clone(),
         functions: BTreeMap::new(),
     };
     let mut roots = BTreeMap::<String, String>::new();

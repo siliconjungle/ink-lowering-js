@@ -207,7 +207,7 @@ function __createState(meta,implementations,captures=null,views=[],prefixes=[]){
  function complete(a,value,output,resultOnly){
   const result=a.freshResult?value:(output||a.output)(value);
   const version=rt.actionVersion;
-  if(a.fallible && Object.hasOwn(value,'Err')){__rollback(rt,rt.actionMark);__restoreKeeps(rt);if(rt.host?.strict)rt.host.failure=Object.assign(Error('transaction action failed'),{action:a.name,result});return resultOnly?result:{result,committed:false,version,events:[]};}
+  if(a.fallible && (a.flatFailure?value.tag!==0:Object.hasOwn(value,'Err'))){__rollback(rt,rt.actionMark);__restoreKeeps(rt);if(rt.host?.strict)rt.host.failure=Object.assign(Error('transaction action failed'),{action:a.name,result});return resultOnly?result:{result,committed:false,version,events:[]};}
   if(version===18446744073709551615n)throw Error('commit sequence exhausted');
   const next=version+1n;
   __prepareCell(rt);

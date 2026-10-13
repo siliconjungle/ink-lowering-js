@@ -7,13 +7,15 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(super) struct OwnedValues<'a> {
     program: &'a Program,
     elisions: BTreeSet<String>,
+    sums:super::sum_layout::Sums,
     native_f32: bool,
     functions: BTreeMap<String, (String, String)>,
 }
 impl<'a> OwnedValues<'a> {
     pub fn private(program: &'a Program,elisions:&BTreeSet<String>,native_f32:bool) -> Self {
-        Self{program,elisions:elisions.clone(),native_f32,functions:BTreeMap::new()}
+        Self{program,elisions:elisions.clone(),sums:Default::default(),native_f32,functions:BTreeMap::new()}
     }
+    pub fn with_sums(mut self,sums:&super::sum_layout::Sums)->Self{self.sums=sums.clone();self}
     pub fn source(&self) -> String { self.functions.values().map(|(_, code)| code.as_str()).collect() }
     pub fn for_type(&mut self, ty: &Type) -> LangResult<String> {
         let original = self.functions.len();
@@ -63,9 +65,21 @@ impl<'a> OwnedValues<'a> {
                 (5, format!("return Object.hasOwn(value,'None')&&value.None===null?{{None:null}}:{{Some:{next}(value.Some,budget,depth+1)}};"))
             }
             "result" => {
-                let yes = self.compile(&ty["ok"])?;
-                let no = self.compile(&ty["error"])?;
-                (5, format!("return Object.hasOwn(value,'Ok')?{{Ok:{yes}(value.Ok,budget,depth+1)}}:{{Err:{no}(value.Err,budget,depth+1)}};"))
+                if self.sums.selected(ty) {
+                    let leaves=super::sum_layout::Sums::leaves(ty);let count=leaves.len()-1;let mut cases=String::new();
+                    for (i,leaf) in leaves.iter().enumerate(){
+                        let levels=if i<count{i+1}else{count};let next=self.compile(leaf)?;
+                        let charges=(1..levels).map(|j|format!("budget.enter(depth+{j},5);")).collect::<String>();
+                        let mut output=format!("{next}(value.payload,budget,depth+{levels})");
+                        if i<count{output=format!("{{Ok:{output}}}");}
+                        for _ in 0..i {output=format!("{{Err:{output}}}");}
+                        cases.push_str(&format!("case {i}:{{{charges}return {output};}}"));
+                    }
+                    (5,format!("switch(value.tag){{{cases}default:throw Error('private sum tag');}}"))
+                } else {
+                    let yes = self.compile(&ty["ok"])?;let no = self.compile(&ty["error"])?;
+                    (5,format!("return Object.hasOwn(value,'Ok')?{{Ok:{yes}(value.Ok,budget,depth+1)}}:{{Err:{no}(value.Err,budget,depth+1)}};"))
+                }
             }
             _ => return Err("unsupported owned value type".into()),
         };

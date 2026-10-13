@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(super) struct Captures<'a> {
     program: &'a Program,
     elisions: BTreeSet<String>,
+    sums:super::sum_layout::Sums,
     functions: BTreeMap<String, (String, String)>,
 }
 impl<'a> Captures<'a> {
@@ -30,11 +31,12 @@ impl<'a> Captures<'a> {
         Some(format!("let {output}={input};if({depth}>64||--budget.cells<0)throw Error('state input resource limit');{check}"))
     }
     pub fn new(program: &'a Program) -> Self {
-        Self { program, elisions:BTreeSet::new(), functions: BTreeMap::new() }
+        Self { program, elisions:BTreeSet::new(), sums:Default::default(), functions: BTreeMap::new() }
     }
     pub fn with_elisions(program: &'a Program, elisions:&BTreeSet<String>) -> Self {
         let mut result=Self::new(program);result.elisions=elisions.clone();result
     }
+    pub fn with_sums(mut self,sums:&super::sum_layout::Sums)->Self{self.sums=sums.clone();self}
     pub fn source(&self) -> String {
         self.functions.values().map(|(_, code)| code.as_str()).collect()
     }
@@ -86,14 +88,24 @@ impl<'a> Captures<'a> {
                 let size = if kind == "vector" { format!("if(value.length!=={})throw Error('invalid vector length');", ty["size"]) } else { String::new() };
                 format!("if(!Array.isArray(value)&&!(ArrayBuffer.isView(value)&&!(value instanceof DataView)))throw Error('invalid list');{size}const out=new Array(value.length);for(let i=0;i<out.length;i++)out[i]={next}(value[i],budget,depth+1);return out;")
             }
+            "result" if self.sums.selected(ty)=>{
+                let leaves=super::sum_layout::Sums::leaves(ty);let count=leaves.len()-1;let mut body="let cursor=value;".to_string();
+                for i in 0..count {
+                    if i>0 {body.push_str(&format!("if(depth+{i}>64||--budget.cells<0)throw Error('state input resource limit');"));}
+                    let next=self.compile(&leaves[i])?;
+                    body.push_str(&format!("if(!cursor||typeof cursor!=='object'||Array.isArray(cursor))throw Error('invalid Result');const keys{i}=Object.keys(cursor);if(keys{i}.length!==1)throw Error('invalid Result');const tag{i}=keys{i}[0];if(tag{i}==='Ok')return {{tag:{i},payload:{next}(cursor.Ok,budget,depth+{})}};if(tag{i}!=='Err')throw Error('invalid Result');",i+1));
+                    if i+1==count {let next=self.compile(&leaves[count])?;body.push_str(&format!("return {{tag:{count},payload:{next}(cursor.Err,budget,depth+{count})}};"));}else{body.push_str("cursor=cursor.Err;");}
+                }
+                body
+            }
             "option" | "result" => {
                 let (yes, no, a, b) = if kind == "option" {
                     ("Some", "None", self.compile(&ty["element"])?, None)
                 } else { ("Ok", "Err", self.compile(&ty["ok"])?, Some(self.compile(&ty["error"])?)) };
                 let err = if kind == "option" { "Option" } else { "Result" };
-                let otherwise = b.map(|next| format!("if(tag==='{no}')return {{{no}:{next}(value.{no},budget,depth+1)}};"))
-                    .unwrap_or_else(|| format!("if(tag==='{no}'&&value.{no}===null)return {{{no}:null}};"));
-                format!("if(!value||typeof value!=='object'||Array.isArray(value))throw Error('invalid {err}');const keys=Object.keys(value);if(keys.length!==1)throw Error('invalid {err}');const tag=keys[0];if(tag==='{yes}')return {{{yes}:{a}(value.{yes},budget,depth+1)}};{otherwise}throw Error('invalid {err}');")
+                let yes_value=self.sums.make(ty,yes,&format!("{a}(value.{yes},budget,depth+1)"));
+                let otherwise=b.map(|next|{let value=self.sums.make(ty,no,&format!("{next}(value.{no},budget,depth+1)"));format!("if(tag==='{no}')return {value};")}).unwrap_or_else(||format!("if(tag==='{no}'&&value.{no}===null)return {{{no}:null}};"));
+                format!("if(!value||typeof value!=='object'||Array.isArray(value))throw Error('invalid {err}');const keys=Object.keys(value);if(keys.length!==1)throw Error('invalid {err}');const tag=keys[0];if(tag==='{yes}')return {yes_value};{otherwise}throw Error('invalid {err}');")
             }
             _ => {
                 // Exact Int, wide words and raw float conversion share the fixed
