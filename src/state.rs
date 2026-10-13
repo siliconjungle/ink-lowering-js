@@ -93,8 +93,10 @@ impl StateEmitter<'_> {
                         .ok_or("vector component")?;
                     return Ok(format!("({v})[{i}]"));
                 }
+                if matches!(self.infer(x,env,None)?,Type::Named(ref name) if self.equality.elisions.contains(name)) {return self.expr(x,env,None);}
                 format!("({})[{}]", self.expr(x, env, None)?, quote(n))
             }
+            Expr::Record(n,fs) if self.equality.elisions.contains(n) => self.expr(&fs[0].1,env,Some(&self.p.records[n][0].1))?,
             Expr::Record(n, fs) => {
                 let mut fields = vec![];
                 for (k, e) in fs {
@@ -157,6 +159,13 @@ impl StateEmitter<'_> {
                 )
             }
             Expr::Call(n, args) => match n.as_str() {
+                name if ink_core::primitives::primitive(name) => {
+                    let first=args.first().and_then(|a|self.execution.type_of(a));
+                    let (params,_)=ink_core::primitives::signature(name,first)?;
+                    let vals=args.iter().zip(params).map(|(a,t)|self.expr(a,env,Some(&t))).collect::<LangResult<Vec<_>>>()?;
+                    super::primitives::expression(name,&vals,first,false)?
+                }
+
                 name if ink_core::word::primitive(name) => {
                     let ts = ink_core::word::arguments(name, &t);
                     let vals = args
@@ -420,13 +429,10 @@ impl StateEmitter<'_> {
         Ok(code)
     }
 }
-pub fn emit(module: &ink_core::core::CheckedModule) -> LangResult<(String, Value)> {
-    let layout = ink_core::snapshot::layout(module.program())?;
-    emit_with_layout(module, &layout)
-}
-pub(crate) fn emit_with_layout(
+pub(crate) fn emit_with_elisions(
     module: &ink_core::core::CheckedModule,
     layout: &ink_core::snapshot_wire::Layout,
+    elisions: &BTreeSet<String>,
 ) -> LangResult<(String, Value)> {
     let p = module.program();
     let checked_actions = ink_core::action_ir::CheckedActions::elaborate(module)?;
@@ -438,9 +444,10 @@ pub(crate) fn emit_with_layout(
         execution: &execution,
         equality: super::TypedEquality::new(p, "__stateValueEqual"),
     };
+    emitter.equality.elisions=elisions.clone();
     let mut code = include_str!("observers.mjs").to_string()+include_str!("state.mjs");
     let mut actions = vec![];
-    let mut captures = super::state_capture::Captures::new(p);
+    let mut captures = super::state_capture::Captures::with_elisions(p,elisions);
     let mut capture_lists = Vec::new();
     let mut keeps = vec![];
     let mut equal_results=vec![];
@@ -525,7 +532,8 @@ pub(crate) fn emit_with_layout(
         .iter()
         .map(|(n, t)| Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?,"snapshotType":ink_core::snapshot_wire::descriptor(&layout.events.iter().find(|(name,_)|name==n).unwrap().1)})))
         .collect::<LangResult<Vec<_>>>()?;
-    let state = json!({"actions":actions,"roots":roots,"events":events,"keeps":keeps,"keepInvalidations":keep_invalidations,"invariantChecks":p.contracts.invariant_checks,"snapshot":{"program":layout.program,"schema":layout.schema}});
+    let mut state = json!({"actions":actions,"roots":roots,"events":events,"keeps":keeps,"keepInvalidations":keep_invalidations,"invariantChecks":p.contracts.invariant_checks,"snapshot":{"program":layout.program,"schema":layout.schema}});
+    super::value_layout::snapshots(p,&mut state,elisions)?;
     code.push_str(&format!(
         "const __stateMetadata={state};const __actions=[{}];const __stateInputCaptures=[{}];\n",
         (0..p.actions.len())

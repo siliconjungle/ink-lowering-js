@@ -3,16 +3,25 @@
 const __view = new DataView(new ArrayBuffer(4));
 const __float = bits => { __view.setUint32(0, bits, true); return __view.getFloat32(0, true); };
 const __bits = number => { if(Number.isNaN(number))return 0x7fc00000; __view.setFloat32(0, number, true); return __view.getUint32(0, true); };
+// Native binary32 lane for pure modules. Explicit NaN payloads remain tagged;
+// arithmetic canonicalizes NaNs just as __bits does in the exact-bit lane.
+const __nfValue = value => typeof value === 'number' ? Math.fround(value) : value;
+// Number operands have already been normalised at their typed read or producer.
+const __nfNumber = value => typeof value === 'number' ? value : __float(value.F32Bits);
+const __nfBits = value => typeof value === 'number' ? __bits(value) : value.F32Bits;
+const __nfFromBits = bits => (bits & 0x7fffffff)>0x7f800000 ? {F32Bits:bits} : __float(bits);
+const __nfNeg = value => typeof value === 'number' && !Number.isNaN(value) ? -value : {F32Bits:(__nfBits(value) ^ 0x80000000) >>> 0};
+const __nfOutput = value => {const n=typeof value==='number'?Math.fround(value):__float(value.F32Bits);return Number.isFinite(n)?n:{F32Bits:__nfBits(value)};};
 const __identity = value => value;
 // Intern declared conversion schemas once. An invocation owns one WeakMap per
 // schema instead of allocating a Map for every converted record/list node.
 const __conversionKeys = new Map();
-function __representation(type, output) {
-  const convert=__representationRaw(type,output);
+function __representation(type, output, capture=false) {
+  const convert=__representationRaw(type,output,capture);
   if(convert===__identity)return convert;
   // Conversion identity is invocation-local: callers may reuse a mutable host
   // object in a later call. Distinct declared schemas have distinct memo keys.
-  const schema=(output?'out:':'in:')+JSON.stringify(type);
+  const schema=(output?'out:':capture?'capture:':'in:')+JSON.stringify(type);
   let key=__conversionKeys.get(schema);
   if(!key){key={};__conversionKeys.set(schema,key);}
   return (value,context)=>{
@@ -24,32 +33,38 @@ function __representation(type, output) {
     entries.set(value,result);return result;
   };
 }
-function __representationRaw(type, output) {
+function __representationRaw(type, output, capture) {
   switch (type.kind) {
     case 'ref': {
       let resolved;
-      return (value,context)=>(resolved??=__representation(__namedTypes[type.name],output))(value,context);
+      return (value,context)=>(resolved??=__representation(__namedTypes[type.name],output,capture))(value,context);
     }
     case 'id': return value=>value.toLowerCase();
     case 'int': return output ? value=>({Int:value.toString()}) : value=>BigInt(value && typeof value==='object' ? value.Int : value);
     case 'option': {
-      const item=__representation(type.element,output);
+      const item=__representation(type.element,output,capture);
       return item===__identity?__identity:(value,context)=>Object.hasOwn(value,'Some')?{Some:item(value.Some,context)}:{None:null};
     }
     case 'result': {
-      const ok=__representation(type.ok,output),err=__representation(type.error,output);
+      const ok=__representation(type.ok,output,capture),err=__representation(type.error,output,capture);
       return ok===__identity&&err===__identity?__identity:(value,context)=>Object.hasOwn(value,'Ok')?{Ok:ok(value.Ok,context)}:{Err:err(value.Err,context)};
     }
-    case 'f32': return output ? value => {
+    case 'f32': if(typeof __nativeF32!=='undefined'&&__nativeF32)return output?__nfOutput:capture?__nfValue:__identity;
+      return output ? value => {
       const number = __float(value);
       return Number.isFinite(number) ? number : {F32Bits:value};
     } : value => typeof value === 'number' ? __bits(value) : value.F32Bits;
     case 'list': case 'vector': {
-      const element = __representation(type.element, output);
+      const element = __representation(type.element, output,capture);
       return element === __identity ? __identity : (value,context) => Array.from(value, item=>element(item,context));
     }
     case 'record': {
-      const fields = type.fields.map(field => [field.name, __representation(field.type, output)]);
+      if((typeof __recordElisions!=='undefined'&&__recordElisions.has(type.name))){
+        if(!type.fields.length)return ()=>undefined; // lexically unconsumed projected input
+        const field=type.fields[0],child=__representation(field.type,output,capture);
+        return output?(value,context)=>({[field.name]:child(value,context)}):(value,context)=>child(value[field.name],context);
+      }
+      const fields = type.fields.map(field => [field.name, __representation(field.type, output,capture)]);
       return fields.every(([,convert]) => convert === __identity) ? __identity :
         (value,context) => {
           const result={};
@@ -112,6 +127,7 @@ function __compileStateCapture(type){
   }
   case 'record':{
    const fields=type.fields.map(f=>[f.name,__stateCapture(f.type)]);
+   if((typeof __recordElisions!=='undefined'&&__recordElisions.has(type.name)))return limited((value,budget,depth)=>{const [name,copy]=fields[0];if(!value||typeof value!=='object'||Array.isArray(value)||!Object.hasOwn(value,name))throw Error('invalid record');return copy(value[name],budget,depth+1);});
    return limited((value,budget,depth)=>{
     if(!value||typeof value!=='object'||Array.isArray(value)||!fields.every(([name])=>Object.hasOwn(value,name)))throw Error('invalid record');
     const out={};for(const [name,copy]of fields){const field=copy(value[name],budget,depth+1);if(name==='__proto__')Object.defineProperty(out,name,{value:field,writable:true,enumerable:true,configurable:true});else out[name]=field;}return out;
@@ -156,7 +172,7 @@ function __stateInput(value,type,budget={cells:1000000},depth=0){
       if(type.kind==='vector'&&value.length!==type.size)throw Error('invalid vector length');
       return Array.from(value,v=>input(v,type.element));
     }
-    case 'record':if(!value||typeof value!=='object'||Array.isArray(value)||!type.fields.every(f=>Object.hasOwn(value,f.name)))throw Error('invalid record');return Object.fromEntries(type.fields.map(f=>[f.name,input(value[f.name],f.type)]));
+    case 'record':if(!value||typeof value!=='object'||Array.isArray(value)||!type.fields.every(f=>Object.hasOwn(value,f.name)))throw Error('invalid record');if((typeof __recordElisions!=='undefined'&&__recordElisions.has(type.name))){const f=type.fields[0];return input(value[f.name],f.type);}return Object.fromEntries(type.fields.map(f=>[f.name,input(value[f.name],f.type)]));
     case 'option':if(tagged('Some'))return {Some:input(value.Some,type.element)};if(tagged('None')&&value.None===null)return {None:null};throw Error('invalid Option');
     case 'result':if(tagged('Ok'))return {Ok:input(value.Ok,type.ok)};if(tagged('Err'))return {Err:input(value.Err,type.error)};throw Error('invalid Result');
     default:throw Error('unsupported public value type');
@@ -165,22 +181,39 @@ function __stateInput(value,type,budget={cells:1000000},depth=0){
 // Mutable host replies must not retain references into compiled state or its outbox.
 // State results must own mutable containers. Compile the declared schema once:
 // scalars need no structured clone, while nested records/lists remain detached.
-function __ownedResult(copy,nested){
+function __ownershipSchema(type){
+ // Nominal references and expanded declarations name the same checked sort.
+ // Distinct source records retain distinct keys even if a layout erases them.
+ if(type.kind==='ref'||type.kind==='record'&&type.name)return ['named',type.name];
+ switch(type.kind){
+  case 'list':case 'vector':return [type.kind,type.size??null,__ownershipSchema(type.element)];
+  case 'option':return ['option',__ownershipSchema(type.element)];
+  case 'result':return ['result',__ownershipSchema(type.ok),__ownershipSchema(type.error)];
+  case 'record':return ['record',type.fields.map(f=>[f.name,__ownershipSchema(f.type)])];
+  default:return type;
+ }
+}
+function __ownedResult(copy,nested,type){
+ const key='owned-state:'+JSON.stringify(__ownershipSchema(type));
+ let schema=__conversionKeys.get(key);
+ if(!schema){schema={};__conversionKeys.set(key,schema);}
  const owned=(value,context)=>{
   if(!context&&!nested)return copy(value,null);
   const memo=context||new WeakMap();
-  if(memo.has(value))return memo.get(value);
-  const result=copy(value,memo);memo.set(value,result);return result;
+  if(value===null||typeof value!=='object')return copy(value,memo);
+  let entries=memo.get(schema);if(!entries){entries=new WeakMap();memo.set(schema,entries);}
+  if(entries.has(value))return entries.get(value);
+  const result=copy(value,memo);entries.set(value,result);return result;
  };
  owned.container=true;return owned;
 }
 function __stateResult(type){
  switch(type.kind){
   case 'ref':{let resolved;const copy=(value,context)=>(resolved??=__stateResult(__namedTypes[type.name]))(value,context);copy.container=true;return copy;}
-  case 'record':{const fields=type.fields.map(f=>[f.name,__stateResult(f.type)]);return __ownedResult((value,context)=>Object.fromEntries(fields.map(([name,copy])=>[name,copy(value[name],context)])),fields.some(([,copy])=>copy.container));}
-  case 'list':case 'vector':{const copy=__stateResult(type.element);return __ownedResult((value,context)=>Array.from(value,item=>copy(item,context)),copy.container);}
-  case 'option':{const copy=__stateResult(type.element);return __ownedResult((value,context)=>Object.hasOwn(value,'Some')?{Some:copy(value.Some,context)}:{None:null},copy.container);}
-  case 'result':{const ok=__stateResult(type.ok),err=__stateResult(type.error);return __ownedResult((value,context)=>Object.hasOwn(value,'Ok')?{Ok:ok(value.Ok,context)}:{Err:err(value.Err,context)},ok.container||err.container);}
+  case 'record':{if((typeof __recordElisions!=='undefined'&&__recordElisions.has(type.name))){const f=type.fields[0],copy=__stateResult(f.type);return __ownedResult((value,context)=>({[f.name]:copy(value,context)}),copy.container,type);}const fields=type.fields.map(f=>[f.name,__stateResult(f.type)]);return __ownedResult((value,context)=>Object.fromEntries(fields.map(([name,copy])=>[name,copy(value[name],context)])),fields.some(([,copy])=>copy.container),type);}
+  case 'list':case 'vector':{const copy=__stateResult(type.element);return __ownedResult((value,context)=>Array.from(value,item=>copy(item,context)),copy.container,type);}
+  case 'option':{const copy=__stateResult(type.element);return __ownedResult((value,context)=>Object.hasOwn(value,'Some')?{Some:copy(value.Some,context)}:{None:null},copy.container,type);}
+  case 'result':{const ok=__stateResult(type.ok),err=__stateResult(type.error);return __ownedResult((value,context)=>Object.hasOwn(value,'Ok')?{Ok:ok(value.Ok,context)}:{Err:err(value.Err,context)},ok.container||err.container,type);}
   default:return __representation(type,true);
  }
 }

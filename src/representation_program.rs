@@ -6,6 +6,7 @@ use std::{
     fmt::Write,
 };
 struct Emit<'a> {
+    elisions: BTreeSet<String>,
     program: &'a ink_core::syntax::Program,
     projection: &'a ink_core::action_model::Projection,
     types: BTreeMap<String, (usize, Type, Sort)>,
@@ -44,7 +45,7 @@ impl Emit<'_> {
     Type::Int=>"const text=v&&typeof v.Int==='string'?v.Int:typeof v==='bigint'?v.toString():'';const n=BigInt(text);let magnitude=n<0n?-n:n;if(magnitude===0n)return __node(0,[]);const bits=magnitude.toString(2);let tail=__node(0,[]);for(const bit of bits)tail=__node(bit==='0'?1:2,[tail]);return __node(n<0n?2:1,[tail]);".into(),
     Type::Named(n)if p.enums.contains_key(n)=>{let cases=p.enums[n].iter().enumerate().map(|(i,v)|format!("case {}:return __node({i},[]);",super::quote(&format!("{n}.{v}")))).collect::<String>();format!("switch(v){{{cases}default:return undefined;}}", )},
     Type::Named(n)if p.records.contains_key(n)=>{
-        let fs=&p.records[n];let args=fs.iter().map(|(name,t)|self.read_mode(t,&format!("v[{}]",super::quote(name)),"d+1","internal")).collect::<LangResult<Vec<_>>>()?;
+        let fs=&p.records[n];let args=fs.iter().map(|(name,t)|self.read_mode(t,&if self.elisions.contains(n){format!("(internal?v:v[{}])",super::quote(name))}else{format!("v[{}]",super::quote(name))},"d+1","internal")).collect::<LangResult<Vec<_>>>()?;
         if let Some(record)=self.projection.recursive_records.get(n) {
             let args=args.into_iter().zip(&record.fields).map(|(x,f)|f.encode.as_ref().map(|id|format!("f_{id}({x})")).unwrap_or(x)).collect::<Vec<_>>();
             let mut list="__node(0,[])".to_owned();for x in args.into_iter().rev(){list=format!("__node(3,[{x},{list}])");}
@@ -95,10 +96,10 @@ impl Emit<'_> {
         Ok(out)
     }
 }
-pub(crate) fn maintained_support(module: &ink_core::core::CheckedModule, views:&ink_core::maintained::CheckedViews) -> LangResult<String> {
+pub(crate) fn maintained_support(module: &ink_core::core::CheckedModule, views:&ink_core::maintained::CheckedViews,elisions:&std::collections::BTreeSet<String>) -> LangResult<String> {
     let projection=ink_core::action_model::Projection::derive(module)?;
     let types=projection.types.iter().enumerate().map(|(i,(key,sort))|Ok((key.clone(),(i,serde_json::from_str::<Type>(key).map_err(|e|e.to_string())?,sort.clone())))).collect::<LangResult<BTreeMap<_,_>>>()?;
-    let e=Emit{program:module.program(),projection:&projection,types};
+    let e=Emit{elisions:elisions.clone(),program:module.program(),projection:&projection,types};
     use ink_core::logic::Term;
     let ds=views.definition().reachable_executable_declarations()?;
     let var=|n:&str|Term::Var(n.into());
@@ -169,7 +170,7 @@ pub fn lower(checked: &CheckedRepresentation) -> LangResult<String> {
             ))
         })
         .collect::<LangResult<BTreeMap<_, _>>>()?;
-    let e = Emit { program:checked.module().program(),projection:checked.projection(), types };
+    let e = Emit { elisions:Default::default(), program:checked.module().program(),projection:checked.projection(), types };
     let p = checked.module().program();
     let plan = checked.plan();
     let projection = checked.projection();

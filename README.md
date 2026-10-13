@@ -39,8 +39,9 @@ distribution's [contract and evidence](https://github.com/siliconjungle/ink-lang
 - `u64` uses `BigInt` and wraps at 64 bits after each arithmetic operation.
   Native callers supply BigInt, including inside arrays/records. Results are
   BigInt. JSON consumers explicitly encode/decode them as decimal strings.
-- `f32` is represented internally by binary32 bits. Every arithmetic operation
-  rounds separately to binary32; negation flips the sign bit. Input/output uses
+- Pure modules keep `f32` in native Numbers with exact tagged exceptional values;
+  state modules retain the binary32 bit carrier. Every arithmetic operation
+  rounds separately to binary32; negation preserves the exact sign and payload. Input/output uses
   Numbers or explicit `{F32Bits: bits}` for exceptional values. Zero signs,
   subnormals and passed-through exceptional payloads survive. Arithmetic NaNs
   use the canonical quiet payload `0x7fc00000`; F32 programs bind executable-core V7.
@@ -65,16 +66,32 @@ rejects ill-typed Ink programs and checks proof applications during compilation.
 
 Callers provide the arity, shapes and numeric ranges declared in `metadata`:
 u32/i32 are integer Numbers in range, u64 is BigInt, Bool is boolean, and
-collections/records contain their declared values. f32 boundaries convert
-Numbers to binary32 bits and back, preserving separately rounded operations;
+collections/records contain their declared values. Pure f32 operations round
+scalar reads and arithmetic separately with `Math.fround`;
 explicit `{F32Bits: bits}` supports exceptional values and payloads. These
 representation conversions are specialised once at module initialisation.
+Field-only pure record consumers borrow stable input containers and avoid recursive
+float packing. Whole-value escape/equality retains eager, invocation-local
+capture; state inputs and results retain their separate ownership checks.
+No conversion cache retains mutable host values across invocations.
 Word-only inputs and outputs have no codec traversal or copy. An identity
 function can return the original array/record; callers own aliasing and must
 keep values stable during calls. Invalid caller values are outside the ABI
 contract and have no specified diagnostic or result.
 
 Pure calls have no execution timeout or collection size limit.
+`callOwned(name, args, limits)` has the same stable, well-typed input contract as
+`call`, but returns a canonical logical result with every container detached from
+caller inputs. Literal typed copy functions use static field names; no JSON
+algorithm recognition or runtime source generation is involved. The copy obeys
+the shared ABI's byte/node/depth limits. Execution itself remains unbounded, and
+declared preconditions still run. Internal owners and unsupported wire types
+reject explicitly. Ordinary `call` retains its existing aliasing contract.
+Compiler-derived `valueCodecs` can use literal materialisers with static field
+names. Complete generic portable/compact validation runs first, including schema,
+Unicode, count and resource checks. Materialisation runs synchronously and returns
+owned values. Arbitrary runtime `createValueCodec` schemas retain generic decoding;
+the emitted materialisers are trusted backend code, not equality certificates.
 Resource policy belongs to the application. This is an intentional ABI change
 from `ink-javascript-values-v1` to `ink-javascript-trusted-values-v2`.
 
@@ -94,6 +111,18 @@ State transactions retain their separate bounded host execution policy.
 identity, semantics version, typed interface and emitted-source hash. The checker,
 lowerer, representation conversion and JavaScript engine remain trusted implementations.
 Differential testing is evidence, not a formal target-code proof.
+
+### Plain JavaScript objects
+
+Generated `JsonCodec` instances now expose `fromJS(value, limits)` and
+`toJS(value, options)` for plain object/array trees, without a JSON text round
+trip. They are explicit host-boundary adapters to the ordinary library `Json`
+type; pure calls, native lowerers and Wasm execution do not acquire an implicit
+conversion. Inputs and outputs are detached and existing resource budgets apply.
+Accessors, cycles, unsupported values and non-plain objects reject explicitly.
+The default Number output policy rejects decimal precision loss; use
+`numbers: 'bigint'` for exact integers or `numbers: 'string'` for exact tokens.
+See the pinned ABI's README for the complete input and numeric contracts.
 
 ## Validation
 
