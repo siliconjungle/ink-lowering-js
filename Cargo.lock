@@ -65,7 +65,7 @@ dependencies = [
 [[package]]
 name = "ink-abi"
 version = "0.1.0"
-source = "git+https://github.com/siliconjungle/ink-abi?rev=1702a339c6dbb4d60afd69e48208adc44dab6887#1702a339c6dbb4d60afd69e48208adc44dab6887"
+source = "git+https://github.com/siliconjungle/ink-abi?rev=972229604ac4787fc47e02f56831f614d7d42eaa#972229604ac4787fc47e02f56831f614d7d42eaa"
 dependencies = [
  "serde",
  "serde_json",
