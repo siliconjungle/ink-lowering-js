@@ -15,6 +15,7 @@ mod state_capture;
 mod value_layout;
 mod owned_values;
 mod wire_values;
+mod compiled_values;
 mod primitives;
 type Env = BTreeMap<String, (String, Type)>;
 fn quote(s: &str) -> String {
@@ -1682,6 +1683,13 @@ function __callEncoded(name,bytes,limits,compact){
  const f=metadata.functions.find(f=>f.name===name&&!f.internal),codecs=valueCodecs[name];
  if(!f||!codecs)throw Error('unsupported binary function');
  const input=compact?codecs.arguments.compact():codecs.arguments,output=compact?codecs.result.compact():codecs.result;
+ const entry=__compiledEntries.get(name);
+ if(entry){
+  entry.argumentCodec??=createCompiledValueCodec(metadata.wire.functions[name].arguments,entry.arguments);
+  const values=(compact?entry.argumentCodec.compact():entry.argumentCodec).decode(bytes,limits),args=f.params.map(p=>values[p.name]);
+  if(entry.precondition!==null&&__implementations[entry.precondition](...args)!==true)throw Error('contract precondition failed');
+  return __compiledEncodeResult(entry,__implementations[entry.index](...args),limits,compact);
+ }
  const values=input.decode(bytes,limits);
  const result=call(name,f.params.map(p=>values[p.name]));
  return output.encode(result,limits);
@@ -1695,6 +1703,7 @@ export function callOwned(name,args,limits={}){
  const result=__ownedImplementations[name](...args);return __ownedFunctions[name](result,createValueCaptureBudget(limits),0);
 }
 "#);
+    javascript.push_str(&compiled_values::emit(p,elisions,native_f32,needs_conversion)?);
     for (i, f) in p.functions.iter().enumerate() {
         if matches!(f.result, Type::List(_))
             && (!elisions.is_empty() || interface["functions"][i]["result"]["element"]
