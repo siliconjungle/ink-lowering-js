@@ -59,6 +59,11 @@ function __representationRaw(type, output, capture) {
       return element === __identity ? __identity : (value,context) => Array.from(value, item=>element(item,context));
     }
     case 'record': {
+      if((typeof __recordElisions!=='undefined'&&__recordElisions.has(type.name))){
+        if(!type.fields.length)return ()=>undefined; // lexically unconsumed projected input
+        const field=type.fields[0],child=__representation(field.type,output,capture);
+        return output?(value,context)=>({[field.name]:child(value,context)}):(value,context)=>child(value[field.name],context);
+      }
       const fields = type.fields.map(field => [field.name, __representation(field.type, output,capture)]);
       return fields.every(([,convert]) => convert === __identity) ? __identity :
         (value,context) => {
@@ -122,6 +127,7 @@ function __compileStateCapture(type){
   }
   case 'record':{
    const fields=type.fields.map(f=>[f.name,__stateCapture(f.type)]);
+   if((typeof __recordElisions!=='undefined'&&__recordElisions.has(type.name)))return limited((value,budget,depth)=>{const [name,copy]=fields[0];if(!value||typeof value!=='object'||Array.isArray(value)||!Object.hasOwn(value,name))throw Error('invalid record');return copy(value[name],budget,depth+1);});
    return limited((value,budget,depth)=>{
     if(!value||typeof value!=='object'||Array.isArray(value)||!fields.every(([name])=>Object.hasOwn(value,name)))throw Error('invalid record');
     const out={};for(const [name,copy]of fields){const field=copy(value[name],budget,depth+1);if(name==='__proto__')Object.defineProperty(out,name,{value:field,writable:true,enumerable:true,configurable:true});else out[name]=field;}return out;
@@ -166,7 +172,7 @@ function __stateInput(value,type,budget={cells:1000000},depth=0){
       if(type.kind==='vector'&&value.length!==type.size)throw Error('invalid vector length');
       return Array.from(value,v=>input(v,type.element));
     }
-    case 'record':if(!value||typeof value!=='object'||Array.isArray(value)||!type.fields.every(f=>Object.hasOwn(value,f.name)))throw Error('invalid record');return Object.fromEntries(type.fields.map(f=>[f.name,input(value[f.name],f.type)]));
+    case 'record':if(!value||typeof value!=='object'||Array.isArray(value)||!type.fields.every(f=>Object.hasOwn(value,f.name)))throw Error('invalid record');if((typeof __recordElisions!=='undefined'&&__recordElisions.has(type.name))){const f=type.fields[0];return input(value[f.name],f.type);}return Object.fromEntries(type.fields.map(f=>[f.name,input(value[f.name],f.type)]));
     case 'option':if(tagged('Some'))return {Some:input(value.Some,type.element)};if(tagged('None')&&value.None===null)return {None:null};throw Error('invalid Option');
     case 'result':if(tagged('Ok'))return {Ok:input(value.Ok,type.ok)};if(tagged('Err'))return {Err:input(value.Err,type.error)};throw Error('invalid Result');
     default:throw Error('unsupported public value type');
@@ -176,18 +182,21 @@ function __stateInput(value,type,budget={cells:1000000},depth=0){
 // State results must own mutable containers. Compile the declared schema once:
 // scalars need no structured clone, while nested records/lists remain detached.
 function __ownedResult(copy,nested){
+ const schema={};
  const owned=(value,context)=>{
   if(!context&&!nested)return copy(value,null);
   const memo=context||new WeakMap();
-  if(memo.has(value))return memo.get(value);
-  const result=copy(value,memo);memo.set(value,result);return result;
+  if(value===null||typeof value!=='object')return copy(value,memo);
+  let entries=memo.get(schema);if(!entries){entries=new WeakMap();memo.set(schema,entries);}
+  if(entries.has(value))return entries.get(value);
+  const result=copy(value,memo);entries.set(value,result);return result;
  };
  owned.container=true;return owned;
 }
 function __stateResult(type){
  switch(type.kind){
   case 'ref':{let resolved;const copy=(value,context)=>(resolved??=__stateResult(__namedTypes[type.name]))(value,context);copy.container=true;return copy;}
-  case 'record':{const fields=type.fields.map(f=>[f.name,__stateResult(f.type)]);return __ownedResult((value,context)=>Object.fromEntries(fields.map(([name,copy])=>[name,copy(value[name],context)])),fields.some(([,copy])=>copy.container));}
+  case 'record':{if((typeof __recordElisions!=='undefined'&&__recordElisions.has(type.name))){const f=type.fields[0],copy=__stateResult(f.type);return __ownedResult((value,context)=>({[f.name]:copy(value,context)}),copy.container);}const fields=type.fields.map(f=>[f.name,__stateResult(f.type)]);return __ownedResult((value,context)=>Object.fromEntries(fields.map(([name,copy])=>[name,copy(value[name],context)])),fields.some(([,copy])=>copy.container));}
   case 'list':case 'vector':{const copy=__stateResult(type.element);return __ownedResult((value,context)=>Array.from(value,item=>copy(item,context)),copy.container);}
   case 'option':{const copy=__stateResult(type.element);return __ownedResult((value,context)=>Object.hasOwn(value,'Some')?{Some:copy(value.Some,context)}:{None:null},copy.container);}
   case 'result':{const ok=__stateResult(type.ok),err=__stateResult(type.error);return __ownedResult((value,context)=>Object.hasOwn(value,'Ok')?{Ok:ok(value.Ok,context)}:{Err:err(value.Err,context)},ok.container||err.container);}

@@ -1,4 +1,4 @@
-//! Literal owned copies of already well-typed public values.
+//! Literal owned public copies of already well-typed private results.
 use super::{descriptor, quote};
 use ink_core::{syntax::{Program, Type}, LangResult};
 use serde_json::Value;
@@ -6,10 +6,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) struct OwnedValues<'a> {
     program: &'a Program,
+    elisions: BTreeSet<String>,
+    native_f32: bool,
     functions: BTreeMap<String, (String, String)>,
 }
 impl<'a> OwnedValues<'a> {
-    pub fn new(program: &'a Program) -> Self { Self { program, functions: BTreeMap::new() } }
+    pub fn private(program: &'a Program,elisions:&BTreeSet<String>,native_f32:bool) -> Self {
+        Self{program,elisions:elisions.clone(),native_f32,functions:BTreeMap::new()}
+    }
     pub fn source(&self) -> String { self.functions.values().map(|(_, code)| code.as_str()).collect() }
     pub fn for_type(&mut self, ty: &Type) -> LangResult<String> {
         let original = self.functions.len();
@@ -37,7 +41,7 @@ impl<'a> OwnedValues<'a> {
             "u32" => (8, "return value>>>0;".into()),
             "i32" => (8, "return value|0;".into()),
             "u64" => (12, "return BigInt(value);".into()),
-            "f32" => (8, "const bits=typeof value==='number'?__bits(value):value.F32Bits;return {F32Bits:bits===0?0:bits};".into()),
+            "f32" => (8, if !self.native_f32 {"return {F32Bits:value===0?0:value};".into()} else {"const bits=typeof value==='number'?__bits(value):value.F32Bits;return {F32Bits:bits===0?0:bits};".into()}),
             "int" => (4, "const text=typeof value==='bigint'?value.toString():value.Int;budget.text(text);return {Int:text};".into()),
             "string" | "id" | "enum" => (4, "budget.text(value);return value;".into()),
             "record" => {
@@ -45,7 +49,8 @@ impl<'a> OwnedValues<'a> {
                 for field in ty["fields"].as_array().ok_or("owned record fields")? {
                     let label = quote(field["name"].as_str().ok_or("owned field name")?);
                     let next = self.compile(&field["type"])?;
-                    fields.push(format!("[{label}]:{next}(value[{label}],budget,depth+1)"));
+                    let input=if ty["name"].as_str().is_some_and(|n|self.elisions.contains(n)){"value".into()}else{format!("value[{label}]")};
+                    fields.push(format!("[{label}]:{next}({input},budget,depth+1)"));
                 }
                 (4, format!("return {{{}}};", fields.join(",")))
             }

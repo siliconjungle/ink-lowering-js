@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) struct Captures<'a> {
     program: &'a Program,
+    elisions: BTreeSet<String>,
     functions: BTreeMap<String, (String, String)>,
 }
 impl<'a> Captures<'a> {
@@ -29,7 +30,10 @@ impl<'a> Captures<'a> {
         Some(format!("let {output}={input};if({depth}>64||--budget.cells<0)throw Error('state input resource limit');{check}"))
     }
     pub fn new(program: &'a Program) -> Self {
-        Self { program, functions: BTreeMap::new() }
+        Self { program, elisions:BTreeSet::new(), functions: BTreeMap::new() }
+    }
+    pub fn with_elisions(program: &'a Program, elisions:&BTreeSet<String>) -> Self {
+        let mut result=Self::new(program);result.elisions=elisions.clone();result
     }
     pub fn source(&self) -> String {
         self.functions.values().map(|(_, code)| code.as_str()).collect()
@@ -74,7 +78,8 @@ impl<'a> Captures<'a> {
                     owned.push(format!("[{label}]:{result}"));
                 }
                 let required = if tests.is_empty() { String::new() } else { format!("||{}", tests.join("||")) };
-                format!("if(!value||typeof value!=='object'||Array.isArray(value){required})throw Error('invalid record');{capture}return {{{}}};", owned.join(","))
+                let output=if ty["name"].as_str().is_some_and(|n|self.elisions.contains(n)) {"field0".into()} else {format!("{{{}}}",owned.join(","))};
+                format!("if(!value||typeof value!=='object'||Array.isArray(value){required})throw Error('invalid record');{capture}return {output};")
             }
             "list" | "vector" => {
                 let next = self.compile(&ty["element"])?;

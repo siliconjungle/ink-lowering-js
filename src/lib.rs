@@ -12,6 +12,7 @@ pub mod definition;
 pub mod portable_definition;
 mod state;
 mod state_capture;
+mod value_layout;
 mod owned_values;
 mod wire_values;
 mod primitives;
@@ -73,11 +74,12 @@ struct TypedEquality<'a> {
     p: &'a Program,
     prefix: &'static str,
     native_f32: bool,
+    elisions: BTreeSet<String>,
     equalities: BTreeMap<String, (String, String)>,
 }
 impl<'a> TypedEquality<'a> {
     fn new(p: &'a Program, prefix: &'static str) -> Self {
-        Self { p, prefix, native_f32: false, equalities: BTreeMap::new() }
+        Self { p, prefix, native_f32: false, elisions: BTreeSet::new(), equalities: BTreeMap::new() }
     }
     fn source(&self) -> String {
         self.equalities.values().map(|(_, source)| source.as_str()).collect()
@@ -118,6 +120,11 @@ impl<'a> TypedEquality<'a> {
             }
             Type::Named(n) => {
                 let fields = self.p.records[n].clone();
+                if self.elisions.contains(n) {
+                    let child=self.expr(&fields[0].1,"a","b")?;
+                    self.equalities.insert(key,(name.clone(),format!("function {name}(a,b){{return {child};}}\n")));
+                    return Ok(format!("{name}({a},{b})"));
+                }
                 let checks = fields
                     .iter()
                     .map(|(field, ty)| {
@@ -702,6 +709,9 @@ impl Emitter<'_> {
                 local.insert(n.clone(), (value, at));
                 self.expr(b, &local, Some(&t))?
             }
+            Expr::Record(n, fields) if self.equality.elisions.contains(n) => {
+                self.expr(&fields[0].1,env,Some(&self.p.records[n][0].1))?
+            }
             Expr::Record(n, fields) => {
                 let mut values = Vec::new();
                 for (field, expr) in fields {
@@ -727,6 +737,7 @@ impl Emitter<'_> {
                 let at = self.infer(a, env, None)?;
                 let av = self.expr(a, env, None)?;
                 let av = self.bind(&av);
+                if matches!(&at,Type::Named(n) if self.equality.elisions.contains(n)) {return Ok(av);}
                 let field = if matches!(at, Type::Vector(..)) {
                     ["x", "y", "z", "w"]
                         .iter()
@@ -1304,12 +1315,13 @@ impl Emitter<'_> {
 /// Emit an ES module. Backend implementation and the JavaScript engine are
 /// trusted; checked source/rewrite evidence does not certify emitted machine code.
 pub fn lower(module: &CheckedModule) -> LangResult<Emission> {
-    lower_with_layout(module, None)
+    lower_with_layout(module, None, &BTreeSet::new())
 }
 pub fn lower_planned(plan: &ink_core::planning::CheckedPlan) -> LangResult<Emission> {
     plan.require_source_storage_capability(true,true)?;
     let layout=ink_core::snapshot::layout(plan.original().program())?;
-    let mut emission=lower_with_layout(plan.module(),Some(&layout))?;
+    let elisions=plan.physical().map(|p|p.plan().record_elisions.iter().map(|l|l.record.clone()).collect()).unwrap_or_default();
+    let mut emission=lower_with_layout(plan.module(),Some(&layout),&elisions)?;
     if let Some(physical)=plan.physical(){
         if !physical.plan().dense_prefixes.is_empty(){
             let prefixes=plan.module().program().states.iter().map(|s|physical.plan().dense_prefixes.iter().find(|p|p.table==s.name).map(|p|p.capacity).unwrap_or(0)).collect::<Vec<_>>();
@@ -1318,7 +1330,7 @@ pub fn lower_planned(plan: &ink_core::planning::CheckedPlan) -> LangResult<Emiss
         }
     }
     if let Some(views)=plan.maintained(){
-        let support=representation_program::maintained_support(plan.module(),views)?;
+        let support=representation_program::maintained_support(plan.module(),views,&elisions)?;
         emission.javascript=format!("{support}{}",emission.javascript);
         emission.javascript=emission.javascript.replace("__createState(__stateMetadata,__actions,__stateInputCaptures)","__createState(__stateMetadata,__actions,__stateInputCaptures,__compiledMaintained)");
         emission.javascript=emission.javascript.replace("__createState(__stateMetadata,__actions,__stateInputCaptures,[],__densePrefixes)","__createState(__stateMetadata,__actions,__stateInputCaptures,__compiledMaintained,__densePrefixes)");
@@ -1330,7 +1342,7 @@ pub fn lower_planned(plan: &ink_core::planning::CheckedPlan) -> LangResult<Emiss
 /// Emit selected code with the snapshot origin authenticated by the core.
 pub fn lower_selected(selected: &ink_core::optimisation::CheckedSelection) -> LangResult<Emission> {
     let layout = ink_core::snapshot::selected_layout(selected)?;
-    let mut emission = lower_with_layout(selected.module(), Some(&layout))?;
+    let mut emission = lower_with_layout(selected.module(), Some(&layout), &BTreeSet::new())?;
     emission.manifest["selection"] =
         serde_json::to_value(selected.evidence()).map_err(|e| e.to_string())?;
     Ok(emission)
@@ -1338,6 +1350,7 @@ pub fn lower_selected(selected: &ink_core::optimisation::CheckedSelection) -> La
 fn lower_with_layout(
     module: &CheckedModule,
     layout: Option<&ink_core::snapshot_wire::Layout>,
+    elisions: &BTreeSet<String>,
 ) -> LangResult<Emission> {
     let p = module.program();
     // Stateful functions share the exact-bit carrier with actions/snapshots.
@@ -1345,6 +1358,7 @@ fn lower_with_layout(
     let native_f32 = p.actions.is_empty() && p.states.is_empty() && p.keeps.is_empty();
     let mut equality=TypedEquality::new(p,"__valueEqual");
     equality.native_f32=native_f32;
+    equality.elisions=elisions.clone();
     let mut emitter = Emitter {
         p,
         next: 0,
@@ -1448,7 +1462,7 @@ fn lower_with_layout(
         } else {
             ink_core::in_place::analyse_with_result(&f.body, &f.params, Some(&f.result), p)
         };
-        let conversion = if functions[i]["result"]["element"]
+        let conversion = if !elisions.is_empty() || functions[i]["result"]["element"]
             .to_string()
             .contains("\"kind\":\"f32\"")
             || functions[i]["result"]["element"]
@@ -1470,7 +1484,7 @@ fn lower_with_layout(
     let mut interface = json!({"schema":1,"backend":"javascript","abi":"ink-javascript-trusted-values-v2","destination_abi":{"name":"ink-javascript-into-v1","count_unit":"elements","ownership":"caller-owned","capacity":"trusted","aliasing":"destination-disjoint-from-all-reachable-inputs","tail":"unwritten"},"core_semantics":module.semantics(),"core_sha256":module.identity()?,"functions":functions});
     // Emit only helpers referenced by the compiled expressions. Descriptor
     // conversion is needed solely for signatures containing binary32 values.
-    let needs_conversion = interface.to_string().contains("\"kind\":\"f32\"")
+    let needs_conversion = !elisions.is_empty() || interface.to_string().contains("\"kind\":\"f32\"")
         || interface.to_string().contains("\"kind\":\"int\"")
         || interface.to_string().contains("\"kind\":\"id\"");
     if !emitter.callbacks.is_empty() {
@@ -1545,7 +1559,7 @@ fn lower_with_layout(
     if has_state || javascript.contains("__word(") {
         helpers.push_str(include_str!("word.mjs"));
     }
-    javascript = format!("const __nativeF32={native_f32};\n") + &helpers + &javascript;
+    javascript = format!("const __recordElisions=new Set({});\nconst __nativeF32={native_f32};\n",serde_json::to_string(elisions).map_err(|e|e.to_string())?) + &helpers + &javascript;
     let named = p
         .records
         .keys()
@@ -1562,9 +1576,9 @@ fn lower_with_layout(
     ));
     let state = if !p.actions.is_empty() || !p.states.is_empty() || !p.keeps.is_empty() {
         let (code, metadata) = if let Some(layout) = layout {
-            state::emit_with_layout(module, layout)?
+            state::emit_with_elisions(module, layout, elisions)?
         } else {
-            state::emit(module)?
+            state::emit_with_elisions(module, &ink_core::snapshot::layout(p)?, elisions)?
         };
         javascript.push_str(include_str!("snapshot.mjs"));
         javascript.push_str(&code);
@@ -1572,6 +1586,7 @@ fn lower_with_layout(
     } else {
         None
     };
+    interface["private_record_elisions"]=json!(elisions);
     interface["f32_storage"] = json!(if native_f32 {"native-number-with-exact-nonfinite-tags"} else {"exact-u32-bits"});
     interface["wire"] = ink_abi::wire_contract::source_contract(p)?;
     interface["state"] = serde_json::to_value(state).map_err(|e| e.to_string())?;
@@ -1626,7 +1641,7 @@ export const functions = Object.freeze(Object.fromEntries(metadata.functions.fil
     }
     javascript.push_str(ink_abi::VALUE_WIRE_JS_SOURCE);
     javascript.push_str(ink_abi::JSON_VALUE_JS_SOURCE);
-    let mut owned = owned_values::OwnedValues::new(p);
+    let mut owned = owned_values::OwnedValues::private(p,elisions,native_f32);
     let mut owned_entries = Vec::new();
     let mut unsupported_owned = Vec::new();
     for (i, function) in p.functions.iter().enumerate() {
@@ -1649,6 +1664,18 @@ export const functions = Object.freeze(Object.fromEntries(metadata.functions.fil
     }
     javascript.push_str(&wire.source());
     javascript.push_str(&format!("const __wireReaders=Object.freeze(Object.fromEntries([{}]));\n",wire_entries.join(",")));
+    if needs_conversion {
+        javascript.push_str(r#"
+const __ownedImplementations=Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal).map(f=>{
+ const input=__inputTypes[f.index].types.map((t,i)=>__representation(t,false,__inputTypes[f.index].capture[i]));
+ const body=__implementations[f.index];
+ const implementation=f.precondition==null?body:(...args)=>{if(__implementations[f.precondition](...args)!==true)throw Error('contract precondition failed');return body(...args);};
+ return [f.name,input.every(c=>c===__identity)?implementation:(...args)=>{const context=new WeakMap();return implementation(...args.map((v,i)=>input[i](v,context)));}];
+})));
+"#);
+    } else {
+        javascript.push_str("const __ownedImplementations=functions;\n");
+    }
     javascript.push_str(r#"
 export const valueCodecs=(()=>{const codecs={};for(const [name,s] of Object.entries(metadata.wire.functions)){if(s.unsupported)continue;let value;Object.defineProperty(codecs,name,{enumerable:true,get:()=>value??=(Object.freeze(Object.hasOwn(__wireReaders,name)?{arguments:createCompiledValueCodec(s.arguments,__wireReaders[name][0]),result:createCompiledValueCodec(s.result,__wireReaders[name][1])}:{arguments:new ValueCodec(s.arguments),result:new ValueCodec(s.result)}))});}return Object.freeze(codecs);})();
 function __callEncoded(name,bytes,limits,compact){
@@ -1665,17 +1692,17 @@ export function callCompact(name,bytes,limits={}){return __callEncoded(name,byte
 // The checked source return type justifies trusted copying, not arbitrary input.
 export function callOwned(name,args,limits={}){
  if(!Object.hasOwn(__ownedFunctions,name)||!Object.hasOwn(functions,name))throw Error('unsupported owned function');
- const result=call(name,args);return __ownedFunctions[name](result,createValueCaptureBudget(limits),0);
+ const result=__ownedImplementations[name](...args);return __ownedFunctions[name](result,createValueCaptureBudget(limits),0);
 }
 "#);
     for (i, f) in p.functions.iter().enumerate() {
         if matches!(f.result, Type::List(_))
-            && interface["functions"][i]["result"]["element"]
+            && (!elisions.is_empty() || interface["functions"][i]["result"]["element"]
                 .to_string()
                 .contains("\"kind\":\"f32\"")
             || interface["functions"][i]["result"]["element"]
                 .to_string()
-                .contains("\"kind\":\"int\"")
+                .contains("\"kind\":\"int\""))
         {
             javascript.push_str(&format!("const __intoOutput{i}=__representation(metadata.functions[{i}].result.element,true);\n"));
         }
