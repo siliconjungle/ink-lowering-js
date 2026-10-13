@@ -51,11 +51,12 @@ function __remember(rt,index,key,present,value){if(!rt.seen[index].has(key)){rt.
 function __invalidateKeeps(rt,index){
  if(!rt.keeps)return;
  for(const keep of rt.meta.keepInvalidations[index]){
-  if(!rt.keepSeen.has(keep)){rt.keepSeen.add(keep);rt.keepUndo.push([keep,rt.keeps[keep]]);}
+  if(!rt.keepDirty[keep]){rt.keepDirty[keep]=1;rt.keepUndoIndices[rt.keepUndoCount++]=keep;rt.keepBefore[keep]=rt.keeps[keep];}
   rt.keeps[keep]=undefined;
  }
 }
-function __restoreKeeps(rt){for(let i=rt.keepUndo.length-1;i>=0;i--){const [keep,value]=rt.keepUndo[i];rt.keeps[keep]=value;}}
+function __restoreKeeps(rt){for(let i=rt.keepUndoCount-1;i>=0;i--){const keep=rt.keepUndoIndices[i];rt.keeps[keep]=rt.keepBefore[keep];}}
+function __clearKeepJournal(rt){for(let i=0;i<rt.keepUndoCount;i++){const keep=rt.keepUndoIndices[i];rt.keepDirty[keep]=0;rt.keepBefore[keep]=undefined;}rt.keepUndoCount=0;}
 function __cachedKeep(ctx,rt,index,compute){const prior=rt.keeps[index];if(prior!==undefined)return prior;const value=compute(ctx,rt);rt.keeps[index]=value;return value;}
 function __table(rt,index,method,args){
  const table=rt.tables[index],key=args[0];
@@ -79,7 +80,7 @@ function __table(rt,index,method,args){
 }
 function __rollback(rt,mark){for(let i=rt.undo.length-1;i>=mark;i--){const [index,key,present,value]=rt.undo[i];const table=rt.tables[index];if(table.has(key)!==present)__tableMembership(rt,index,key,present);if(present)table.set(key,value);else table.delete(key);}rt.undo.length=mark;}
 function __createState(meta,implementations,captures=null){
- const rt={meta,tables:meta.roots.map(()=>new Map()),version:0n,outbox:[],staged:[],busy:false,undo:[],seen:meta.roots.map(()=>new Set()),host:null,keeps:new Array(meta.keeps.length),keepUndo:[],keepSeen:new Set()};
+ const rt={meta,tables:meta.roots.map(()=>new Map()),version:0n,outbox:[],staged:[],busy:false,undo:[],seen:meta.roots.map(()=>new Set()),host:null,keeps:new Array(meta.keeps.length),keepBefore:meta.keeps.length?new Array(meta.keeps.length):null,keepDirty:meta.keeps.length?new Uint8Array(meta.keeps.length):null,keepUndoIndices:meta.keeps.length?new Uint32Array(meta.keeps.length):null,keepUndoCount:0};
  const actionMap=new Map(meta.actions.map(a=>[a.name,{...a,inputs:captures?captures[a.index]:a.params.map(p=>__stateCapture(p.type)),output:__stateResult(a.result)}]));
  const eventOutput=new Map(meta.events.map(e=>[e.name,__stateResult(e.type)]));
  const prepared=new WeakMap();
@@ -115,7 +116,7 @@ function __createState(meta,implementations,captures=null){
    rt.version=next;
    return resultOnly?result:{result,committed:true,version:next,events};
   }catch(e){__rollback(rt,mark);__restoreKeeps(rt);rt.version=version;rt.outbox=outbox;rt.outbox.length=outboxLength;throw e;}
-  finally{rt.staged.length=0;rt.busy=false;rt.keepUndo.length=0;rt.keepSeen.clear();for(const seen of rt.seen)seen.clear();if(!rt.host)rt.undo.length=0;}
+  finally{rt.staged.length=0;rt.busy=false;__clearKeepJournal(rt);for(const seen of rt.seen)seen.clear();if(!rt.host)rt.undo.length=0;}
  }
  return Object.freeze({
   invoke,invoke_json:invoke,
