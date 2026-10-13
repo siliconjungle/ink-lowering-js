@@ -1790,4 +1790,5 @@ export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.f
 }
 
 mod definition_literal;
+mod definition_native;
 pub mod representation_program;

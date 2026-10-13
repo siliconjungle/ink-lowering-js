@@ -322,6 +322,16 @@ impl StateEmitter<'_> {
                         .enumerate()
                         .map(|(i, e)| self.expr(e, env, Some(&ink_core::table_argument(n, i, &kt, &vt))))
                         .collect::<LangResult<Vec<_>>>()?;
+                    // Fixed table primitives take typed arguments directly.
+                    // Keep the generic dispatcher for compound operations only.
+                    if n=="get"||n=="contains"||n=="remove" {
+                        let helper=match n.as_str(){"get"=>"__tableGet","contains"=>"__tableContains",_=>"__tableRemove"};
+                        return Ok(format!("{helper}(rt,{i},{})",values[0]));
+                    }
+                    if n=="put"||n=="insert"||n=="replace" {
+                        let mode=if n=="insert"{1}else if n=="replace"{2}else{0};
+                        return Ok(format!("__tablePut(rt,{i},{},{},{mode})",values[0],values[1]));
+                    }
                     format!("__table(rt,{i},{},[{}])", quote(n), values.join(","))
                 } else {
                     let raw = self.expr(xs, env, None)?;
@@ -405,7 +415,7 @@ impl StateEmitter<'_> {
                 }
                 Statement::Expr(e) => code.push_str(&format!("{};", self.expr(e, env, None)?)),
                 Statement::Emit(n, e) => code.push_str(&format!(
-                    "rt.staged.push([{},{}]);",
+                    "__emit(rt,{},{});",
                     quote(n),
                     self.expr(e, env, Some(&self.p.events[n]))?
                 )),
@@ -486,12 +496,13 @@ pub(crate) fn emit_with_sums(
         capture_lists.push(format!("[{}]", a.params.iter().map(|(_, ty)| captures.for_type(ty)).collect::<LangResult<Vec<_>>>()?.join(",")));
         let params=(0..a.params.len()).map(|i|format!("p{i}")).collect::<Vec<_>>();
         let captures=(0..a.params.len()).map(|i|format!("inputs[{i}](p{i})")).collect::<Vec<_>>();
-        // Immutable native scalars cannot retain mutable host aliases. Reuse their
-        // argument carrier after binding; composite capture keeps a fresh carrier.
-        // Publication reentry happens after action parameters have been consumed.
-        if a.params.iter().all(|(_,t)|matches!(t,Type::U64|Type::U32|Type::I32|Type::Bool|Type::String|Type::Unit)){
-            let assignments=(0..a.params.len()).map(|i|format!("args[{i}]=inputs[{i}](p{i});")).collect::<String>();
-            bound_factories.push(format!("(run,a,inputs,output,only)=>{{const args=new Array({});return ({})=>{{{assignments}return run(a,args,null,output,only,true);}};}}",a.params.len(),params.join(",")));
+        // Bind a direct action entry once. Captures become lexical locals;
+        // no argument carrier, spread invocation or name/kind dispatch remains.
+        // Preconditions retain the ordinary invocation path and evaluation order.
+        if a.kind==ActionKind::Change {
+            let locals=(0..a.params.len()).map(|i|format!("const b{i}=inputs[{i}](p{i});")).collect::<String>();
+            let argv=(0..a.params.len()).map(|i|format!(",b{i}")).collect::<String>();
+            bound_factories.push(format!("(run,a,inputs,output,only,rt,begin,complete,abort,end)=>a.precondition?({})=>run(a,[{}],null,output,only,true):({})=>{{{locals}begin(a);try{{return complete(a,__action{i}(rt.ctx,rt{argv}),output,only);}}catch(e){{return abort(e);}}finally{{end();}}}}",params.join(","),captures.join(","),params.join(",")));
         }else{
             bound_factories.push(format!("(run,a,inputs,output,only)=>({})=>run(a,[{}],null,output,only,true)",params.join(","),captures.join(",")));
         }

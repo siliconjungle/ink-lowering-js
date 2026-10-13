@@ -101,21 +101,63 @@ pub(crate) fn maintained_support(module: &ink_core::core::CheckedModule, views:&
     let projection=ink_core::action_model::Projection::derive(module)?;
     let types=projection.types.iter().enumerate().map(|(i,(key,sort))|Ok((key.clone(),(i,serde_json::from_str::<Type>(key).map_err(|e|e.to_string())?,sort.clone())))).collect::<LangResult<BTreeMap<_,_>>>()?;
     let e=Emit{elisions:elisions.clone(),sums:sums.clone(),program:module.program(),projection:&projection,types};
-    let mut out=super::definition_literal::lower(views.definition(),&projection.codec_declarations()?)?;
-    out.push_str("const __encoder=new TextEncoder();\n");
-    out.push_str(&e.codecs()?);
-    out.push_str("const __maintainedViews=[\n");
+    use ink_core::logic::Term;
+    let ds=views.definition().reachable_executable_declarations()?;
+    let var=|n:&str|Term::Var(n.into());
+    let call=|f:&str,args:Vec<Term>|Term::Call{function:f.into(),arguments:args};
+    let mut entries=String::new();
+    let mut fallback=false;
+    let mut native_roots=vec![true;module.program().states.len()];
+    let mut root_views=vec![Vec::new();module.program().states.len()];
     for ((v,s),zero) in views.package().views.iter().zip(views.subjects()).zip(views.zeros()) {
         let root=module.program().states.iter().position(|r|r.name==s.table).unwrap();
         let keep=module.program().keeps.iter().position(|k|k.name==s.keep).unwrap();
         let Type::Table(key,row)=&module.program().states[root].ty else {unreachable!()};
-        let zero=match zero{ink_core::logic::Term::U64(n)=>format!("{n}n"),ink_core::logic::Term::Bool(b)=>b.to_string(),_=>unreachable!()};
-        writeln!(out,"{{root:{root},keep:{keep},zero:{zero},contribution:(key,row)=>f_{}({},{}),combine:f_{},inverse:f_{}}},",v.contribution,e.read_mode(key,"key","0","true")?,e.read_mode(row,"row","0","true")?,v.combine,v.inverse).unwrap();
+        let view_index=root_views.iter().map(|v|v.len()).sum::<usize>();
+        root_views[root].push((view_index,keep));
+        let scalar=if s.result==Sort::Bool{Type::Bool}else{Type::U64};
+        let zero=match zero{Term::U64(n)=>format!("{n}n"),Term::Bool(b)=>b.to_string(),_=>unreachable!()};
+        let contribution_id=v.contribution_choice.as_ref().map(|c|&c.function).unwrap_or(&v.contribution);
+        let contribution=|r:&str|call(contribution_id,vec![var("key"),var(r)]);
+        let c=|a,b|call(&v.combine,vec![a,b]);
+        let inv=|a|call(&v.inverse,vec![a]);
+        let replacement=if let Some(u)=&v.update{call(&u.function,vec![var("total"),contribution("old"),contribution("row")])}
+            else{c(c(var("total"),inv(contribution("old"))),contribution("row"))};
+        let candidates=[
+            ("contribution",vec![("key",key.as_ref()),("row",row.as_ref())],contribution("row"),format!("(key,row)=>f_{}({},{})",contribution_id,e.read_mode(key,"key","0","true")?,e.read_mode(row,"row","0","true")?)),
+            ("combine",vec![("total",&scalar),("value",&scalar)],c(var("total"),var("value")),format!("f_{}",v.combine)),
+            ("inverse",vec![("value",&scalar)],inv(var("value")),format!("f_{}",v.inverse)),
+            ("insert",vec![("total",&scalar),("key",key.as_ref()),("row",row.as_ref())],c(var("total"),contribution("row")),"null".into()),
+            ("remove",vec![("total",&scalar),("key",key.as_ref()),("old",row.as_ref())],c(var("total"),inv(contribution("old"))),"null".into()),
+            ("replace",vec![("total",&scalar),("key",key.as_ref()),("old",row.as_ref()),("row",row.as_ref())],replacement,"null".into()),
+        ];
+        write!(entries,"{{root:{root},keep:{keep},zero:{zero}").unwrap();
+        for (name,params,body,ordinary) in candidates {
+            let code=match super::definition_native::function(module.program(),&projection,&ds,elisions,&params,&body){
+                Ok(code)=>code,
+                Err(_)=>{if ["insert","remove","replace"].contains(&name){native_roots[root]=false;}if ordinary!="null"{fallback=true;}ordinary},
+            };
+            write!(entries,",{name}:{code}").unwrap();
+        }
+        entries.push_str("},\n");
     }
-    out.push_str("];\n");
-    // Isolate definition/carrier helpers from the ordinary state support.
-    Ok(format!("const __compiledMaintained=(()=>{{{out}return __maintainedViews;}})();\n"))
+    let mut out=String::new();
+    if fallback {
+        out=super::definition_literal::lower(views.definition(),&projection.codec_declarations()?)?;
+        out.push_str("const __encoder=new TextEncoder();\n");
+        out.push_str(&e.codecs()?);
+    }
+    // Scalar/flat-row definitions have no constructor or recursion machinery.
+    // All other admitted definitions retain the ordinary literal codec lane.
+    let mut preparers=Vec::new();
+    for (root,ids) in root_views.iter().enumerate(){
+        if !native_roots[root]||ids.is_empty(){preparers.push("null".into());continue;}
+        let branch=|method:&str,args:&str|ids.iter().map(|(i,k)|format!("if(rt.pendingValues[{k}]===undefined){{rt.pendingValues[{k}]=__views[{i}].{method}(rt.keeps[{k}],key,{args});rt.pendingIndices.push({k});}}")).collect::<String>();
+        preparers.push(format!("(rt,cell)=>{{const {{key,prior,next}}=cell;if(prior===undefined){{{}}}else if(next===undefined){{{}}}else{{{}}}}}",branch("insert","next"),branch("remove","prior"),branch("replace","prior,next")));
+    }
+    Ok(format!("const __compiledMaintained=(()=>{{{out}const __views=[{entries}];__views.prepareRoots=[{}];return __views;}})();\n",preparers.join(",")))
 }
+
 pub fn lower(checked: &CheckedRepresentation) -> LangResult<String> {
     let mut executable = checked.definition().reachable_executable_declarations()?;
     executable.extend(checked.projection().codec_declarations()?);
