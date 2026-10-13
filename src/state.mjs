@@ -14,13 +14,35 @@ function __mapValue(value,kind,method,fn){
 const __encoder=new TextEncoder();
 function __tick(ctx){if(--ctx.fuel<0)throw Error('Ink state execution budget exhausted');}
 function __keyCompare(a,b,type){
- if(type.kind==='string'){const x=__encoder.encode(a),y=__encoder.encode(b);for(let i=0;i<Math.min(x.length,y.length);i++)if(x[i]!==y[i])return x[i]-y[i];return x.length-y.length;}
+ // For well-formed strings, UTF-8 lexicographic order equals Unicode scalar
+ // order. Walk scalars directly, including astral/BMP boundaries, without bytes.
+ if(type.kind==='string'){let i=0,j=0;while(i<a.length&&j<b.length){const x=a.codePointAt(i),y=b.codePointAt(j);if(x!==y)return x-y;i+=x>65535?2:1;j+=y>65535?2:1;}return (i<a.length?1:0)-(j<b.length?1:0);}
  return a<b?-1:a>b?1:0;
 }
 // A table's ordered key view is reused until membership changes. Values are
 // fetched at traversal time, so replacement never leaves stale row payloads.
 const __tableOrder=new WeakMap();
-function __orderedKeys(rt,index){const table=rt.tables[index];let keys=__tableOrder.get(table);if(!keys){keys=[...table.keys()].sort((a,b)=>__keyCompare(a,b,rt.meta.roots[index].key));__tableOrder.set(table,keys);}return keys;}
+function __keyPosition(keys,key,type){let low=0,high=keys.length;while(low<high){const middle=(low+high)>>>1;if(__keyCompare(keys[middle],key,type)<0)low=middle+1;else high=middle;}return low;}
+function __tableMembership(rt,index,key,present){
+ const view=__tableOrder.get(rt.tables[index]);if(!view)return;
+ const at=__keyPosition(view.keys,key,rt.meta.roots[index].key);
+ // Cancel transient remove/reinsert and insert/remove pairs against the base.
+ if((at<view.keys.length&&view.keys[at]===key)===present)view.pending.delete(key);
+ else view.pending.set(key,present);
+}
+function __orderedKeys(rt,index){
+ const table=rt.tables[index],type=rt.meta.roots[index].key;let view=__tableOrder.get(table);
+ if(!view){view={keys:[...table.keys()].sort((a,b)=>__keyCompare(a,b,type)),pending:new Map()};__tableOrder.set(table,view);}
+ if(view.pending.size){
+  const changes=[...view.pending.keys()].sort((a,b)=>__keyCompare(a,b,type)),merged=[];let i=0,j=0;
+  while(i<view.keys.length||j<changes.length){
+   if(j===changes.length||(i<view.keys.length&&__keyCompare(view.keys[i],changes[j],type)<0))merged.push(view.keys[i++]);
+   else{const key=changes[j++];if(i<view.keys.length&&view.keys[i]===key)i++;if(view.pending.get(key))merged.push(key);}
+  }
+  view.keys=merged;view.pending.clear();
+ }
+ return view.keys;
+}
 // The first before-image of each cell suffices for whole-transaction rollback.
 function __remember(rt,index,key,present,value){if(!rt.seen[index].has(key)){rt.seen[index].add(key);rt.undo.push([index,key,present,value]);}}
 // Only scalar keeps are retained. Reverse edges come from checked source effects.
@@ -46,16 +68,16 @@ function __table(rt,index,method,args){
  // distinguishes absence without a second hash probe.
  if(method==='get'){const value=table.get(key);return value===undefined?{None:null}:{Some:value};}
  if(method==='contains')return table.has(key);
- if(method==='remove'){const value=table.get(key),present=value!==undefined;if(present){__invalidateKeeps(rt,index);__tableOrder.delete(table);__remember(rt,index,key,true,value);table.delete(key);}return present?{Some:value}:{None:null};}
+ if(method==='remove'){const value=table.get(key),present=value!==undefined;if(present){__invalidateKeeps(rt,index);__tableMembership(rt,index,key,false);__remember(rt,index,key,true,value);table.delete(key);}return present?{Some:value}:{None:null};}
  const prior=table.get(key),present=prior!==undefined;
  if(method==='insert'&&present)throw Error('insert key already present');
  if(method==='replace'&&!present)throw Error('replace key absent');
  if(present&&Object.is(prior,args[1]))return null;
  __invalidateKeeps(rt,index);
- if(!present)__tableOrder.delete(table);
+ if(!present)__tableMembership(rt,index,key,true);
  __remember(rt,index,key,present,prior);table.set(key,args[1]);return null;
 }
-function __rollback(rt,mark){for(let i=rt.undo.length-1;i>=mark;i--){const [index,key,present,value]=rt.undo[i];const table=rt.tables[index];if(table.has(key)!==present)__tableOrder.delete(table);if(present)table.set(key,value);else table.delete(key);}rt.undo.length=mark;}
+function __rollback(rt,mark){for(let i=rt.undo.length-1;i>=mark;i--){const [index,key,present,value]=rt.undo[i];const table=rt.tables[index];if(table.has(key)!==present)__tableMembership(rt,index,key,present);if(present)table.set(key,value);else table.delete(key);}rt.undo.length=mark;}
 function __createState(meta,implementations){
  const rt={meta,tables:meta.roots.map(()=>new Map()),version:0n,outbox:[],staged:[],busy:false,undo:[],seen:meta.roots.map(()=>new Set()),host:null,keeps:new Array(meta.keeps.length),keepUndo:[],keepSeen:new Set()};
  const actionMap=new Map(meta.actions.map(a=>[a.name,{...a,inputs:a.params.map(p=>__stateCapture(p.type)),output:__stateResult(a.result)}]));
