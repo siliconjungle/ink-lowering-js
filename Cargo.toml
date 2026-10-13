@@ -6,7 +6,7 @@ edition = "2021"
 publish = false
 [workspace]
 [dependencies]
-ink-abi = { git = "https://github.com/siliconjungle/ink-abi", rev = "94f57172a40635025253fc4c3710323a968d08c4" }
-ink-core = { git = "https://github.com/siliconjungle/ink-lang", rev = "074f30d1bbcf643313a8355d37347925b317b36f" }
+ink-abi = { git = "https://github.com/siliconjungle/ink-abi", rev = "0e45bd19bbc5e0566ed5aecb13ef677302cd2c3c" }
+ink-core = { git = "https://github.com/siliconjungle/ink-lang", rev = "fcf83004c511e19147e824e5a416345f3584c610" }
 serde_json = "1"
 sha2 = "0.10"

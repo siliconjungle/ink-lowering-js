@@ -14,15 +14,31 @@ function __mapValue(value,kind,method,fn){
 const __encoder=new TextEncoder();
 function __tick(ctx){if(--ctx.fuel<0)throw Error('Ink state execution budget exhausted');}
 function __keyCompare(a,b,type){
- if(type.kind==='string'){const x=__encoder.encode(a),y=__encoder.encode(b);for(let i=0;i<Math.min(x.length,y.length);i++)if(x[i]!==y[i])return x[i]-y[i];return x.length-y.length;}
+ if(type.kind==='string'){let i=0,j=0;while(i<a.length&&j<b.length){const x=a.codePointAt(i),y=b.codePointAt(j);if(x!==y)return x-y;i+=x>65535?2:1;j+=y>65535?2:1;}return (i<a.length?1:0)-(j<b.length?1:0);}
  return a<b?-1:a>b?1:0;
 }
 // A table's ordered key view is reused until membership changes. Values are
 // fetched at traversal time, so replacement never leaves stale row payloads.
 const __tableOrder=new WeakMap();
+function __keyPosition(keys,key,type){let low=0,high=keys.length;while(low<high){const middle=(low+high)>>>1;if(__keyCompare(keys[middle],key,type)<0)low=middle+1;else high=middle;}return low;}
+function __tableMembership(rt,index,key,present){
+ const view=__tableOrder.get(rt.tables[index]);if(!view)return;
+ const at=__keyPosition(view.keys,key,rt.meta.roots[index].key);
+ if((at<view.keys.length&&view.keys[at]===key)===present)view.pending.delete(key);
+ else view.pending.set(key,present);
+}
 function __orderedKeys(rt,index){
- const table=rt.tables[index];let keys=__tableOrder.get(table);
- if(!keys){keys=[...table.keys()].sort((a,b)=>__keyCompare(a,b,rt.meta.roots[index].key));__tableOrder.set(table,keys);}
+ const table=rt.tables[index],type=rt.meta.roots[index].key;let view=__tableOrder.get(table);
+ if(!view){view={keys:[...table.keys()].sort((a,b)=>__keyCompare(a,b,type)),pending:new Map()};__tableOrder.set(table,view);}
+ if(view.pending.size){
+  const changes=[...view.pending.keys()].sort((a,b)=>__keyCompare(a,b,type)),merged=[];let i=0,j=0;
+  while(i<view.keys.length||j<changes.length){
+   if(j===changes.length||(i<view.keys.length&&__keyCompare(view.keys[i],changes[j],type)<0))merged.push(view.keys[i++]);
+   else{const key=changes[j++];if(i<view.keys.length&&view.keys[i]===key)i++;if(view.pending.get(key))merged.push(key);}
+  }
+  view.keys=merged;view.pending.clear();
+ }
+ const keys=view.keys;
  const cell=rt.cell;
  if(cell&&cell.index===index&&table.has(cell.key)!==(cell.next!==undefined)){
   if(cell.next===undefined)return keys.filter(k=>k!==cell.key);
@@ -61,8 +77,8 @@ function __updateViews(rt,index,key,oldValue,newValue){
  return updates;
 }
 function __installViews(rt,updates,index){if(updates)for(const view of rt.viewsByRoot[index])rt.keeps[view.keep]=updates[view.keep];}
-function __writeCell(rt,index,key,next){if(rt.cellMode){if(rt.cell)throw Error('checked single-cell bound exceeded');rt.cell={index,key,next};}else if(next===undefined)rt.tables[index].delete(key);else rt.tables[index].set(key,next);}
-function __commitCell(rt){const cell=rt.cell;if(!cell)return;const table=rt.tables[cell.index];if(table.has(cell.key)!==(cell.next!==undefined))__tableOrder.delete(table);if(cell.next===undefined)table.delete(cell.key);else table.set(cell.key,cell.next);rt.cell=null;}
+function __writeCell(rt,index,key,next){if(rt.cellMode){if(rt.cell)throw Error('checked single-cell bound exceeded');rt.cell={index,key,next};}else{const table=rt.tables[index];if(table.has(key)!==(next!==undefined))__tableMembership(rt,index,key,next!==undefined);if(next===undefined)table.delete(key);else table.set(key,next);}}
+function __commitCell(rt){const cell=rt.cell;if(!cell)return;const table=rt.tables[cell.index];if(table.has(cell.key)!==(cell.next!==undefined))__tableMembership(rt,cell.index,cell.key,cell.next!==undefined);if(cell.next===undefined)table.delete(cell.key);else table.set(cell.key,cell.next);rt.cell=null;}
 class __DenseTable{
  constructor(capacity){this.limit=capacity;this.bigLimit=BigInt(capacity);this.dense=[];this.sparse=new Map();this.members=new Set();}
  slot(key){return (typeof key==='bigint'?key>=0n&&key<this.bigLimit:Number.isInteger(key)&&key>=0&&key<this.limit)?Number(key):-1;}
@@ -90,25 +106,25 @@ function __table(rt,index,method,args){
  if(method==='remove_many'){for(const k of args[0])__table(rt,index,'remove',[k]);return null;}
  // Checked table values never use undefined (Unit uses null), so one lookup
  // distinguishes absence without a second hash probe.
- if(method==='remove'){const value=table.get(key),present=value!==undefined;if(present){const updates=__updateViews(rt,index,key,value,undefined);__invalidateKeeps(rt,index);__tableOrder.delete(table);__remember(rt,index,key,true,value);__writeCell(rt,index,key,undefined);__installViews(rt,updates,index);}return present?{Some:value}:{None:null};}
+ if(method==='remove'){const value=table.get(key),present=value!==undefined;if(present){const updates=__updateViews(rt,index,key,value,undefined);__invalidateKeeps(rt,index);__remember(rt,index,key,true,value);__writeCell(rt,index,key,undefined);__installViews(rt,updates,index);}return present?{Some:value}:{None:null};}
  const prior=table.get(key),present=prior!==undefined;
  if(method==='insert'&&present)throw Error('insert key already present');
  if(method==='replace'&&!present)throw Error('replace key absent');
  if(present&&__stateRootEquals[index](prior,args[1]))return null;
  const updates=__updateViews(rt,index,key,prior,args[1]);
  __invalidateKeeps(rt,index);
- if(!present)__tableOrder.delete(table);
  __remember(rt,index,key,present,prior);__writeCell(rt,index,key,args[1]);__installViews(rt,updates,index);return null;
 }
-function __rollback(rt,mark){for(let i=rt.undo.length-1;i>=mark;i--){const [index,key,present,value]=rt.undo[i];const table=rt.tables[index];if(table.has(key)!==present)__tableOrder.delete(table);if(present)table.set(key,value);else table.delete(key);}rt.undo.length=mark;}
-function __createState(meta,implementations,views=[],prefixes=[]){
+function __rollback(rt,mark){for(let i=rt.undo.length-1;i>=mark;i--){const [index,key,present,value]=rt.undo[i];const table=rt.tables[index];if(table.has(key)!==present)__tableMembership(rt,index,key,present);if(present)table.set(key,value);else table.delete(key);}rt.undo.length=mark;}
+function __createState(meta,implementations,captures=null,views=[],prefixes=[]){
  const rt={meta,tables:__newTables(meta,prefixes),version:0n,outbox:[],staged:[],busy:false,undo:[],seen:meta.roots.map(()=>new Set()),host:null,keeps:new Array(meta.keeps.length),keepUndo:[],keepSeen:new Set()};
  rt.views=views;rt.viewsByRoot=meta.roots.map((_,root)=>views.filter(v=>v.root===root));__rebuildViews(rt);
  rt.viewNext=new Array(meta.keeps.length);rt.cell=null;rt.cellMode=false;rt.ctx={fuel:100000000};
  rt.keepBefore=new Array(meta.keeps.length);
  rt.changedRoots=new Set();
- const actionMap=new Map(meta.actions.map(a=>[a.name,{...a,inputs:a.params.map(p=>__stateCapture(p.type)),output:__stateResult(a.result)}]));
+ const actionMap=new Map(meta.actions.map(a=>[a.name,{...a,inputs:captures?captures[a.index]:a.params.map(p=>__stateCapture(p.type)),output:__stateResult(a.result)}]));
  const eventOutput=new Map(meta.events.map(e=>[e.name,__stateResult(e.type)]));
+ const prepared=new WeakMap();
  const observers=rt.observers=__createObservers((name,args)=>{
   const a=actionMap.get(name);if(!a||a.change)throw Error('subscription requires a readonly query');
   const captured=a.inputs.map((convert,i)=>convert(args[i]));
@@ -139,9 +155,13 @@ function __createState(meta,implementations,views=[],prefixes=[]){
    if(a.fallible && Object.hasOwn(value,'Err')){__rollback(rt,mark);__restoreKeeps(rt);if(rt.host?.strict)rt.host.failure=Object.assign(Error('transaction action failed'),{action:a.name,result});return resultOnly?result:{result,committed:false,version,events:[]};}
    if(version===18446744073709551615n)throw Error('commit sequence exhausted');
    const next=version+1n;
-   const events=resultOnly?null:rt.staged.map(([channel,value],i)=>({commit:next,position:BigInt(i),channel,value:eventOutput.get(channel)(value)}));
-   const pending=rt.staged.length?rt.staged.map(([channel,value],i)=>({commit:next,position:BigInt(i),channel,value})):null;
-   __commitCell(rt);rt.version=next;if(pending)for(const event of pending)rt.outbox.push(event);
+   const events=resultOnly?null:new Array(rt.staged.length);
+   for(let i=0;i<rt.staged.length;i++){
+    const [channel,value]=rt.staged[i],position=BigInt(i);
+    rt.outbox.push({commit:next,position,channel,value});
+    if(events)events[i]={commit:next,position,channel,value:eventOutput.get(channel)(value)};
+   }
+   __commitCell(rt);rt.version=next;
    successful=true;
    return resultOnly?result:{result,committed:true,version:next,events};
   }catch(e){__rollback(rt,mark);__restoreKeeps(rt);rt.version=version;rt.outbox=outbox;rt.outbox.length=outboxLength;if(rt.host?.strict)rt.host.failure=e;throw e;}
@@ -155,6 +175,8 @@ function __createState(meta,implementations,views=[],prefixes=[]){
    try{const value=callback(this);if(value&&typeof value.then==='function')throw TypeError('state transaction callback must be synchronous');this.commitTransaction();return value;}catch(e){this.rollbackTransaction();throw e;}
   },
   invoke,invoke_json:invoke,
+  prepare(name,args){const a=actionMap.get(name);if(!a)throw Error(`unknown action ${name}`);const captured=a.inputs.map((convert,i)=>convert(args[i])),token=Object.freeze({});prepared.set(token,{action:a,args:captured});return token;},
+  invokePrepared(token){const packet=prepared.get(token);if(!packet)throw Error('invalid prepared state call');return run(packet.action,packet.args,null,null,false,true);},
   // A prebound typed entrypoint: scalar arguments obey the native caller contract.
   // Composite arguments still capture owned input; events remain in the outbox.
   bind(name,{resultOnly=false}={}){
@@ -171,7 +193,7 @@ function __createState(meta,implementations,views=[],prefixes=[]){
   rollbackTransaction(){if(rt.busy||!rt.host)throw Error('no state transaction');__rollback(rt,0);rt.version=rt.host.version;rt.outbox=rt.host.outbox;rt.outbox.length=rt.host.length;rt.keeps=rt.host.keeps;const mark=rt.host.notificationMark;rt.host=null;observers.rollback(mark);},
   get version(){return rt.version;},
   get outbox(){return rt.outbox.map(e=>({...e,value:eventOutput.get(e.channel)(e.value)}));},
-  acknowledgeThrough(commit,position){if(rt.busy)throw Error('state operation already in progress');commit=__stateInput(commit,{kind:'u64'},{cells:1});position=__stateInput(position,{kind:'u64'},{cells:1});rt.outbox=rt.outbox.filter(e=>e.commit>commit||(e.commit===commit&&e.position>position));},
+  acknowledgeThrough(commit,position){if(rt.busy)throw Error('state operation already in progress');commit=__stateWord(commit);position=__stateWord(position);const last=rt.outbox.at(-1);if(!last)return;if(last.commit<commit||(last.commit===commit&&last.position<=position)){if(rt.host)rt.outbox=[];else rt.outbox.length=0;return;}rt.outbox=rt.outbox.filter(e=>e.commit>commit||(e.commit===commit&&e.position>position));},
   async invokeAsync(name,args){
    if(typeof __parallelInvokeAsync!=='function')return invoke(name,args);
    if(rt.busy||rt.host)throw Error('parallel state call requires transaction boundary');const captured=structuredClone(args);rt.busy=true;observers.hold();let completed=false;

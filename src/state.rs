@@ -430,6 +430,8 @@ pub(crate) fn emit_with_layout(
     };
     let mut code = include_str!("observers.mjs").to_string()+include_str!("state.mjs");
     let mut actions = vec![];
+    let mut captures = super::state_capture::Captures::new(p);
+    let mut capture_lists = Vec::new();
     let mut keeps = vec![];
     let mut equal_results=vec![];
     let equal_roots=p.states.iter().map(|s|{let Type::Table(_,t)=&s.ty else{return Err("state root".into())};Ok(format!("(a,b)=>{}",emitter.equality.expr(t,"a","b")?))}).collect::<LangResult<Vec<_>>>()?;
@@ -470,6 +472,7 @@ pub(crate) fn emit_with_layout(
         }
     }
     for (i, a) in execution.actions().iter().enumerate() {
+        capture_lists.push(format!("[{}]", a.params.iter().map(|(_, ty)| captures.for_type(ty)).collect::<LangResult<Vec<_>>>()?.join(",")));
         let params=(0..a.params.len()).map(|i|format!("p{i}")).collect::<Vec<_>>();
         let captures=(0..a.params.len()).map(|i|format!("inputs[{i}](p{i})")).collect::<Vec<_>>();
         // Immutable native scalars cannot retain mutable host aliases. Reuse their
@@ -501,6 +504,7 @@ pub(crate) fn emit_with_layout(
         actions.push(json!({"index":i,"name":a.name,"singleCell":single_cell,"freshResult":fresh_result,"roots":roots,"precondition":p.contracts.precondition_checks.get(&a.name),"change":a.kind==ActionKind::Change,"fallible":matches!(a.result,Type::Result(..)),"params":a.params.iter().map(|(n,t)|Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?}))).collect::<LangResult<Vec<_>>>()?,"result":descriptor(&a.result,p,&mut BTreeSet::new())?}));
     }
     code.push_str(&emitter.equality.source());
+    code.push_str(&captures.source());
     code.push_str(&format!("const __stateQueryEquals=[{}];\n",equal_results.join(",")));
     code.push_str(&format!("const __stateRootEquals=[{}];\n",equal_roots.join(",")));
     code.push_str(&format!("const __stateBoundFactories=[{}];\n",bound_factories.join(",")));
@@ -512,14 +516,15 @@ pub(crate) fn emit_with_layout(
         .collect::<LangResult<Vec<_>>>()?;
     let state = json!({"actions":actions,"roots":roots,"events":events,"keeps":keeps,"keepInvalidations":keep_invalidations,"invariantChecks":p.contracts.invariant_checks,"snapshot":{"program":layout.program,"schema":layout.schema}});
     code.push_str(&format!(
-        "const __stateMetadata={state};const __actions=[{}];\n",
+        "const __stateMetadata={state};const __actions=[{}];const __stateInputCaptures=[{}];\n",
         (0..p.actions.len())
             .map(|i| format!("__action{i}"))
             .collect::<Vec<_>>()
-            .join(",")
+            .join(","),
+        capture_lists.join(",")
     ));
     code.push_str(
-        "export function createState(){return __createState(__stateMetadata,__actions);}\n",
+        "export function createState(){return __createState(__stateMetadata,__actions,__stateInputCaptures);}\n",
     );
     Ok((code, state))
 }

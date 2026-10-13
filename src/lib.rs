@@ -11,6 +11,7 @@ pub struct Emission {
 pub mod definition;
 pub mod portable_definition;
 mod state;
+mod state_capture;
 type Env = BTreeMap<String, (String, Type)>;
 fn quote(s: &str) -> String {
     serde_json::to_string(s).unwrap()
@@ -1269,14 +1270,14 @@ pub fn lower_planned(plan: &ink_core::planning::CheckedPlan) -> LangResult<Emiss
         if !physical.plan().dense_prefixes.is_empty(){
             let prefixes=plan.module().program().states.iter().map(|s|physical.plan().dense_prefixes.iter().find(|p|p.table==s.name).map(|p|p.capacity).unwrap_or(0)).collect::<Vec<_>>();
             emission.javascript=emission.javascript.replace("const __stateMetadata=",&format!("const __densePrefixes={};\nconst __stateMetadata=",serde_json::to_string(&prefixes).map_err(|e|e.to_string())?));
-            emission.javascript=emission.javascript.replace("__createState(__stateMetadata,__actions)","__createState(__stateMetadata,__actions,[],__densePrefixes)");
+            emission.javascript=emission.javascript.replace("__createState(__stateMetadata,__actions,__stateInputCaptures)","__createState(__stateMetadata,__actions,__stateInputCaptures,[],__densePrefixes)");
         }
     }
     if let Some(views)=plan.maintained(){
         let support=representation_program::maintained_support(plan.module(),views)?;
         emission.javascript=format!("{support}{}",emission.javascript);
-        emission.javascript=emission.javascript.replace("__createState(__stateMetadata,__actions)","__createState(__stateMetadata,__actions,__compiledMaintained)");
-        emission.javascript=emission.javascript.replace("__createState(__stateMetadata,__actions,[],__densePrefixes)","__createState(__stateMetadata,__actions,__compiledMaintained,__densePrefixes)");
+        emission.javascript=emission.javascript.replace("__createState(__stateMetadata,__actions,__stateInputCaptures)","__createState(__stateMetadata,__actions,__stateInputCaptures,__compiledMaintained)");
+        emission.javascript=emission.javascript.replace("__createState(__stateMetadata,__actions,__stateInputCaptures,[],__densePrefixes)","__createState(__stateMetadata,__actions,__stateInputCaptures,__compiledMaintained,__densePrefixes)");
         emission.manifest["maintained"]=json!({"source":views.package().input_core_sha256,"keeps":views.package().views.iter().map(|v|&v.keep).collect::<Vec<_>>(),"knowledge_snapshot":views.package().knowledge.snapshot.root});
     }
     emission.manifest["compiled_plan"]=json!({"source":plan.original().identity()?,"plan":ink_core::registry::identity(plan.package())?});
