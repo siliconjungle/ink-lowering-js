@@ -17,6 +17,7 @@ mod sum_layout;
 mod owned_values;
 mod wire_values;
 mod compiled_values;
+mod constructors;
 mod value_capture;
 mod primitives;
 type Env = BTreeMap<String, (String, Type)>;
@@ -1327,11 +1328,18 @@ pub fn lower(module: &CheckedModule) -> LangResult<Emission> {
 }
 pub fn lower_planned(plan: &ink_core::planning::CheckedPlan) -> LangResult<Emission> {
     plan.require_source_layout_capabilities(true,true)?;
-    plan.require_source_storage_capability(true,true)?;
+    plan.require_source_storage_capabilities(true,true,true)?;
     let layout=ink_core::snapshot::layout(plan.original().program())?;
     let elisions=plan.physical().map(|p|p.plan().record_elisions.iter().map(|l|l.record.clone()).collect()).unwrap_or_default();
     let sums=plan.physical().map(|p|p.plan().sum_spines.iter().map(|l|l.sum_type.clone()).collect::<Vec<_>>()).unwrap_or_default();
     let mut emission=lower_with_layout(plan.module(),Some(&layout),&elisions,&sums)?;
+    if let Some(physical)=plan.physical(){
+        if !physical.plan().dictionary_tables.is_empty(){
+            let selected=plan.module().program().states.iter().map(|s|physical.plan().dictionary_tables.binary_search(&s.name).is_ok()).collect::<Vec<_>>();
+            emission.javascript=emission.javascript.replace("const t=prefixes[i]?new __DenseTable(prefixes[i]):new Map();", "const t=__dictionaryTables[i]?new __StringTable():prefixes[i]?new __DenseTable(prefixes[i]):new Map();");
+            emission.javascript=format!("const __dictionaryTables={};\n{}{}",serde_json::to_string(&selected).map_err(|e|e.to_string())?,include_str!("string_table.mjs"),emission.javascript);
+        }
+    }
     if let Some(physical)=plan.physical(){
         if !physical.plan().dense_prefixes.is_empty(){
             let prefixes=plan.module().program().states.iter().map(|s|physical.plan().dense_prefixes.iter().find(|p|p.table==s.name).map(|p|p.capacity).unwrap_or(0)).collect::<Vec<_>>();

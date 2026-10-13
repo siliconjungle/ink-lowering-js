@@ -23,3 +23,11 @@ query shared()->Shared {let tail:Result<List<u32>,Bool>=Ok(list(1));return Share
 enum Tree{End,Branch(List<Tree>),}
 fn leafs(x:Result<f32,Result<Int,Tree>>)->Result<f32,Result<Int,Tree>>{return x;}
 fn equal(a:Result<f32,Result<Int,Tree>>,b:Result<f32,Result<Int,Tree>>)->Bool{return a==b;}
+
+record Reused{first:Result<String,Bool>,second:Result<String,Bool>,}
+query reused(key:u32)->Reused reads(Items){let row=Items.get(key).fold(fn(row)=>row,fn(u)=>Box{value:Err(Ok("absent"))});let first:Result<String,Bool>=row.value.fold(fn(n)=>Ok("number"),fn(e)=>e);let second:Result<String,Bool>=row.value.fold(fn(n)=>Ok("number"),fn(e)=>e);return Reused{first:first,second:second};}
+
+// A format adapter targets ordinary recursive source types, not a JSON primitive.
+enum Json{Null,Boolean(Bool),Number(String),Text(String),Array(List<Json>),Object(List<JsonMember>),}
+record JsonMember{key:String,value:Json,}
+fn json_identity(document:Json)->Json{return document;}
