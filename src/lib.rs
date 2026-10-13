@@ -1592,13 +1592,16 @@ export const functions = Object.freeze(Object.fromEntries(metadata.functions.fil
     javascript.push_str(ink_abi::JSON_VALUE_JS_SOURCE);
     javascript.push_str(r#"
 export const valueCodecs=(()=>{const codecs={};for(const [name,s] of Object.entries(metadata.wire.functions)){if(s.unsupported)continue;let value;Object.defineProperty(codecs,name,{enumerable:true,get:()=>value??=(Object.freeze({arguments:new ValueCodec(s.arguments),result:new ValueCodec(s.result)}))});}return Object.freeze(codecs);})();
-export function callBinary(name,bytes,limits={}){
+function __callEncoded(name,bytes,limits,compact){
  const f=metadata.functions.find(f=>f.name===name&&!f.internal),codecs=valueCodecs[name];
  if(!f||!codecs)throw Error('unsupported binary function');
- const values=codecs.arguments.decode(bytes,limits);
+ const input=compact?codecs.arguments.compact():codecs.arguments,output=compact?codecs.result.compact():codecs.result;
+ const values=input.decode(bytes,limits);
  const result=call(name,f.params.map(p=>values[p.name]));
- return codecs.result.encode(result,limits);
+ return output.encode(result,limits);
 }
+export function callBinary(name,bytes,limits={}){return __callEncoded(name,bytes,limits,false);}
+export function callCompact(name,bytes,limits={}){return __callEncoded(name,bytes,limits,true);}
 "#);
     for (i, f) in p.functions.iter().enumerate() {
         if matches!(f.result, Type::List(_))
