@@ -26,7 +26,10 @@ function __representation(type, output) {
 }
 function __representationRaw(type, output) {
   switch (type.kind) {
-    case 'ref': return (value,context)=>__representation(__namedTypes[type.name],output)(value,context);
+    case 'ref': {
+      let resolved;
+      return (value,context)=>(resolved??=__representation(__namedTypes[type.name],output))(value,context);
+    }
     case 'id': return value=>value.toLowerCase();
     case 'int': return output ? value=>({Int:value.toString()}) : value=>BigInt(value && typeof value==='object' ? value.Int : value);
     case 'option': {
@@ -64,6 +67,46 @@ function __representationRaw(type, output) {
   }
 }
 // @helper state-validation
+// Compile the capture traversal once. Each invocation still validates and owns
+// every public container; no host value is retained between calls.
+const __stateCaptures=new WeakMap();
+function __stateCapture(type){
+ const prior=__stateCaptures.get(type);if(prior)return prior;
+ const capture=__compileStateCapture(type);__stateCaptures.set(type,capture);return capture;
+}
+function __compileStateCapture(type){
+ const limited=copy=>(value,budget={cells:1000000},depth=0)=>{
+  if(depth>64||--budget.cells<0)throw Error('state input resource limit');
+  return copy(value,budget,depth);
+ };
+ const tagged=(value,tag)=>value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).length===1&&Object.hasOwn(value,tag);
+ switch(type.kind){
+  case 'list':case 'vector':{
+   const item=__stateCapture(type.element),size=type.kind==='vector'?type.size:null;
+   return limited((value,budget,depth)=>{
+    if(!Array.isArray(value)&&!(ArrayBuffer.isView(value)&&!(value instanceof DataView)))throw Error('invalid list');
+    if(size!==null&&value.length!==size)throw Error('invalid vector length');
+    const out=new Array(value.length);for(let i=0;i<out.length;i++)out[i]=item(value[i],budget,depth+1);return out;
+   });
+  }
+  case 'record':{
+   const fields=type.fields.map(f=>[f.name,__stateCapture(f.type)]);
+   return limited((value,budget,depth)=>{
+    if(!value||typeof value!=='object'||Array.isArray(value)||!fields.every(([name])=>Object.hasOwn(value,name)))throw Error('invalid record');
+    const out={};for(const [name,copy]of fields){const field=copy(value[name],budget,depth+1);if(name==='__proto__')Object.defineProperty(out,name,{value:field,writable:true,enumerable:true,configurable:true});else out[name]=field;}return out;
+   });
+  }
+  case 'option':{
+   const item=__stateCapture(type.element);
+   return limited((value,budget,depth)=>{if(tagged(value,'Some'))return {Some:item(value.Some,budget,depth+1)};if(tagged(value,'None')&&value.None===null)return {None:null};throw Error('invalid Option');});
+  }
+  case 'result':{
+   const ok=__stateCapture(type.ok),err=__stateCapture(type.error);
+   return limited((value,budget,depth)=>{if(tagged(value,'Ok'))return {Ok:ok(value.Ok,budget,depth+1)};if(tagged(value,'Err'))return {Err:err(value.Err,budget,depth+1)};throw Error('invalid Result');});
+  }
+  default:return (value,budget,depth)=>__stateInput(value,type,budget,depth);
+ }
+}
 function __stateInput(value,type,budget={cells:1000000},depth=0){
   if(depth>64||--budget.cells<0)throw Error('state input resource limit');
   const input=(v,t)=>__stateInput(v,t,budget,depth+1);

@@ -65,19 +65,21 @@ fn needs_parallel(e: &Expr, p: &Program, seen: &mut std::collections::BTreeSet<S
     });
     found
 }
-struct Emitter<'a> {
+struct TypedEquality<'a> {
     p: &'a Program,
-    next: usize,
-    budget: usize,
-    depth: usize,
-    lines: String,
-    callbacks: Vec<(String, String)>,
+    prefix: &'static str,
     equalities: BTreeMap<String, (String, String)>,
 }
-impl Emitter<'_> {
+impl<'a> TypedEquality<'a> {
+    fn new(p: &'a Program, prefix: &'static str) -> Self {
+        Self { p, prefix, equalities: BTreeMap::new() }
+    }
+    fn source(&self) -> String {
+        self.equalities.values().map(|(_, source)| source.as_str()).collect()
+    }
     // Fixed structural equality over checked types. Contained F32 values are
     // bit carriers; only top-level scalar F32 equality uses IEEE comparison.
-    fn value_equal(&mut self, t: &Type, a: &str, b: &str) -> LangResult<String> {
+    fn expr(&mut self, t: &Type, a: &str, b: &str) -> LangResult<String> {
         let key = serde_json::to_string(t).map_err(|e| e.to_string())?;
         if let Some((name, _)) = self.equalities.get(&key) {
             return Ok(format!("{name}({a},{b})"));
@@ -89,21 +91,21 @@ impl Emitter<'_> {
         if !composite {
             return Ok(format!("({a}==={b})"));
         }
-        let name = format!("__valueEqual{}", self.equalities.len());
+        let name = format!("{}{}", self.prefix, self.equalities.len());
         self.equalities
             .insert(key.clone(), (name.clone(), String::new()));
         let body = match t {
             Type::List(inner) | Type::Vector(inner, _) => {
-                let item = self.value_equal(inner, "a[i]", "b[i]")?;
+                let item = self.expr(inner, "a[i]", "b[i]")?;
                 format!("if(a.length!==b.length)return false;for(let i=0;i<a.length;i++)if(!({item}))return false;return true;")
             }
             Type::Option(inner) => {
-                let item = self.value_equal(inner, "a.Some", "b.Some")?;
+                let item = self.expr(inner, "a.Some", "b.Some")?;
                 format!("const x=Object.hasOwn(a,'Some');return x===Object.hasOwn(b,'Some')&&(!x||{item});")
             }
             Type::Result(ok, err) => {
-                let yes = self.value_equal(ok, "a.Ok", "b.Ok")?;
-                let no = self.value_equal(err, "a.Err", "b.Err")?;
+                let yes = self.expr(ok, "a.Ok", "b.Ok")?;
+                let no = self.expr(err, "a.Err", "b.Err")?;
                 format!("const x=Object.hasOwn(a,'Ok');return x===Object.hasOwn(b,'Ok')&&(x?{yes}:{no});")
             }
             Type::Named(n) => {
@@ -111,7 +113,7 @@ impl Emitter<'_> {
                 let checks = fields
                     .iter()
                     .map(|(field, ty)| {
-                        self.value_equal(
+                        self.expr(
                             ty,
                             &format!("a[{}]", quote(field)),
                             &format!("b[{}]", quote(field)),
@@ -137,6 +139,20 @@ impl Emitter<'_> {
             ),
         );
         Ok(format!("{name}({a},{b})"))
+    }
+}
+struct Emitter<'a> {
+    p: &'a Program,
+    next: usize,
+    budget: usize,
+    depth: usize,
+    lines: String,
+    callbacks: Vec<(String, String)>,
+    equality: TypedEquality<'a>,
+}
+impl Emitter<'_> {
+    fn value_equal(&mut self, t: &Type, a: &str, b: &str) -> LangResult<String> {
+        self.equality.expr(t, a, b)
     }
     fn fresh(&mut self) -> String {
         let n = format!("v{}", self.next);
@@ -1271,7 +1287,7 @@ fn lower_with_layout(
         depth: 0,
         lines: String::new(),
         callbacks: Vec::new(),
-        equalities: BTreeMap::new(),
+        equality: TypedEquality::new(p, "__valueEqual"),
     };
     let mut javascript = String::new();
     let mut functions = vec![];
@@ -1370,9 +1386,7 @@ fn lower_with_layout(
             emitter.lines
         ));
     }
-    for (_, source) in emitter.equalities.values() {
-        javascript.push_str(source);
-    }
+    javascript.push_str(&emitter.equality.source());
     let mut interface = json!({"schema":1,"backend":"javascript","abi":"ink-javascript-trusted-values-v2","destination_abi":{"name":"ink-javascript-into-v1","count_unit":"elements","ownership":"caller-owned","capacity":"trusted","aliasing":"destination-disjoint-from-all-reachable-inputs","tail":"unwritten"},"core_semantics":module.semantics(),"core_sha256":module.identity()?,"functions":functions});
     // Emit only helpers referenced by the compiled expressions. Descriptor
     // conversion is needed solely for signatures containing binary32 values.

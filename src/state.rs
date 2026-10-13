@@ -8,6 +8,7 @@ struct StateEmitter<'a> {
     p: &'a Program,
     next: usize,
     execution: &'a ink_core::action_ir::Execution,
+    equality: super::TypedEquality<'a>,
 }
 impl StateEmitter<'_> {
     fn fresh(&mut self) -> String {
@@ -139,7 +140,7 @@ impl StateEmitter<'_> {
                     };
                     format!("(__float({a}) {op} __float({b}))")
                 } else if op == "==" || op == "!=" {
-                    format!("{}__equal({a},{b})", if op == "!=" { "!" } else { "" })
+                    format!("{}({})", if op == "!=" { "!" } else { "" }, self.equality.expr(&at, &a, &b)?)
                 } else {
                     format!("(({a}) {op} ({b}))")
                 }
@@ -425,6 +426,7 @@ pub(crate) fn emit_with_layout(
         p,
         next: 0,
         execution: &execution,
+        equality: super::TypedEquality::new(p, "__stateValueEqual"),
     };
     let mut code = include_str!("state.mjs").to_string();
     let mut actions = vec![];
@@ -476,6 +478,7 @@ pub(crate) fn emit_with_layout(
         code.push_str(&format!("function __action{i}(ctx,rt{}){{__tick(ctx);try{{{body}}}catch(e){{if(e instanceof __Abort)return {{Err:e.value}};throw e;}}}}\n",if vars.is_empty(){String::new()}else{format!(",{}",vars.join(","))}));
         actions.push(json!({"index":i,"name":a.name,"precondition":p.contracts.precondition_checks.get(&a.name),"change":a.kind==ActionKind::Change,"fallible":matches!(a.result,Type::Result(..)),"params":a.params.iter().map(|(n,t)|Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?}))).collect::<LangResult<Vec<_>>>()?,"result":descriptor(&a.result,p,&mut BTreeSet::new())?}));
     }
+    code.push_str(&emitter.equality.source());
     let roots=p.states.iter().map(|s|{let Type::Table(k,v)=&s.ty else{return Err("state root".into())};Ok(json!({"name":s.name,"key":descriptor(k,p,&mut BTreeSet::new())?,"value":descriptor(v,p,&mut BTreeSet::new())?,"snapshotKey":ink_core::snapshot_wire::descriptor(&layout.roots.iter().find(|(name,_,_)|name==&s.name).unwrap().1),"snapshotValue":ink_core::snapshot_wire::descriptor(&layout.roots.iter().find(|(name,_,_)|name==&s.name).unwrap().2)}))}).collect::<LangResult<Vec<_>>>()?;
     let events = p
         .events

@@ -141,6 +141,16 @@ detaches. Structural equality uses declared fields and an aggregate identity
 fast path, retaining stored float bits. Host state replies detach their reachable
 values. See the distribution's `docs/internal-snapshots.md` for the ownership and private-delta contract.
 
+## State value execution
+
+State expressions use structural equality compiled from their checked types.
+Lists compare length and elements; records compare declared fields; contained
+floats compare stored bits, while top-level scalar floats retain IEEE equality.
+Public state arguments compile their validation/capture traversal once per
+schema. Every call still checks resource limits and produces owned composite
+values; host values are never cached between calls. These are literal value
+operations, with no algorithm or theorem-name recognizer.
+
 ## License
 
 Project code and documentation are [MIT licensed](LICENSE). Third-party dependencies,
