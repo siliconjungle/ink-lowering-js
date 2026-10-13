@@ -12,6 +12,7 @@ pub mod definition;
 pub mod portable_definition;
 mod state;
 mod state_capture;
+mod primitives;
 type Env = BTreeMap<String, (String, Type)>;
 fn quote(s: &str) -> String {
     serde_json::to_string(s).unwrap()
@@ -629,7 +630,9 @@ impl Emitter<'_> {
         let result = self.expr_inner(e, env, want).and_then(|value| {
             // Borrow trusted host containers. Normalize scalar reads at demand,
             // including callbacks and at_or, instead of copying their ancestors.
-            if self.native_f32 && self.infer(e,env,want)? == Type::F32 {
+            // Every other F32 constructor/arithmetic/call already produces the
+            // internal carrier. Re-rounding each computed subtree is redundant.
+            if self.native_f32 && matches!(e,Expr::Var(_)|Expr::Field(..)|Expr::Method(..)) && self.infer(e,env,want)? == Type::F32 {
                 Ok(format!("__nfValue({value})"))
             } else { Ok(value) }
         });
@@ -792,6 +795,12 @@ impl Emitter<'_> {
                     };
                     format!("(({av}) {op} ({bv}))")
                 }
+            }
+            Expr::Call(n,args) if ink_core::primitives::primitive(n) => {
+                let first=if ink_core::primitives::bit_count(n){args.first().map(|a|self.infer(a,env,None)).transpose()?}else{None};
+                let (params,_)=ink_core::primitives::signature(n,first.as_ref())?;
+                let values=args.iter().zip(params).map(|(a,t)|self.expr(a,env,Some(&t))).collect::<LangResult<Vec<_>>>()?;
+                crate::primitives::expression(n,&values,first.as_ref(),self.native_f32)?
             }
             Expr::Call(n, args) if ["vec2", "vec3", "vec4"].contains(&n.as_str()) => {
                 let Type::Vector(inner, _) = &t else {
@@ -1461,7 +1470,7 @@ fn lower_with_layout(
                 || !p.keeps.is_empty()
                 || javascript.contains("__bits(")
                 || javascript.contains("__float(")
-                || javascript.contains("__nf")
+                || javascript.contains("__nf") || javascript.contains("__ink_")
         } else {
             javascript.contains(name)
                 || !p.actions.is_empty()
@@ -1472,6 +1481,7 @@ fn lower_with_layout(
             helpers.push_str(source);
         }
     }
+    if javascript.contains("__ink_") || module.semantics()==ink_core::core::PRIMITIVE_SEMANTICS {helpers.push_str(include_str!("primitives.mjs"));}
     let temporary = include_str!("temporary.mjs");
     if [
         "__InkBuffer",

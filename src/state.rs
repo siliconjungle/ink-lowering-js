@@ -157,6 +157,13 @@ impl StateEmitter<'_> {
                 )
             }
             Expr::Call(n, args) => match n.as_str() {
+                name if ink_core::primitives::primitive(name) => {
+                    let first=args.first().and_then(|a|self.execution.type_of(a));
+                    let (params,_)=ink_core::primitives::signature(name,first)?;
+                    let vals=args.iter().zip(params).map(|(a,t)|self.expr(a,env,Some(&t))).collect::<LangResult<Vec<_>>>()?;
+                    super::primitives::expression(name,&vals,first,false)?
+                }
+
                 name if ink_core::word::primitive(name) => {
                     let ts = ink_core::word::arguments(name, &t);
                     let vals = args

@@ -6,7 +6,8 @@ const __bits = number => { if(Number.isNaN(number))return 0x7fc00000; __view.set
 // Native binary32 lane for pure modules. Explicit NaN payloads remain tagged;
 // arithmetic canonicalizes NaNs just as __bits does in the exact-bit lane.
 const __nfValue = value => typeof value === 'number' ? Math.fround(value) : value;
-const __nfNumber = value => typeof value === 'number' ? Math.fround(value) : __float(value.F32Bits);
+// Number operands have already been normalised at their typed read or producer.
+const __nfNumber = value => typeof value === 'number' ? value : __float(value.F32Bits);
 const __nfBits = value => typeof value === 'number' ? __bits(value) : value.F32Bits;
 const __nfFromBits = bits => (bits & 0x7fffffff)>0x7f800000 ? {F32Bits:bits} : __float(bits);
 const __nfNeg = value => typeof value === 'number' && !Number.isNaN(value) ? -value : {F32Bits:(__nfBits(value) ^ 0x80000000) >>> 0};
