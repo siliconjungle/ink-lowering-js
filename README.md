@@ -39,8 +39,9 @@ distribution's [contract and evidence](https://github.com/siliconjungle/ink-lang
 - `u64` uses `BigInt` and wraps at 64 bits after each arithmetic operation.
   Native callers supply BigInt, including inside arrays/records. Results are
   BigInt. JSON consumers explicitly encode/decode them as decimal strings.
-- `f32` is represented internally by binary32 bits. Every arithmetic operation
-  rounds separately to binary32; negation flips the sign bit. Input/output uses
+- Pure modules keep `f32` in native Numbers with exact tagged exceptional values;
+  state modules retain the binary32 bit carrier. Every arithmetic operation
+  rounds separately to binary32; negation preserves the exact sign and payload. Input/output uses
   Numbers or explicit `{F32Bits: bits}` for exceptional values. Zero signs,
   subnormals and passed-through exceptional payloads survive. Arithmetic NaNs
   use the canonical quiet payload `0x7fc00000`; F32 programs bind executable-core V7.
@@ -65,10 +66,14 @@ rejects ill-typed Ink programs and checks proof applications during compilation.
 
 Callers provide the arity, shapes and numeric ranges declared in `metadata`:
 u32/i32 are integer Numbers in range, u64 is BigInt, Bool is boolean, and
-collections/records contain their declared values. f32 boundaries convert
-Numbers to binary32 bits and back, preserving separately rounded operations;
+collections/records contain their declared values. Pure f32 operations round
+scalar reads and arithmetic separately with `Math.fround`;
 explicit `{F32Bits: bits}` supports exceptional values and payloads. These
 representation conversions are specialised once at module initialisation.
+Field-only pure record consumers borrow stable input containers and avoid recursive
+float packing. Whole-value escape/equality retains eager, invocation-local
+capture; state inputs and results retain their separate ownership checks.
+No conversion cache retains mutable host values across invocations.
 Word-only inputs and outputs have no codec traversal or copy. An identity
 function can return the original array/record; callers own aliasing and must
 keep values stable during calls. Invalid caller values are outside the ABI
