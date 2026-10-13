@@ -112,6 +112,18 @@ identity, semantics version, typed interface and emitted-source hash. The checke
 lowerer, representation conversion and JavaScript engine remain trusted implementations.
 Differential testing is evidence, not a formal target-code proof.
 
+### Plain JavaScript objects
+
+Generated `JsonCodec` instances now expose `fromJS(value, limits)` and
+`toJS(value, options)` for plain object/array trees, without a JSON text round
+trip. They are explicit host-boundary adapters to the ordinary library `Json`
+type; pure calls, native lowerers and Wasm execution do not acquire an implicit
+conversion. Inputs and outputs are detached and existing resource budgets apply.
+Accessors, cycles, unsupported values and non-plain objects reject explicitly.
+The default Number output policy rejects decimal precision loss; use
+`numbers: 'bigint'` for exact integers or `numbers: 'string'` for exact tokens.
+See the pinned ABI's README for the complete input and numeric contracts.
+
 ## Validation
 
 ```sh
