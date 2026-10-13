@@ -32,6 +32,13 @@ const owned=capture(packet);assert.equal(Object.getPrototypeOf(owned),Object.pro
 const state=createState(),prepared=state.prepare('echo',[packet]);packet.words[0]=99;
 const first=state.invokePrepared(prepared).result;assert.equal(first.words[0],7);first.words[0]=33;
 assert.equal(state.invokePrepared(prepared).result.words[0],7);
+// Capture reads each host field exactly once and in declaration order, including
+// when the next child exhausts its budget or is invalid. Inlining may not move
+// reads ahead of earlier validation failures.
+for(const cells of [1,2,5,20,40,1000000]){
+ const traced=fn=>{const reads=[];const host={};for(const key of Object.keys(packet))Object.defineProperty(host,key,{enumerable:true,get(){reads.push(key);return packet[key];}});return {outcome:outcome(fn,host,cells,0),reads};};
+ assert.deepEqual(traced(capture),traced((v,b,d)=>reference(v,type,b,d)));
+}
 "#).unwrap();
     let output = Command::new("node").arg(root.join("test.mjs")).output().unwrap();
     fs::remove_dir_all(root).unwrap();
