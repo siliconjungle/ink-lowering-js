@@ -156,6 +156,9 @@ struct Emitter<'a> {
     callbacks: Vec<(String, String)>,
     equality: TypedEquality<'a>,
     native_f32: bool,
+    /// Unique-ownership facts of the function being emitted (see
+    /// `ink_core::in_place`). Empty for recursive functions.
+    in_place: ink_core::in_place::InPlace,
 }
 impl Emitter<'_> {
     fn arithmetic(&self, op: &str, a: &str, b: &str, t: &Type) -> String {
@@ -464,9 +467,19 @@ impl Emitter<'_> {
         let Type::List(inner) = self.infer(xs, env, context)? else {
             unreachable!()
         };
+        // The receiver's storage is unique and dead after this use.
+        let in_place = method == "concat" && self.in_place.contains(xs);
         let xs = self.expr(xs, env, context)?;
         let xs = self.bind(&xs);
         Ok(match method.as_str() {
+            "concat" if in_place => {
+                let ys = self.expr(&args[0], env, Some(t))?;
+                let ys = self.bind(&ys);
+                let right = self.bind(&format!("{ys}.length"));
+                let j = self.fresh();
+                self.line(format!("for(let {j}=0;{j}<{right};{j}++){{{xs}.push({ys}[{j}]);}}"));
+                xs
+            }
             "at_or" => {
                 let idx = self.expr(&args[0], env, Some(&Type::U32))?;
                 let idx = self.bind(&idx);
@@ -1339,6 +1352,7 @@ fn lower_with_layout(
         callbacks: Vec::new(),
         equality,
         native_f32,
+        in_place: Default::default(),
     };
     let mut javascript = String::new();
     let mut functions = vec![];
@@ -1381,6 +1395,11 @@ fn lower_with_layout(
             vars.push(v);
         }
         emitter.lines.clear();
+        emitter.in_place = if ink_core::recursion::recursive(f) {
+            Default::default()
+        } else {
+            ink_core::in_place::analyse_with_result(&f.body, &f.params, Some(&f.result), p)
+        };
         let body = if ink_core::recursion::recursive(f) {
             emitter.line("while(true){");
             emitter.tail(&f.body, &env, f, &env)?;
@@ -1422,6 +1441,11 @@ fn lower_with_layout(
         let destination = emitter.fresh();
         vars.push(destination.clone());
         emitter.lines.clear();
+        emitter.in_place = if ink_core::recursion::recursive(f) {
+            Default::default()
+        } else {
+            ink_core::in_place::analyse_with_result(&f.body, &f.params, Some(&f.result), p)
+        };
         let conversion = if functions[i]["result"]["element"]
             .to_string()
             .contains("\"kind\":\"f32\"")
