@@ -11,6 +11,11 @@ event changed:Row;
 change put(key:String,row:Row,fail:Bool)->Result<Unit,Error> writes(Rows) emits(changed) {
  Rows.put(key,row);emit changed(row);if fail{return Err(Error.Failed);}return Ok(());
 }
+change multiple(key:String,row:Row,fail:Bool)->Result<Unit,Error> writes(Rows) emits(changed) {
+ Rows.put(key,row);emit changed(row);emit changed(Row{values:list(8,9)});
+ Rows.put(key,Row{values:list(4)});emit changed(Row{values:list(4)});
+ if fail{return Err(Error.Failed);}return Ok(());
+}
 query get(key:String)->Option<Row> reads(Rows) { return Rows.get(key); }
 spec query guarded(allowed:Bool)->u32 requires allowed;ensures result==0;
 implementation zero for guarded { return 0; }
@@ -49,6 +54,18 @@ assert.throws(()=>state.acknowledgeThrough(-1n,0n),/invalid u64/);assert.deepEqu
 state.acknowledgeThrough(4n,0n);assert.deepEqual(state.outbox,[]);
 state.invokePrepared(put);assert.equal(state.outbox[0].commit,5n);
 assert.deepEqual(state.invoke_json('get',['changed']).result,{None:null});
+const many=createState(),multi=(fail)=>many.prepare('multiple',['k',{values:[1,2]},fail]);
+const failed=multi(true),successful=multi(false),before=await many.checkpoint();
+for(let i=0;i<3;i++){assert.equal(many.invokePrepared(failed).committed,false);assert.deepEqual(await many.checkpoint(),before);}
+const saved=many.invokePrepared(successful);
+assert.deepEqual(saved.events.map(e=>[e.position,e.value.values]),[[0n,[1,2]],[1n,[8,9]],[2n,[4]]]);
+saved.events[0].value.values[0]=999;assert.deepEqual(many.outbox[0].value.values,[1,2]);
+const committed=await many.checkpoint();many.beginTransaction();
+assert.equal(many.invokePrepared(failed).committed,false);assert.deepEqual(await many.checkpoint(),committed);
+many.invokePrepared(successful);many.rollbackTransaction();assert.deepEqual(await many.checkpoint(),committed);
+const next=many.invokePrepared(successful);assert.equal(next.version,2n);assert.equal(saved.version,1n);assert.deepEqual(saved.events[1].value.values,[8,9]);
+many.acknowledgeThrough(1n,1n);assert.deepEqual(many.outbox.map(e=>[e.commit,e.position]),[[1n,2n],[2n,0n],[2n,1n],[2n,2n]]);
+
 "#).unwrap();
     let output = Command::new("node").arg(root.join("test.mjs")).output().unwrap();
     fs::remove_dir_all(root).unwrap();

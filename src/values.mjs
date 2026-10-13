@@ -181,8 +181,22 @@ function __stateInput(value,type,budget={cells:1000000},depth=0){
 // Mutable host replies must not retain references into compiled state or its outbox.
 // State results must own mutable containers. Compile the declared schema once:
 // scalars need no structured clone, while nested records/lists remain detached.
-function __ownedResult(copy,nested){
- const schema={};
+function __ownershipSchema(type){
+ // Nominal references and expanded declarations name the same checked sort.
+ // Distinct source records retain distinct keys even if a layout erases them.
+ if(type.kind==='ref'||type.kind==='record'&&type.name)return ['named',type.name];
+ switch(type.kind){
+  case 'list':case 'vector':return [type.kind,type.size??null,__ownershipSchema(type.element)];
+  case 'option':return ['option',__ownershipSchema(type.element)];
+  case 'result':return ['result',__ownershipSchema(type.ok),__ownershipSchema(type.error)];
+  case 'record':return ['record',type.fields.map(f=>[f.name,__ownershipSchema(f.type)])];
+  default:return type;
+ }
+}
+function __ownedResult(copy,nested,type){
+ const key='owned-state:'+JSON.stringify(__ownershipSchema(type));
+ let schema=__conversionKeys.get(key);
+ if(!schema){schema={};__conversionKeys.set(key,schema);}
  const owned=(value,context)=>{
   if(!context&&!nested)return copy(value,null);
   const memo=context||new WeakMap();
@@ -196,10 +210,10 @@ function __ownedResult(copy,nested){
 function __stateResult(type){
  switch(type.kind){
   case 'ref':{let resolved;const copy=(value,context)=>(resolved??=__stateResult(__namedTypes[type.name]))(value,context);copy.container=true;return copy;}
-  case 'record':{if((typeof __recordElisions!=='undefined'&&__recordElisions.has(type.name))){const f=type.fields[0],copy=__stateResult(f.type);return __ownedResult((value,context)=>({[f.name]:copy(value,context)}),copy.container);}const fields=type.fields.map(f=>[f.name,__stateResult(f.type)]);return __ownedResult((value,context)=>Object.fromEntries(fields.map(([name,copy])=>[name,copy(value[name],context)])),fields.some(([,copy])=>copy.container));}
-  case 'list':case 'vector':{const copy=__stateResult(type.element);return __ownedResult((value,context)=>Array.from(value,item=>copy(item,context)),copy.container);}
-  case 'option':{const copy=__stateResult(type.element);return __ownedResult((value,context)=>Object.hasOwn(value,'Some')?{Some:copy(value.Some,context)}:{None:null},copy.container);}
-  case 'result':{const ok=__stateResult(type.ok),err=__stateResult(type.error);return __ownedResult((value,context)=>Object.hasOwn(value,'Ok')?{Ok:ok(value.Ok,context)}:{Err:err(value.Err,context)},ok.container||err.container);}
+  case 'record':{if((typeof __recordElisions!=='undefined'&&__recordElisions.has(type.name))){const f=type.fields[0],copy=__stateResult(f.type);return __ownedResult((value,context)=>({[f.name]:copy(value,context)}),copy.container,type);}const fields=type.fields.map(f=>[f.name,__stateResult(f.type)]);return __ownedResult((value,context)=>Object.fromEntries(fields.map(([name,copy])=>[name,copy(value[name],context)])),fields.some(([,copy])=>copy.container),type);}
+  case 'list':case 'vector':{const copy=__stateResult(type.element);return __ownedResult((value,context)=>Array.from(value,item=>copy(item,context)),copy.container,type);}
+  case 'option':{const copy=__stateResult(type.element);return __ownedResult((value,context)=>Object.hasOwn(value,'Some')?{Some:copy(value.Some,context)}:{None:null},copy.container,type);}
+  case 'result':{const ok=__stateResult(type.ok),err=__stateResult(type.error);return __ownedResult((value,context)=>Object.hasOwn(value,'Ok')?{Ok:ok(value.Ok,context)}:{Err:err(value.Err,context)},ok.container||err.container,type);}
   default:return __representation(type,true);
  }
 }
