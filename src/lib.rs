@@ -11,6 +11,7 @@ pub struct Emission {
 pub mod definition;
 pub mod portable_definition;
 mod state;
+mod state_capture;
 type Env = BTreeMap<String, (String, Type)>;
 fn quote(s: &str) -> String {
     serde_json::to_string(s).unwrap()

@@ -78,24 +78,25 @@ function __table(rt,index,method,args){
  __remember(rt,index,key,present,prior);table.set(key,args[1]);return null;
 }
 function __rollback(rt,mark){for(let i=rt.undo.length-1;i>=mark;i--){const [index,key,present,value]=rt.undo[i];const table=rt.tables[index];if(table.has(key)!==present)__tableMembership(rt,index,key,present);if(present)table.set(key,value);else table.delete(key);}rt.undo.length=mark;}
-function __createState(meta,implementations){
+function __createState(meta,implementations,captures=null){
  const rt={meta,tables:meta.roots.map(()=>new Map()),version:0n,outbox:[],staged:[],busy:false,undo:[],seen:meta.roots.map(()=>new Set()),host:null,keeps:new Array(meta.keeps.length),keepUndo:[],keepSeen:new Set()};
- const actionMap=new Map(meta.actions.map(a=>[a.name,{...a,inputs:a.params.map(p=>__stateCapture(p.type)),output:__stateResult(a.result)}]));
+ const actionMap=new Map(meta.actions.map(a=>[a.name,{...a,inputs:captures?captures[a.index]:a.params.map(p=>__stateCapture(p.type)),output:__stateResult(a.result)}]));
  const eventOutput=new Map(meta.events.map(e=>[e.name,__stateResult(e.type)]));
+ const prepared=new WeakMap();
  function invoke(name,args){const a=actionMap.get(name);if(!a)throw Error(`unknown action ${name}`);return run(a,args);}
- function read(a,args,inputs,output,resultOnly){
+ function read(a,args,inputs,output,resultOnly,owned=false){
   if(rt.busy)throw Error('state operation already in progress');
-  const captured=(inputs||a.inputs).map((convert,i)=>convert(args[i]));
+  const captured=owned?args:(inputs||a.inputs).map((convert,i)=>convert(args[i]));
   const ctx={fuel:100000000};
   if(a.precondition && implementations[actionMap.get(a.precondition).index](ctx,rt,...captured)!==true)throw Error('contract precondition failed');
   rt.busy=true;
   try{const result=(output||a.output)(implementations[a.index](ctx,rt,...captured));return resultOnly?result:{result,committed:false,version:rt.version,events:[]};}
   finally{rt.busy=false;}
  }
- function run(a,args,inputs=null,output=null,resultOnly=false){
-  if(!a.change)return read(a,args,inputs,output,resultOnly);
+ function run(a,args,inputs=null,output=null,resultOnly=false,owned=false){
+  if(!a.change)return read(a,args,inputs,output,resultOnly,owned);
   if(rt.busy)throw Error('state operation already in progress');
-  const captured=(inputs||a.inputs).map((convert,i)=>convert(args[i]));
+  const captured=owned?args:(inputs||a.inputs).map((convert,i)=>convert(args[i]));
   if(a.precondition && implementations[actionMap.get(a.precondition).index]({fuel:100000000},rt,...captured)!==true)throw Error('contract precondition failed');
   const mark=rt.undo.length,version=rt.version,outbox=rt.outbox,outboxLength=rt.outbox.length;
   rt.busy=true;rt.staged.length=0;const ctx={fuel:100000000};
@@ -114,6 +115,18 @@ function __createState(meta,implementations){
  }
  return Object.freeze({
   invoke,invoke_json:invoke,
+  // A reusable owned argument packet. The opaque token exposes no mutable
+  // containers; only this state can resolve it. Dynamic preconditions and all
+  // transaction/output ownership checks still run on every invocation.
+  prepare(name,args){
+   const a=actionMap.get(name);if(!a)throw Error(`unknown action ${name}`);
+   const captured=a.inputs.map((convert,i)=>convert(args[i])),token=Object.freeze({});
+   prepared.set(token,{action:a,args:captured});return token;
+  },
+  invokePrepared(token){
+   const packet=prepared.get(token);if(!packet)throw Error('invalid prepared state call');
+   return run(packet.action,packet.args,null,null,false,true);
+  },
   // A prebound typed entrypoint: scalar arguments obey the native caller contract.
   // Composite arguments still capture owned input; events remain in the outbox.
   bind(name,{resultOnly=false}={}){
