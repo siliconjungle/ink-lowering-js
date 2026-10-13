@@ -1490,6 +1490,7 @@ fn lower_with_layout(
     } else {
         None
     };
+    interface["wire"] = ink_abi::wire_contract::source_contract(p)?;
     interface["state"] = serde_json::to_value(state).map_err(|e| e.to_string())?;
     interface["named_types"] = serde_json::to_value(named).map_err(|e| e.to_string())?;
     javascript.push_str(&format!(
@@ -1540,6 +1541,18 @@ export const functions = Object.freeze(Object.fromEntries(metadata.functions.fil
     } else {
         javascript.push_str(&format!("export function call(name,args) {{switch(name){{{internal_cases}throw new Error('temporary storage is internal to a pure invocation');}}return functions[name](...args);}}\n"));
     }
+    javascript.push_str(ink_abi::VALUE_WIRE_JS_SOURCE);
+    javascript.push_str(ink_abi::JSON_VALUE_JS_SOURCE);
+    javascript.push_str(r#"
+export const valueCodecs=(()=>{const codecs={};for(const [name,s] of Object.entries(metadata.wire.functions)){if(s.unsupported)continue;let value;Object.defineProperty(codecs,name,{enumerable:true,get:()=>value??=(Object.freeze({arguments:new ValueCodec(s.arguments),result:new ValueCodec(s.result)}))});}return Object.freeze(codecs);})();
+export function callBinary(name,bytes,limits={}){
+ const f=metadata.functions.find(f=>f.name===name&&!f.internal),codecs=valueCodecs[name];
+ if(!f||!codecs)throw Error('unsupported binary function');
+ const values=codecs.arguments.decode(bytes,limits);
+ const result=call(name,f.params.map(p=>values[p.name]));
+ return codecs.result.encode(result,limits);
+}
+"#);
     for (i, f) in p.functions.iter().enumerate() {
         if matches!(f.result, Type::List(_))
             && interface["functions"][i]["result"]["element"]
