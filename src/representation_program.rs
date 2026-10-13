@@ -106,10 +106,14 @@ pub(crate) fn maintained_support(module: &ink_core::core::CheckedModule, views:&
     let call=|f:&str,args:Vec<Term>|Term::Call{function:f.into(),arguments:args};
     let mut entries=String::new();
     let mut fallback=false;
+    let mut native_roots=vec![true;module.program().states.len()];
+    let mut root_views=vec![Vec::new();module.program().states.len()];
     for ((v,s),zero) in views.package().views.iter().zip(views.subjects()).zip(views.zeros()) {
         let root=module.program().states.iter().position(|r|r.name==s.table).unwrap();
         let keep=module.program().keeps.iter().position(|k|k.name==s.keep).unwrap();
         let Type::Table(key,row)=&module.program().states[root].ty else {unreachable!()};
+        let view_index=root_views.iter().map(|v|v.len()).sum::<usize>();
+        root_views[root].push((view_index,keep));
         let scalar=if s.result==Sort::Bool{Type::Bool}else{Type::U64};
         let zero=match zero{Term::U64(n)=>format!("{n}n"),Term::Bool(b)=>b.to_string(),_=>unreachable!()};
         let contribution_id=v.contribution_choice.as_ref().map(|c|&c.function).unwrap_or(&v.contribution);
@@ -130,7 +134,7 @@ pub(crate) fn maintained_support(module: &ink_core::core::CheckedModule, views:&
         for (name,params,body,ordinary) in candidates {
             let code=match super::definition_native::function(module.program(),&projection,&ds,&params,&body){
                 Ok(code)=>code,
-                Err(_)=>{if ordinary!="null"{fallback=true;}ordinary},
+                Err(_)=>{if ["insert","remove","replace"].contains(&name){native_roots[root]=false;}if ordinary!="null"{fallback=true;}ordinary},
             };
             write!(entries,",{name}:{code}").unwrap();
         }
@@ -144,7 +148,13 @@ pub(crate) fn maintained_support(module: &ink_core::core::CheckedModule, views:&
     }
     // Scalar/flat-row definitions have no constructor or recursion machinery.
     // All other admitted definitions retain the ordinary literal codec lane.
-    Ok(format!("const __compiledMaintained=(()=>{{{out}return [{entries}];}})();\n"))
+    let mut preparers=Vec::new();
+    for (root,ids) in root_views.iter().enumerate(){
+        if !native_roots[root]||ids.is_empty(){preparers.push("null".into());continue;}
+        let branch=|method:&str,args:&str|ids.iter().map(|(i,k)|format!("if(rt.pendingValues[{k}]===undefined){{rt.pendingValues[{k}]=__views[{i}].{method}(rt.keeps[{k}],key,{args});rt.pendingIndices.push({k});}}")).collect::<String>();
+        preparers.push(format!("(rt,cell)=>{{const {{key,prior,next}}=cell;if(prior===undefined){{{}}}else if(next===undefined){{{}}}else{{{}}}}}",branch("insert","next"),branch("remove","prior"),branch("replace","prior,next")));
+    }
+    Ok(format!("const __compiledMaintained=(()=>{{{out}const __views=[{entries}];__views.prepareRoots=[{}];return __views;}})();\n",preparers.join(",")))
 }
 
 pub fn lower(checked: &CheckedRepresentation) -> LangResult<String> {

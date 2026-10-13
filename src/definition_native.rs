@@ -9,6 +9,7 @@ enum Value {
     Word(String,usize), // representative modulo 2^64, bounded intermediate width
     Bool(String),
     Fields(usize,Vec<Value>),
+    Opaque, // unused source fields need no codec; inspecting them declines
 }
 impl Value {
     fn scalar(&self)->LangResult<String>{Ok(match self{
@@ -89,7 +90,7 @@ fn input(p:&Program,projection:&Projection,t:&Type,name:&str,depth:usize)->LangR
         Type::Unit=>Value::Fields(0,vec![]),
         Type::Named(n)if p.records.contains_key(n)&&!projection.recursive_records.contains_key(n)=>Value::Fields(0,p.records[n].iter().map(|(f,t)|input(p,projection,t,&format!("({name})[{}]",super::quote(f)),depth+1)).collect::<LangResult<_>>()?),
         Type::Vector(t,n)=>Value::Fields(0,(0..*n).map(|i|input(p,projection,t,&format!("({name})[{i}]"),depth+1)).collect::<LangResult<_>>()?),
-        _=>return Err("native source codec unsupported".into()),
+        _=>Value::Opaque,
     })
 }
 pub(crate) fn function(p:&Program,projection:&Projection,ds:&BTreeMap<String,Declaration>,params:&[(&str,&Type)],body:&Term)->LangResult<String>{
@@ -109,7 +110,7 @@ mod tests {
     fn v(n:&str)->Term{Term::Var(n.into())}
     #[test]
     fn modular_regions_normalize_at_comparison_division_and_output_boundaries(){
-        let module=CheckedModule::from_source(parse("module native_terms; record Row{value:u64,flag:Bool,} state Rows:Table<u64,Row> = Table.empty(); query empty()->u64{return 0;}").unwrap()).unwrap();
+        let module=CheckedModule::from_source(parse("module native_terms; record Row{value:u64,flag:Bool,note:String,} state Rows:Table<u64,Row> = Table.empty(); query empty()->u64{return 0;}").unwrap()).unwrap();
         let projection=Projection::derive(&module).unwrap();let ds=BTreeMap::new();
         let params=[("x",&Type::U64),("y",&Type::U64)];
         let difference=bin("-",v("x"),v("y"));
@@ -126,5 +127,10 @@ for(const x of values)for(const y of values){{const d=w(x-y);const expected=[x,y
         // Recursion and operators with different primitive meanings decline.
         assert!(function(module.program(),&projection,&ds,&params,&Term::SelfCall(vec![v("x")])).is_err());
         assert!(function(module.program(),&projection,&ds,&params,&bin("f32:+",v("x"),v("y"))).is_err());
+        let row=Type::Named("Row".into());
+        let selection=Term::Match{scrutinee:Box::new(v("row")),branches:vec![ink_core::logic::Branch{bindings:vec!["value".into(),"flag".into(),"note".into()],body:v("value")}]};
+        assert!(function(module.program(),&projection,&ds,&[("row",&row)],&selection).is_ok());
+        let string=Term::Match{scrutinee:Box::new(v("row")),branches:vec![ink_core::logic::Branch{bindings:vec!["value".into(),"flag".into(),"note".into()],body:v("note")}]};
+        assert!(function(module.program(),&projection,&ds,&[("row",&row)],&string).is_err());
     }
 }

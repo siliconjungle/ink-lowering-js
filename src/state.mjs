@@ -87,7 +87,7 @@ function __pendingView(rt,view){
  }
  return rt.pendingValues[keep];
 }
-function __prepareCell(rt){if(rt.cell)for(const view of rt.viewsByRoot[rt.cell.index])__pendingView(rt,view);}
+function __prepareCell(rt){if(rt.cell){const prepare=rt.views.prepareRoots?.[rt.cell.index];if(prepare)prepare(rt,rt.cell);else for(const view of rt.viewsByRoot[rt.cell.index])__pendingView(rt,view);}}
 function __writeCell(rt,index,key,next,prior){
  if(rt.cellMode){if(rt.cell)throw Error('checked single-cell bound exceeded');rt.cell={index,key,next,prior};}
  else{const table=rt.tables[index];if((prior!==undefined)!==(next!==undefined))__tableMembership(rt,index,key,next!==undefined);if(next===undefined)table.delete(key);else table.set(key,next);}
@@ -177,9 +177,18 @@ function __createState(meta,implementations,captures=null,views=[],prefixes=[]){
   const a=actionMap.get(name);if(!a||a.change)throw Error('subscription requires a readonly query');
   const captured=a.inputs.map((convert,i)=>convert(args[i]));
   const publicArgs=captured.map((v,i)=>__stateResult(a.params[i].type)(v));
-  return {roots:a.roots,read:()=>run(a,publicArgs,null,null,true),capture:__stateCapture(a.result),output:a.output,equal:__stateQueryEquals[a.index]};
+  const scalar=['u64','u32','i32','bool','string','unit','enum','id'].includes(a.result.kind);
+  return {roots:a.roots,read:!a.precondition&&a.params.length===0?readZero(a,true):()=>run(a,publicArgs,null,null,true),capture:scalar?v=>v:__stateCapture(a.result),output:scalar?v=>v:a.output,equal:__stateQueryEquals[a.index]};
  });
  function invoke(name,args){const a=actionMap.get(name);if(!a)throw Error(`unknown action ${name}`);return run(a,args);}
+ function readZero(a,resultOnly){
+  const implementation=implementations[a.index],output=a.output,fresh=a.freshResult;
+  return ()=>{
+   if(rt.busy)throw Error('state operation already in progress');rt.busy=true;rt.ctx.fuel=100000000;
+   try{const value=implementation(rt.ctx,rt),result=fresh?value:output(value);return resultOnly?result:{result,committed:false,version:rt.version,events:[]};}
+   finally{rt.busy=false;}
+  };
+ }
  function read(a,args,inputs,output,resultOnly,owned=false){
   if(rt.busy)throw Error('state operation already in progress');
   const captured=owned?args:(inputs||a.inputs).map((convert,i)=>convert(args[i]));
@@ -254,10 +263,7 @@ function __createState(meta,implementations,captures=null,views=[],prefixes=[]){
   bind(name,{resultOnly=false}={}){
    const a=actionMap.get(name);if(!a)throw Error(`unknown action ${name}`);
    const inputs=a.params.map((p,i)=>['u32','i32','u64','bool','unit','string','f32','id','enum','int'].includes(p.type.kind)?__representation(p.type,false):a.inputs[i]);
-   if(!a.change&&!a.precondition&&inputs.length===0)return ()=>{
-    if(rt.busy)throw Error('state operation already in progress');rt.busy=true;const ctx=rt.ctx;ctx.fuel=100000000;
-    try{const value=implementations[a.index](ctx,rt),result=a.freshResult?value:a.output(value);return resultOnly?result:{result,committed:false,version:rt.version,events:[]};}finally{rt.busy=false;}
-   };
+   if(!a.change&&!a.precondition&&inputs.length===0)return readZero(a,resultOnly);
    return __stateBoundFactories[a.index](run,a,inputs,a.output,resultOnly,rt,begin,complete,abort,end);
   },
   beginTransaction(){if(rt.busy||rt.host||rt.undo.length)throw Error('transaction already in progress');rt.host={version:rt.version,outbox:rt.outbox,length:rt.outbox.length,keeps:rt.keeps.slice(),notificationMark:observers.hold()};return true;},
