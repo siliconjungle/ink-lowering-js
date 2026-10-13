@@ -57,11 +57,12 @@ function __invalidateKeeps(rt,index){
  if(rt.observers?.active)rt.changedRoots.add(index);
  if(!rt.keeps)return;
  for(const keep of rt.meta.keepInvalidations[index]){
-  if(!rt.keepSeen.has(keep)){rt.keepSeen.add(keep);rt.keepBefore[keep]=rt.keeps[keep];rt.keepUndo.push(keep);}
+  if(!rt.keepDirty[keep]){rt.keepDirty[keep]=1;rt.keepUndoIndices[rt.keepUndoCount++]=keep;rt.keepBefore[keep]=rt.keeps[keep];}
   rt.keeps[keep]=undefined;
  }
 }
-function __restoreKeeps(rt){for(let i=rt.keepUndo.length-1;i>=0;i--){const keep=rt.keepUndo[i];rt.keeps[keep]=rt.keepBefore[keep];}}
+function __restoreKeeps(rt){for(let i=rt.keepUndoCount-1;i>=0;i--){const keep=rt.keepUndoIndices[i];rt.keeps[keep]=rt.keepBefore[keep];}}
+function __clearKeepJournal(rt){for(let i=0;i<rt.keepUndoCount;i++){const keep=rt.keepUndoIndices[i];rt.keepDirty[keep]=0;rt.keepBefore[keep]=undefined;}rt.keepUndoCount=0;}
 function __rebuildViews(rt){
  for(const view of rt.views){let value=view.zero;for(const [key,row]of rt.tables[view.root])value=view.combine(value,view.contribution(key,row));rt.keeps[view.keep]=value;}
 }
@@ -117,10 +118,10 @@ function __table(rt,index,method,args){
 }
 function __rollback(rt,mark){for(let i=rt.undo.length-1;i>=mark;i--){const [index,key,present,value]=rt.undo[i];const table=rt.tables[index];if(table.has(key)!==present)__tableMembership(rt,index,key,present);if(present)table.set(key,value);else table.delete(key);}rt.undo.length=mark;}
 function __createState(meta,implementations,captures=null,views=[],prefixes=[]){
- const rt={meta,tables:__newTables(meta,prefixes),version:0n,outbox:[],staged:[],busy:false,undo:[],seen:meta.roots.map(()=>new Set()),host:null,keeps:new Array(meta.keeps.length),keepUndo:[],keepSeen:new Set()};
+ const rt={meta,tables:__newTables(meta,prefixes),version:0n,outbox:[],staged:[],busy:false,undo:[],seen:meta.roots.map(()=>new Set()),host:null,keeps:new Array(meta.keeps.length),keepDirty:meta.keeps.length?new Uint8Array(meta.keeps.length):null,keepUndoIndices:meta.keeps.length?new Uint32Array(meta.keeps.length):null,keepUndoCount:0};
  rt.views=views;rt.viewsByRoot=meta.roots.map((_,root)=>views.filter(v=>v.root===root));__rebuildViews(rt);
  rt.viewNext=new Array(meta.keeps.length);rt.cell=null;rt.cellMode=false;rt.ctx={fuel:100000000};
- rt.keepBefore=new Array(meta.keeps.length);
+ rt.keepBefore=meta.keeps.length?new Array(meta.keeps.length):null;
  rt.changedRoots=new Set();
  const actionMap=new Map(meta.actions.map(a=>[a.name,{...a,inputs:captures?captures[a.index]:a.params.map(p=>__stateCapture(p.type)),output:__stateResult(a.result)}]));
  const eventOutput=new Map(meta.events.map(e=>[e.name,__stateResult(e.type)]));
@@ -165,7 +166,7 @@ function __createState(meta,implementations,captures=null,views=[],prefixes=[]){
    successful=true;
    return resultOnly?result:{result,committed:true,version:next,events};
   }catch(e){__rollback(rt,mark);__restoreKeeps(rt);rt.version=version;rt.outbox=outbox;rt.outbox.length=outboxLength;if(rt.host?.strict)rt.host.failure=e;throw e;}
-  finally{rt.cell=null;rt.cellMode=false;rt.staged.length=0;rt.busy=false;for(const keep of rt.keepUndo)rt.keepBefore[keep]=undefined;rt.keepUndo.length=0;rt.keepSeen.clear();for(const seen of rt.seen)seen.clear();if(!rt.host)rt.undo.length=0;if(successful)observers.commit(rt.changedRoots);}
+  finally{rt.cell=null;rt.cellMode=false;rt.staged.length=0;rt.busy=false;__clearKeepJournal(rt);for(const seen of rt.seen)seen.clear();if(!rt.host)rt.undo.length=0;if(successful)observers.commit(rt.changedRoots);}
  }
  return Object.freeze({
   subscribe(...args){if(rt.busy||rt.host)throw Error('subscription requires transaction boundary');return observers.subscribe(...args);},

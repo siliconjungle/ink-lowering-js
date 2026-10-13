@@ -23,7 +23,9 @@ import assert from 'node:assert/strict';import {call,createState,__stateMetadata
 const a=__stateMetadata.actions.find(a=>a.name==='echo'),capture=__stateInputCaptures[a.index][0],type=a.params[0].type;
 const tree=call('node',[call('node',[call('leaf',[])])]);
 const packet={tree,words:[0,4294967295],pair:[-0,{F32Bits:0x7fc12345}],option:{Some:4},result:{Err:'雪'},wide:18446744073709551615n,exact:{Int:'-12345678901234567890'},tag:'0123456789ABCDEF0123456789ABCDEF',mode:'Mode.Off',['__proto__']:'own'};
-const values=[packet,{...packet,extra:1},null,{...packet,words:[-1]},{...packet,pair:[1]},{...packet,option:{Some:4,extra:1}},{...packet,result:{Ok:null,Err:'bad'}},{...packet,tag:'bad'},{...packet,tree:{payload:{Some:4}}},{...packet,wide:9007199254740992},{...packet,exact:{Int:'bad'}}];
+const inherited=Object.assign(Object.create({noise:1}),{Some:4});
+const hidden={Some:4};Object.defineProperty(hidden,'noise',{value:1});
+const values=[{...packet,option:inherited},{...packet,option:hidden},{...packet,option:Object.assign(Object.create(null),{Some:4})},packet,{...packet,extra:1},null,{...packet,words:[-1]},{...packet,pair:[1]},{...packet,option:{Some:4,extra:1}},{...packet,result:{Ok:null,Err:'bad'}},{...packet,tag:'bad'},{...packet,tree:{payload:{Some:4}}},{...packet,wide:9007199254740992},{...packet,exact:{Int:'bad'}}];
 const outcome=(fn,v,cells,depth)=>{const budget={cells};try{return{value:fn(v,budget,depth),remaining:budget.cells};}catch(e){return{error:e.message,remaining:budget.cells};}};
 for(const value of values)for(const cells of [1,2,5,30,1000000])for(const depth of [0,63,64,65])assert.deepEqual(outcome(capture,value,cells,depth),outcome((v,b,d)=>reference(v,type,b,d),value,cells,depth));
 const owned=capture(packet);assert.equal(Object.getPrototypeOf(owned),Object.prototype);assert.equal(owned.__proto__,'own');packet.words[0]=7;assert.equal(owned.words[0],0);
