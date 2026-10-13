@@ -20,10 +20,10 @@ function __snapshotWriter(limits){
   case 'string':raw(__encoder.encode(v));break;
   case 'id':integer(BigInt('0x'+v),16);break;
   case 'enum':integer(t.variants.indexOf(v),4);break;
-  case 'record':for(const f of t.fields)value(v[f.name],f.type,depth+1,bindings);break;
+  case 'record':for(const f of t.fields)value(t.elided?v:v[f.name],f.type,depth+1,bindings);break;
   case 'list':if(v.length>left)throw Error('snapshot value limit exceeded');integer(v.length,8);for(const x of v)value(x,t.element,depth+1,bindings);break;
   case 'option':if(Object.hasOwn(v,'Some')){bytes([1]);value(v.Some,t.element,depth+1,bindings);}else bytes([0]);break;
-  case 'result':if(Object.hasOwn(v,'Ok')){bytes([0]);value(v.Ok,t.ok,depth+1,bindings);}else{bytes([1]);value(v.Err,t.error,depth+1,bindings);}break;
+  case 'result':{const branch=t.sum_key?__sumView(t.sum_key,v):v;if(Object.hasOwn(branch,'Ok')){bytes([0]);value(branch.Ok,t.ok,depth+1,bindings);}else{bytes([1]);value(branch.Err,t.error,depth+1,bindings);}break;}
   default:throw Error('unsupported snapshot type');
  }}
  return {bytes,integer,raw,value,get left(){return left;},finish:()=>new Uint8Array(out)};
@@ -65,10 +65,10 @@ async function __snapshotDecode(meta,input,options){
   case 'string':return new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(raw());
   case 'id':return integer(16).toString(16).padStart(32,'0');
   case 'enum':{const i=Number(integer(4));if(i>=t.variants.length)throw Error('invalid enum tag');return t.variants[i];}
-  case 'record':return Object.fromEntries(t.fields.map(f=>[f.name,value(f.type,depth+1,bindings)]));
+  case 'record':if(t.elided)return value(t.fields[0].type,depth+1,bindings);return Object.fromEntries(t.fields.map(f=>[f.name,value(f.type,depth+1,bindings)]));
   case 'list':{const n=sequence(),xs=[];for(let i=0;i<n;i++)xs.push(value(t.element,depth+1,bindings));return xs;}
   case 'option':{const tag=take(1)[0];if(tag===0)return {None:null};if(tag===1)return {Some:value(t.element,depth+1,bindings)};throw Error('invalid Option tag');}
-  case 'result':{const tag=take(1)[0];if(tag===0)return {Ok:value(t.ok,depth+1,bindings)};if(tag===1)return {Err:value(t.error,depth+1,bindings)};throw Error('invalid Result tag');}
+  case 'result':{const tag=take(1)[0];if(tag===0){const child=value(t.ok,depth+1,bindings);return t.sum_key?__sumMake(t.sum_key,true,child):{Ok:child};}if(tag===1){const child=value(t.error,depth+1,bindings);return t.sum_key?__sumMake(t.sum_key,false,child):{Err:child};}throw Error('invalid Result tag');}
   default:throw Error('unsupported snapshot type');
  }}
  const version=integer(8),tables=meta.roots.map(()=>new Map());
