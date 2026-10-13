@@ -69,18 +69,22 @@ fn needs_parallel(e: &Expr, p: &Program, seen: &mut std::collections::BTreeSet<S
 struct TypedEquality<'a> {
     p: &'a Program,
     prefix: &'static str,
+    native_f32: bool,
     equalities: BTreeMap<String, (String, String)>,
 }
 impl<'a> TypedEquality<'a> {
     fn new(p: &'a Program, prefix: &'static str) -> Self {
-        Self { p, prefix, equalities: BTreeMap::new() }
+        Self { p, prefix, native_f32: false, equalities: BTreeMap::new() }
     }
     fn source(&self) -> String {
         self.equalities.values().map(|(_, source)| source.as_str()).collect()
     }
-    // Fixed structural equality over checked types. Contained F32 values are
-    // bit carriers; only top-level scalar F32 equality uses IEEE comparison.
+    // Fixed structural equality compares contained F32 bits in either carrier;
+    // top-level scalar F32 equality alone uses IEEE comparison.
     fn expr(&mut self, t: &Type, a: &str, b: &str) -> LangResult<String> {
+        if self.native_f32 && *t == Type::F32 {
+            return Ok(format!("(__nfBits({a})===__nfBits({b}))"));
+        }
         let key = serde_json::to_string(t).map_err(|e| e.to_string())?;
         if let Some((name, _)) = self.equalities.get(&key) {
             return Ok(format!("{name}({a},{b})"));
@@ -150,8 +154,14 @@ struct Emitter<'a> {
     lines: String,
     callbacks: Vec<(String, String)>,
     equality: TypedEquality<'a>,
+    native_f32: bool,
 }
 impl Emitter<'_> {
+    fn arithmetic(&self, op: &str, a: &str, b: &str, t: &Type) -> String {
+        if self.native_f32 && *t == Type::F32 {
+            format!("Math.fround(__nfNumber({a}) {op} __nfNumber({b}))")
+        } else { arithmetic(op,a,b,t) }
+    }
     fn value_equal(&mut self, t: &Type, a: &str, b: &str) -> LangResult<String> {
         self.equality.expr(t, a, b)
     }
@@ -363,7 +373,7 @@ impl Emitter<'_> {
                     let element = self.bind(&format!("{xs}[{i}]"));
                     self.line(format!(
                         "{acc}={};",
-                        arithmetic("+", &acc, &element, &inner)
+                        self.arithmetic("+", &acc, &element, &inner)
                     ));
                     self.destination_store(destination, &i, &acc, conversion);
                     self.line("}");
@@ -502,7 +512,7 @@ impl Emitter<'_> {
                 let element = self.bind(&format!("{xs}[{i}]"));
                 self.line(format!(
                     "{acc}={};{out}[{i}]={acc};}}",
-                    arithmetic("+", &acc, &element, &inner)
+                    self.arithmetic("+", &acc, &element, &inner)
                 ));
                 out
             }
@@ -616,7 +626,13 @@ impl Emitter<'_> {
             return Err("JavaScript expression emission depth budget exceeded".into());
         }
         self.depth += 1;
-        let result = self.expr_inner(e, env, want);
+        let result = self.expr_inner(e, env, want).and_then(|value| {
+            // Borrow trusted host containers. Normalize scalar reads at demand,
+            // including callbacks and at_or, instead of copying their ancestors.
+            if self.native_f32 && self.infer(e,env,want)? == Type::F32 {
+                Ok(format!("__nfValue({value})"))
+            } else { Ok(value) }
+        });
         self.depth -= 1;
         result
     }
@@ -629,9 +645,11 @@ impl Emitter<'_> {
         Ok(match e {
             Expr::Num(n) => match t {
                 Type::U64 | Type::Int => format!("{n}n"),
+                Type::F32 if self.native_f32 => format!("__nfFromBits({})", (*n as f32).to_bits()),
                 Type::F32 => format!("{}", (*n as f32).to_bits()),
                 _ => n.to_string(),
             },
+            Expr::Float(b) if self.native_f32 => format!("__nfFromBits({b})"),
             Expr::Float(b) => b.to_string(),
             Expr::Bool(b) => b.to_string(),
             Expr::String(s) => quote(s),
@@ -650,10 +668,12 @@ impl Emitter<'_> {
                 }
                 let value = self.expr(a, env, Some(&t))?;
                 let value = self.bind(&value);
-                if t == Type::F32 {
+                if t == Type::F32 && self.native_f32 {
+                    format!("__nfNeg({value})")
+                } else if t == Type::F32 {
                     format!("(({value} ^ 2147483648) >>> 0)")
                 } else {
-                    arithmetic("-", zero(&t), &value, &t)
+                    self.arithmetic("-", zero(&t), &value, &t)
                 }
             }
             Expr::Let(n, annotation, a, b) => {
@@ -752,7 +772,7 @@ impl Emitter<'_> {
                 let bv = self.expr(b, env, Some(&at))?;
                 let bv = self.bind(&bv);
                 if ["+", "-", "*"].contains(&op.as_str()) {
-                    arithmetic(op, &av, &bv, &at)
+                    self.arithmetic(op, &av, &bv, &at)
                 } else if (op == "==" || op == "!=") && at != Type::F32 {
                     format!(
                         "{}{}",
@@ -761,7 +781,7 @@ impl Emitter<'_> {
                     )
                 } else {
                     let (av, bv) = if at == Type::F32 {
-                        (format!("__float({av})"), format!("__float({bv})"))
+                        (format!("{}({av})",if self.native_f32 {"__nfNumber"}else{"__float"}), format!("{}({bv})",if self.native_f32 {"__nfNumber"}else{"__float"}))
                     } else {
                         (av, bv)
                     };
@@ -913,7 +933,7 @@ impl Emitter<'_> {
                     self.line(format!("for(let {i}=0;{i}<{xv}.length;{i}++){{"));
                     let element = self.bind(&format!("{xv}.item({i})"));
                     let value = if n == "scan" {
-                        let add = arithmetic("+", &acc, &element, inner);
+                        let add = self.arithmetic("+", &acc, &element, inner);
                         self.line(format!("{acc}={add};"));
                         acc
                     } else {
@@ -1100,7 +1120,7 @@ impl Emitter<'_> {
                         zero(&t)
                     ));
                     let value = self.bind(&format!("{xs}[{index}]"));
-                    self.line(format!("{out}={};}}", arithmetic("+", &out, &value, &t)));
+                    self.line(format!("{out}={};}}", self.arithmetic("+", &out, &value, &t)));
                     out
                 }
             }
@@ -1296,6 +1316,11 @@ fn lower_with_layout(
     layout: Option<&ink_core::snapshot_wire::Layout>,
 ) -> LangResult<Emission> {
     let p = module.program();
+    // Stateful functions share the exact-bit carrier with actions/snapshots.
+    // Pure modules can borrow native float inputs without a state bridge.
+    let native_f32 = p.actions.is_empty() && p.states.is_empty() && p.keeps.is_empty();
+    let mut equality=TypedEquality::new(p,"__valueEqual");
+    equality.native_f32=native_f32;
     let mut emitter = Emitter {
         p,
         next: 0,
@@ -1303,7 +1328,8 @@ fn lower_with_layout(
         depth: 0,
         lines: String::new(),
         callbacks: Vec::new(),
-        equality: TypedEquality::new(p, "__valueEqual"),
+        equality,
+        native_f32,
     };
     let mut javascript = String::new();
     let mut functions = vec![];
@@ -1334,7 +1360,10 @@ fn lower_with_layout(
             }
             ty
         }).collect::<Vec<_>>();
-        input_types.push(projected);
+        // Whole-value escape/equality keeps eager capture semantics, including
+        // single reads of accessor-backed fields. Field-only consumers borrow.
+        let captures=ink_core::input_demand::fields(f,p).into_iter().map(|fields|fields.is_none()).collect::<Vec<_>>();
+        input_types.push(json!({"types":projected,"capture":captures}));
         let mut env = Env::new();
         let mut vars = vec![];
         for (n, t) in &f.params {
@@ -1432,6 +1461,7 @@ fn lower_with_layout(
                 || !p.keeps.is_empty()
                 || javascript.contains("__bits(")
                 || javascript.contains("__float(")
+                || javascript.contains("__nf")
         } else {
             javascript.contains(name)
                 || !p.actions.is_empty()
@@ -1479,7 +1509,7 @@ fn lower_with_layout(
     if has_state || javascript.contains("__word(") {
         helpers.push_str(include_str!("word.mjs"));
     }
-    javascript = helpers + &javascript;
+    javascript = format!("const __nativeF32={native_f32};\n") + &helpers + &javascript;
     let named = p
         .records
         .keys()
@@ -1506,6 +1536,7 @@ fn lower_with_layout(
     } else {
         None
     };
+    interface["f32_storage"] = json!(if native_f32 {"native-number-with-exact-nonfinite-tags"} else {"exact-u32-bits"});
     interface["wire"] = ink_abi::wire_contract::source_contract(p)?;
     interface["state"] = serde_json::to_value(state).map_err(|e| e.to_string())?;
     interface["named_types"] = serde_json::to_value(named).map_err(|e| e.to_string())?;
@@ -1527,13 +1558,13 @@ __freeze(metadata);
             r#"
 // Descriptor work occurs once at module initialisation, never per word-list call.
 export const functions = Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal).map(f=> {
-  const input=__inputTypes[f.index].map(t=>__representation(t,false));
+  const input=__inputTypes[f.index].types.map((t,i)=>__representation(t,false,__inputTypes[f.index].capture[i]));
   const output=__representation(f.result,true);
   const body=__implementations[f.index];
   const implementation=f.precondition==null?body:(...args)=>{if(__implementations[f.precondition](...args)!==true)throw Error('contract precondition failed');return body(...args);};
   const needsInput=input.some(c=>c!==__identity);
   const entry=!needsInput && output===__identity ? implementation :
-    (...args)=>{const context=new WeakMap();return output(implementation(...(needsInput ? args.map((v,i)=>input[i](v,context)) : args)));};
+    (...args)=>{const context=new WeakMap();return output(implementation(...(needsInput ? args.map((v,i)=>input[i](v,context)) : args)),context);};
   return [f.name,entry];
 })));
 "#,
@@ -1597,7 +1628,7 @@ export function callBinary(name,bytes,limits={}){
     if needs_conversion {
         javascript.push_str(r#"
 export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal&&f.result.kind==='list').map(f=>{
-  const input=__inputTypes[f.index].map(t=>__representation(t,false));
+  const input=__inputTypes[f.index].types.map((t,i)=>__representation(t,false,__inputTypes[f.index].capture[i]));
   const body=__intoImplementations[f.index];
   const implementation=f.precondition==null?body:(...args)=>{if(__implementations[f.precondition](...args.slice(0,f.params.length))!==true)throw Error('contract precondition failed');return body(...args);};
   const entry=input.every(c=>c===__identity)?implementation:(...values)=>{const context=new WeakMap();return implementation(...input.map((convert,i)=>convert(values[i],context)),values[f.params.length]);};

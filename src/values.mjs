@@ -3,16 +3,24 @@
 const __view = new DataView(new ArrayBuffer(4));
 const __float = bits => { __view.setUint32(0, bits, true); return __view.getFloat32(0, true); };
 const __bits = number => { if(Number.isNaN(number))return 0x7fc00000; __view.setFloat32(0, number, true); return __view.getUint32(0, true); };
+// Native binary32 lane for pure modules. Explicit NaN payloads remain tagged;
+// arithmetic canonicalizes NaNs just as __bits does in the exact-bit lane.
+const __nfValue = value => typeof value === 'number' ? Math.fround(value) : value;
+const __nfNumber = value => typeof value === 'number' ? Math.fround(value) : __float(value.F32Bits);
+const __nfBits = value => typeof value === 'number' ? __bits(value) : value.F32Bits;
+const __nfFromBits = bits => (bits & 0x7fffffff)>0x7f800000 ? {F32Bits:bits} : __float(bits);
+const __nfNeg = value => typeof value === 'number' && !Number.isNaN(value) ? -value : {F32Bits:(__nfBits(value) ^ 0x80000000) >>> 0};
+const __nfOutput = value => {const n=typeof value==='number'?Math.fround(value):__float(value.F32Bits);return Number.isFinite(n)?n:{F32Bits:__nfBits(value)};};
 const __identity = value => value;
 // Intern declared conversion schemas once. An invocation owns one WeakMap per
 // schema instead of allocating a Map for every converted record/list node.
 const __conversionKeys = new Map();
-function __representation(type, output) {
-  const convert=__representationRaw(type,output);
+function __representation(type, output, capture=false) {
+  const convert=__representationRaw(type,output,capture);
   if(convert===__identity)return convert;
   // Conversion identity is invocation-local: callers may reuse a mutable host
   // object in a later call. Distinct declared schemas have distinct memo keys.
-  const schema=(output?'out:':'in:')+JSON.stringify(type);
+  const schema=(output?'out:':capture?'capture:':'in:')+JSON.stringify(type);
   let key=__conversionKeys.get(schema);
   if(!key){key={};__conversionKeys.set(schema,key);}
   return (value,context)=>{
@@ -24,32 +32,33 @@ function __representation(type, output) {
     entries.set(value,result);return result;
   };
 }
-function __representationRaw(type, output) {
+function __representationRaw(type, output, capture) {
   switch (type.kind) {
     case 'ref': {
       let resolved;
-      return (value,context)=>(resolved??=__representation(__namedTypes[type.name],output))(value,context);
+      return (value,context)=>(resolved??=__representation(__namedTypes[type.name],output,capture))(value,context);
     }
     case 'id': return value=>value.toLowerCase();
     case 'int': return output ? value=>({Int:value.toString()}) : value=>BigInt(value && typeof value==='object' ? value.Int : value);
     case 'option': {
-      const item=__representation(type.element,output);
+      const item=__representation(type.element,output,capture);
       return item===__identity?__identity:(value,context)=>Object.hasOwn(value,'Some')?{Some:item(value.Some,context)}:{None:null};
     }
     case 'result': {
-      const ok=__representation(type.ok,output),err=__representation(type.error,output);
+      const ok=__representation(type.ok,output,capture),err=__representation(type.error,output,capture);
       return ok===__identity&&err===__identity?__identity:(value,context)=>Object.hasOwn(value,'Ok')?{Ok:ok(value.Ok,context)}:{Err:err(value.Err,context)};
     }
-    case 'f32': return output ? value => {
+    case 'f32': if(typeof __nativeF32!=='undefined'&&__nativeF32)return output?__nfOutput:capture?__nfValue:__identity;
+      return output ? value => {
       const number = __float(value);
       return Number.isFinite(number) ? number : {F32Bits:value};
     } : value => typeof value === 'number' ? __bits(value) : value.F32Bits;
     case 'list': case 'vector': {
-      const element = __representation(type.element, output);
+      const element = __representation(type.element, output,capture);
       return element === __identity ? __identity : (value,context) => Array.from(value, item=>element(item,context));
     }
     case 'record': {
-      const fields = type.fields.map(field => [field.name, __representation(field.type, output)]);
+      const fields = type.fields.map(field => [field.name, __representation(field.type, output,capture)]);
       return fields.every(([,convert]) => convert === __identity) ? __identity :
         (value,context) => {
           const result={};
