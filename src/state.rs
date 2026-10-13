@@ -299,7 +299,7 @@ impl StateEmitter<'_> {
                         let callback=self.expr(body,&local,None)?;
                         let add=if n=="count_where" {"acc+1n".into()} else if t==Type::Int {"acc+contribution".into()} else {arithmetic("+","acc","contribution",&t)};
                         let step=if n=="count_where" {format!("if(contribution)acc={add};")} else {format!("acc={add};")};
-                        return Ok(format!("(()=>{{let acc={};for(const key of __orderedKeys(rt,{i})){{__tick(ctx);const {var}=rt.tables[{i}].get(key);const contribution={callback};{step}}}return acc;}})()",if t==Type::Int {"0n".into()}else{zero(&t)}));
+                        return Ok(format!("(()=>{{let acc={};for(const key of __orderedKeys(rt,{i})){{__tick(ctx);const {var}=__cellGet(rt,{i},key);const contribution={callback};{step}}}return acc;}})()",if t==Type::Int {"0n".into()}else{zero(&t)}));
                     }
                     if n=="shared_keys" {
                         let Expr::Var(other)=&args[0] else{return Err("shared_keys root".into());};
@@ -428,9 +428,12 @@ pub(crate) fn emit_with_layout(
         execution: &execution,
         equality: super::TypedEquality::new(p, "__stateValueEqual"),
     };
-    let mut code = include_str!("state.mjs").to_string();
+    let mut code = include_str!("observers.mjs").to_string()+include_str!("state.mjs");
     let mut actions = vec![];
     let mut keeps = vec![];
+    let mut equal_results=vec![];
+    let equal_roots=p.states.iter().map(|s|{let Type::Table(_,t)=&s.ty else{return Err("state root".into())};Ok(format!("(a,b)=>{}",emitter.equality.expr(t,"a","b")?))}).collect::<LangResult<Vec<_>>>()?;
+    let mut bound_factories=vec![];
     let mut keep_invalidations = vec![Vec::<usize>::new(); p.states.len()];
     for (i, k) in execution.keeps().iter().enumerate() {
         let e = emitter.expr(&k.value, &Env::new(), Some(&k.ty))?;
@@ -467,6 +470,18 @@ pub(crate) fn emit_with_layout(
         }
     }
     for (i, a) in execution.actions().iter().enumerate() {
+        let params=(0..a.params.len()).map(|i|format!("p{i}")).collect::<Vec<_>>();
+        let captures=(0..a.params.len()).map(|i|format!("inputs[{i}](p{i})")).collect::<Vec<_>>();
+        // Immutable native scalars cannot retain mutable host aliases. Reuse their
+        // argument carrier after binding; composite capture keeps a fresh carrier.
+        // Publication reentry happens after action parameters have been consumed.
+        if a.params.iter().all(|(_,t)|matches!(t,Type::U64|Type::U32|Type::I32|Type::Bool|Type::String|Type::Unit)){
+            let assignments=(0..a.params.len()).map(|i|format!("args[{i}]=inputs[{i}](p{i});")).collect::<String>();
+            bound_factories.push(format!("(run,a,inputs,output,only)=>{{const args=new Array({});return ({})=>{{{assignments}return run(a,args,null,output,only,true);}};}}",a.params.len(),params.join(",")));
+        }else{
+            bound_factories.push(format!("(run,a,inputs,output,only)=>({})=>run(a,[{}],null,output,only,true)",params.join(","),captures.join(",")));
+        }
+        equal_results.push(format!("(a,b)=>{}",emitter.equality.expr(&a.result,"a","b")?));
         let mut env = Env::new();
         let mut vars = vec![];
         for (n, t) in &a.params {
@@ -475,10 +490,20 @@ pub(crate) fn emit_with_layout(
             vars.push(v)
         }
         let body = emitter.block(&a.body, &mut env, &a.result)?;
-        code.push_str(&format!("function __action{i}(ctx,rt{}){{__tick(ctx);try{{{body}}}catch(e){{if(e instanceof __Abort)return {{Err:e.value}};throw e;}}}}\n",if vars.is_empty(){String::new()}else{format!(",{}",vars.join(","))}));
-        actions.push(json!({"index":i,"name":a.name,"precondition":p.contracts.precondition_checks.get(&a.name),"change":a.kind==ActionKind::Change,"fallible":matches!(a.result,Type::Result(..)),"params":a.params.iter().map(|(n,t)|Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?}))).collect::<LangResult<Vec<_>>>()?,"result":descriptor(&a.result,p,&mut BTreeSet::new())?}));
+        let fallible=matches!(a.result,Type::Result(..));
+        code.push_str(&format!("function __action{i}(ctx,rt{}){{__tick(ctx);{}{body}{}}}\n",if vars.is_empty(){String::new()}else{format!(",{}",vars.join(","))},if fallible{"try{"}else{""},if fallible{"}catch(e){if(e instanceof __Abort)return {Err:e.value};throw e;}"}else{""}));
+        let summary=effects.action(&a.name).ok_or("missing action effects")?;
+        let mut reads=summary.access.reads.clone();
+        if let Some(guard)=p.contracts.precondition_checks.get(&a.name){reads.extend(effects.action(guard).ok_or("missing precondition effects")?.access.reads.clone());}
+        let roots=p.states.iter().enumerate().filter(|(_,s)|reads.contains(&s.name)).map(|(i,_)|i).collect::<Vec<_>>();
+        let single_cell=ink_core::action_shape::maximum_cell_writes(&checked_actions,i).is_some_and(|n|n<=1);
+        let fresh_result=ink_core::action_shape::fresh_native_result(&checked_actions,i);
+        actions.push(json!({"index":i,"name":a.name,"singleCell":single_cell,"freshResult":fresh_result,"roots":roots,"precondition":p.contracts.precondition_checks.get(&a.name),"change":a.kind==ActionKind::Change,"fallible":matches!(a.result,Type::Result(..)),"params":a.params.iter().map(|(n,t)|Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?}))).collect::<LangResult<Vec<_>>>()?,"result":descriptor(&a.result,p,&mut BTreeSet::new())?}));
     }
     code.push_str(&emitter.equality.source());
+    code.push_str(&format!("const __stateQueryEquals=[{}];\n",equal_results.join(",")));
+    code.push_str(&format!("const __stateRootEquals=[{}];\n",equal_roots.join(",")));
+    code.push_str(&format!("const __stateBoundFactories=[{}];\n",bound_factories.join(",")));
     let roots=p.states.iter().map(|s|{let Type::Table(k,v)=&s.ty else{return Err("state root".into())};Ok(json!({"name":s.name,"key":descriptor(k,p,&mut BTreeSet::new())?,"value":descriptor(v,p,&mut BTreeSet::new())?,"snapshotKey":ink_core::snapshot_wire::descriptor(&layout.roots.iter().find(|(name,_,_)|name==&s.name).unwrap().1),"snapshotValue":ink_core::snapshot_wire::descriptor(&layout.roots.iter().find(|(name,_,_)|name==&s.name).unwrap().2)}))}).collect::<LangResult<Vec<_>>>()?;
     let events = p
         .events
