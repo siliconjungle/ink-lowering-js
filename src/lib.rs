@@ -16,6 +16,7 @@ mod value_layout;
 mod owned_values;
 mod wire_values;
 mod compiled_values;
+mod value_capture;
 mod primitives;
 type Env = BTreeMap<String, (String, Type)>;
 fn quote(s: &str) -> String {
@@ -1703,7 +1704,7 @@ export function callOwned(name,args,limits={}){
  const result=__ownedImplementations[name](...args);return __ownedFunctions[name](result,createValueCaptureBudget(limits),0);
 }
 "#);
-    javascript.push_str(&compiled_values::emit(p,elisions,native_f32,needs_conversion)?);
+    javascript.push_str(&compiled_values::emit(p,elisions,native_f32)?);
     for (i, f) in p.functions.iter().enumerate() {
         if matches!(f.result, Type::List(_))
             && (!elisions.is_empty() || interface["functions"][i]["result"]["element"]

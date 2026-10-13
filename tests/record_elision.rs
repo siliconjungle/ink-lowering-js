@@ -134,7 +134,7 @@ fn eq(a:Packet,b:Packet)->Bool{return a==b;}
     assert_eq!(selected.manifest["wire"], ordinary.manifest["wire"]);
     let dir = std::env::temp_dir().join(format!("ink-record-elision-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
-    let extra="\nexport {__stateMetadata,__stateInputCaptures};export function captureProbe(value,cells,depth){const a=__stateMetadata.actions.find(a=>a.name==='echo'),budget={cells};try {const owned=__stateInputCaptures[a.index][0](value,budget,depth);return {value:__stateOutput(owned,a.params[0].type),cells:budget.cells};}catch(e){return {error:e.message,cells:budget.cells};}}";
+    let extra="\nexport {__stateMetadata,__stateInputCaptures};export function wireCaptureProbe(value,limits,literal){const codec=compiledValues.identity.params[0];let budget;try {budget=createValueCaptureBudget(limits);const owned=literal?__compiledBindings.get(codec).capture(value,budget,0):wireCapturePlan(wireValuePlan(valueCodecs.identity.result)).capture(value,budget,0);const result=literal?codec.materialize(__compiledHandle(codec.identity,owned)):owned;return {value:result,remaining:budget.remaining,bytes:budget.bytes};}catch(e){return {error:e.message,remaining:budget?.remaining,bytes:budget?.bytes};}}export function captureProbe(value,cells,depth){const a=__stateMetadata.actions.find(a=>a.name==='echo'),budget={cells};try {const owned=__stateInputCaptures[a.index][0](value,budget,depth);return {value:__stateOutput(owned,a.params[0].type),cells:budget.cells};}catch(e){return {error:e.message,cells:budget.cells};}}";
     fs::write(dir.join("private.mjs"), selected.javascript + extra).unwrap();
     fs::write(dir.join("ordinary.mjs"), ordinary.javascript + extra).unwrap();
     fs::write(dir.join("test.mjs"),r#"
@@ -173,6 +173,9 @@ for(const limits of [{values:0},{values:2},{depth:0},{depth:2},{bytes:200}]){con
 const c=ink.compiledValues.collision,collisionResult=ink.callCompiled('collision',[c.params[0].capture({value:3}),c.params[1].capture(4)]);assert.equal(c.result.materialize(collisionResult),7);const collisionBytes=ink.valueCodecs.collision.arguments.encode({value:{value:3},other:4});assert.deepEqual(ink.callBinary('collision',collisionBytes),plain.callBinary('collision',collisionBytes));
 const inputCodec=ink.compiledValues.identity.params[0],resultCodec=ink.compiledValues.identity.result;
 const inputHandle=inputCodec.capture(packet),resultHandle=ink.callCompiled('identity',[inputHandle]);
+for(const value of [...invalid,{...packet,extra:1},{...packet,exact:{value:{Int:'-0'}}},{...packet,proto:{['__proto__']:'\ud800'}},{...packet,float:{value:Infinity}}])for(const limits of [{nodes:0},{nodes:1},{nodes:2},{nodes:5},{nodes:20},{nodes:1000000},{depth:0},{depth:1},{depth:3},{depth:128},{bytes:0},{bytes:40},{bytes:41},{bytes:50},{bytes:200},{bytes:16777216}])assert.deepEqual(ink.wireCaptureProbe(value,limits,true),ink.wireCaptureProbe(value,limits,false));
+for(const limits of [{nodes:1},{nodes:2},{nodes:10},{nodes:1000000},{bytes:40},{bytes:100},{depth:2}]){const trace=literal=>{const reads=[],host={};for(const key of Object.keys(packet))Object.defineProperty(host,key,{enumerable:true,get(){reads.push(key);return packet[key];}});return {result:ink.wireCaptureProbe(host,limits,literal),reads};};assert.deepEqual(trace(true),trace(false));}
+
 assert.equal(Object.isFrozen(inputHandle),true);assert.equal(Object.getPrototypeOf(inputHandle),null);assert.deepEqual(Object.keys(inputHandle),[]);
 assert.deepEqual(resultCodec.materialize(resultHandle),p);
 const publicReply=resultCodec.materialize(resultHandle);publicReply.pair.first.value.value.words[0]=88;assert.equal(resultCodec.materialize(resultHandle).pair.first.value.value.words[0],1);

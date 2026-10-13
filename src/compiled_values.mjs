@@ -12,13 +12,12 @@ function __compiledUnwrap(handle,identity){
  return entry.value;
 }
 function __compiledCodec(schema,capture,read,write,copy){
- const publicCodec=new ValueCodec(schema),privateCodec=createCompiledValueCodec(schema,read);
+ const privateCodec=createCompiledValueCodec(schema,read),publicCodec=privateCodec;
  const identity=schema.identity;
  const codec=Object.freeze({
   identity,
   capture(value,limits={}){
-   const owned=publicCodec.capture(value,limits);
-   return __compiledHandle(identity,capture(owned,new WeakMap()));
+   return __compiledHandle(identity,capture(value,createValueCaptureBudget(limits),0));
   },
   decode(bytes,limits={}){return __compiledHandle(identity,privateCodec.decode(bytes,limits));},
   decodeCompact(bytes,limits={}){return __compiledHandle(identity,privateCodec.compact().decode(bytes,limits));},
@@ -26,7 +25,7 @@ function __compiledCodec(schema,capture,read,write,copy){
   encodeCompact(handle,limits={}){const value=__compiledUnwrap(handle,identity);return publicCodec.compact().encodeWith(writer=>write(writer,value,true),limits);},
   materialize(handle,limits={}){return copy(__compiledUnwrap(handle,identity),createValueCaptureBudget(limits),0);},
  });
- __compiledBindings.set(codec,{publicCodec,write});return codec;
+ __compiledBindings.set(codec,{publicCodec,write,capture});return codec;
 }
 
 function __compiledEncodeResult(entry,value,limits,compact){

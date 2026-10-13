@@ -98,7 +98,6 @@ pub(super) fn emit(
     p: &Program,
     elisions: &BTreeSet<String>,
     native_f32: bool,
-    conversion: bool,
 ) -> LangResult<String> {
     let named = p
         .records
@@ -110,6 +109,7 @@ pub(super) fn emit(
             ))
         })
         .collect::<LangResult<BTreeMap<_, _>>>()?;
+    let mut capture = super::value_capture::Captures::new(elisions, native_f32);
     let mut read = super::wire_values::WireValues::private(elisions, native_f32);
     let mut owned = super::owned_values::OwnedValues::private(p, elisions, native_f32);
     let mut write = Writers {
@@ -154,11 +154,7 @@ pub(super) fn emit(
             let name = format!("__compiledCodec{}", roots.len());
             // Factories remain lazy so unused exported value boundaries do not
             // eagerly construct recursive codecs at module initialization.
-            let capture = if conversion {
-                format!("__representation({logical},false,true)")
-            } else {
-                "value=>value".into()
-            };
+            let capture = capture.compile(&schema["root"], &schema["named"])?;
             definitions.push_str(&format!("let {name}Value;function {name}(){{return {name}Value??=__compiledCodec({schema},{capture},{reader},{writer},{copy});}}\n"));
             roots.insert(key, name.clone());
             codecs.push(name);
@@ -184,7 +180,8 @@ pub(super) fn emit(
                 .unwrap_or("null".into())
         ));
     }
-    let mut source = read.source()
+    let mut source = capture.source()
+        + &read.source()
         + &owned
             .source()
             .replace("__ownedValue", "__compiledOwnedValue");
