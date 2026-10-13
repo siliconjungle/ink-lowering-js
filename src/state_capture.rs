@@ -37,6 +37,7 @@ impl<'a> Captures<'a> {
                 let (min, max) = if kind == "u32" { ("0", "4294967295") } else { ("-2147483648", "2147483647") };
                 format!("if(typeof value!=='number'||!Number.isInteger(value)||value<{min}||value>{max})throw Error('invalid {kind}');return value===0?0:value;")
             }
+            "u64" => "return __stateWord(value);".into(),
             "bool" => "if(typeof value!=='boolean')throw Error('invalid Bool');return value;".into(),
             "unit" => "if(value!==null)throw Error('invalid Unit');return null;".into(),
             "string" => "if(typeof value!=='string'||!value.isWellFormed())throw Error('invalid String');return value;".into(),

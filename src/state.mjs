@@ -106,9 +106,13 @@ function __createState(meta,implementations,captures=null){
    if(a.fallible && Object.hasOwn(value,'Err')){__rollback(rt,mark);__restoreKeeps(rt);return resultOnly?result:{result,committed:false,version,events:[]};}
    if(version===18446744073709551615n)throw Error('commit sequence exhausted');
    const next=version+1n;
-   const events=resultOnly?null:rt.staged.map(([channel,value],i)=>({commit:next,position:BigInt(i),channel,value:eventOutput.get(channel)(value)}));
-   const pending=rt.staged.map(([channel,value],i)=>({commit:next,position:BigInt(i),channel,value}));
-   rt.version=next;for(const event of pending)rt.outbox.push(event);
+   const events=resultOnly?null:new Array(rt.staged.length);
+   for(let i=0;i<rt.staged.length;i++){
+    const [channel,value]=rt.staged[i],position=BigInt(i);
+    rt.outbox.push({commit:next,position,channel,value});
+    if(events)events[i]={commit:next,position,channel,value:eventOutput.get(channel)(value)};
+   }
+   rt.version=next;
    return resultOnly?result:{result,committed:true,version:next,events};
   }catch(e){__rollback(rt,mark);__restoreKeeps(rt);rt.version=version;rt.outbox=outbox;rt.outbox.length=outboxLength;throw e;}
   finally{rt.staged.length=0;rt.busy=false;rt.keepUndo.length=0;rt.keepSeen.clear();for(const seen of rt.seen)seen.clear();if(!rt.host)rt.undo.length=0;}
@@ -143,7 +147,15 @@ function __createState(meta,implementations,captures=null){
   rollbackTransaction(){if(rt.host){__rollback(rt,0);rt.version=rt.host.version;rt.outbox=rt.host.outbox;rt.outbox.length=rt.host.length;rt.host=null;rt.keeps.fill(undefined);}},
   get version(){return rt.version;},
   get outbox(){return rt.outbox.map(e=>({...e,value:eventOutput.get(e.channel)(e.value)}));},
-  acknowledgeThrough(commit,position){if(rt.busy)throw Error('state operation already in progress');commit=__stateInput(commit,{kind:'u64'},{cells:1});position=__stateInput(position,{kind:'u64'},{cells:1});rt.outbox=rt.outbox.filter(e=>e.commit>commit||(e.commit===commit&&e.position>position));},
+  acknowledgeThrough(commit,position){
+   if(rt.busy)throw Error('state operation already in progress');commit=__stateWord(commit);position=__stateWord(position);
+   const last=rt.outbox.at(-1);if(!last)return;
+   if(last.commit<commit||(last.commit===commit&&last.position<=position)){
+    // A host transaction retains this array as its before-image.
+    if(rt.host)rt.outbox=[];else rt.outbox.length=0;return;
+   }
+   rt.outbox=rt.outbox.filter(e=>e.commit>commit||(e.commit===commit&&e.position>position));
+  },
   async invokeAsync(name,args){
    if(typeof __parallelInvokeAsync!=='function')return invoke(name,args);
    if(rt.busy)throw Error('state operation already in progress');const captured=structuredClone(args);rt.busy=true;
