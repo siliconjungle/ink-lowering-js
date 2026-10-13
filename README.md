@@ -156,6 +156,12 @@ schema. Every call still checks resource limits and produces owned composite
 values; host values are never cached between calls. These are literal value
 operations, with no algorithm or theorem-name recognizer.
 
+`state.prepare(name, args)` validates and captures owned inputs once. Its opaque
+token works only with that state instance; `state.invokePrepared(token)` reuses
+the captured inputs while running preconditions, transactions and reply
+detachment on every invocation. Preparation cost is separate from invocation
+cost. Host transaction rollback also restores acknowledged outbox entries.
+
 ## License
 
 Project code and documentation are [MIT licensed](LICENSE). Third-party dependencies,

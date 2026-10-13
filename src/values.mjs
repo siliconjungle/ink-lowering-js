@@ -76,6 +76,11 @@ function __representationRaw(type, output, capture) {
   }
 }
 // @helper state-validation
+function __stateWord(value){
+ if(typeof value==='number'&&!Number.isSafeInteger(value))throw Error('u64 requires an exact integer');
+ if(!['bigint','number','string'].includes(typeof value)||typeof value==='string'&&!/^(0|[1-9][0-9]*)$/.test(value))throw Error('invalid u64');
+ const n=BigInt(value);if(n<0n||n>18446744073709551615n)throw Error('invalid u64');return n;
+}
 // Compile the capture traversal once. Each invocation still validates and owns
 // every public container; no host value is retained between calls.
 const __stateCaptures=new WeakMap();
@@ -100,6 +105,7 @@ function __compileStateCapture(type){
    const min=type.kind==='u32'?0:-2147483648,max=type.kind==='u32'?4294967295:2147483647;
    return limited(value=>{if(typeof value!=='number'||!Number.isInteger(value)||value<min||value>max)throw Error('invalid '+type.kind);return value===0?0:value;});
   }
+  case 'u64':return limited(__stateWord);
   case 'bool':return limited(value=>{if(typeof value!=='boolean')throw Error('invalid Bool');return value;});
   case 'unit':return limited(value=>{if(value!==null)throw Error('invalid Unit');return null;});
   case 'string':return limited(value=>{if(typeof value!=='string'||!value.isWellFormed())throw Error('invalid String');return value;});
@@ -140,11 +146,7 @@ function __stateInput(value,type,budget={cells:1000000},depth=0){
     case 'ref':return input(value,__namedTypes[type.name]);
     case 'u32':return integer(0,4294967295);
     case 'i32':return integer(-2147483648,2147483647);
-    case 'u64':{
-      if(typeof value==='number'&&!Number.isSafeInteger(value))throw Error('u64 requires an exact integer');
-      if(!['bigint','number','string'].includes(typeof value)||typeof value==='string'&&!/^(0|[1-9][0-9]*)$/.test(value))throw Error('invalid u64');
-      const n=BigInt(value);if(n<0n||n>18446744073709551615n)throw Error('invalid u64');return n;
-    }
+    case 'u64':return __stateWord(value);
     case 'int':{
       if(typeof value==='bigint')return value;
       if(!tagged('Int')||typeof value.Int!=='string'||!/^(-?[0-9]+)$/.test(value.Int))throw Error('invalid Int');return BigInt(value.Int);
