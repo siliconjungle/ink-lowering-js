@@ -922,6 +922,13 @@ impl Emitter<'_> {
                         self.parallel(xv, grain, &args[1], env, inner, inner)?
                     ));
                 }
+                if n=="borrow_range" {
+                    let start=self.expr(&args[0],env,Some(&Type::U32))?;let start=self.bind(&start);
+                    let count=self.expr(&args[1],env,Some(&Type::U32))?;let count=self.bind(&count);
+                    let view=self.bind(&format!("{xv}.range({start},{count})"));
+                    let (body,local)=Self::callback(&args[2],env,&[(view,xt.clone())])?;
+                    return self.expr(body,&local,Some(&t));
+                }
                 if n == "split_at" {
                     let at = self.expr(&args[0], env, Some(&Type::U32))?;
                     let at = self.bind(&at);

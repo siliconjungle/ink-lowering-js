@@ -5,6 +5,11 @@ use ink_core::{
 };
 use serde_json::{json, Value};
 use std::{fs, process::Command};
+fn trusted_surface(javascript:&str)->&str {
+    // Checked binary ingress legitimately contains validation and DataView
+    // support. Audit the separately emitted trusted-native implementation/API.
+    javascript.split_once(ink_abi::VALUE_WIRE_JS_SOURCE).expect("checked wire boundary missing").0
+}
 fn wire(v: Value, t: &Type, p: &ink_core::syntax::Program) -> Value {
     match t {
         Type::U64 => json!(v.as_u64().unwrap().to_string()),
@@ -89,7 +94,7 @@ fn __in(x:u32)->u32{return x+1;}
         "capture(",
     ] {
         assert!(
-            !emitted.javascript.contains(forbidden),
+            !trusted_surface(&emitted.javascript).contains(forbidden),
             "unexpected runtime checker machinery: {forbidden}"
         );
     }
@@ -331,7 +336,7 @@ fn word_only_output_binds_direct_functions_and_omits_unused_runtime_helpers() {
     let module = CheckedModule::from_source(parse("module X;fn f(x:u32,y:u32)->u32{return x*y+x;}fn id(xs:List<u32>)->List<u32>{return xs;}").unwrap()).unwrap();
     let emitted = ink_lowering_js::lower(&module).unwrap();
     assert!(emitted.javascript.contains("function __fn0(v0,v1){"));
-    assert!(!emitted.javascript.contains("(()=>"));
+    assert!(!trusted_surface(&emitted.javascript).contains("(()=>"));
     assert!(emitted
         .javascript
         .contains("[f.name,__implementations[f.index]]"));
@@ -345,7 +350,7 @@ fn word_only_output_binds_direct_functions_and_omits_unused_runtime_helpers() {
         "budget",
     ] {
         assert!(
-            !emitted.javascript.contains(forbidden),
+            !trusted_surface(&emitted.javascript).contains(forbidden),
             "unused machinery: {forbidden}"
         );
     }
