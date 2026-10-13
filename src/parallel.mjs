@@ -10,8 +10,8 @@ __parallelRequested=Math.min(32,Math.max(1,Number.isInteger(__parallelRequested)
 const __parallelStats={dispatches:0,workers:0,workerIds:new Set(),lastWorkerIds:new Set()};
 export function parallelStatistics(){return {dispatches:__parallelStats.dispatches,workers:__parallelStats.workers,workerIds:[...__parallelStats.workerIds],lastWorkerIds:[...__parallelStats.lastWorkerIds]};}
 export function setParallelism(n){if(!Number.isInteger(n)||n<1||n>32)throw RangeError('worker count must be 1..32');__parallelRequested=n;}
-function __parallelPack(v){if(typeof v==='bigint')return ['b',String(v)];if(v===null||typeof v!=='object')return ['s',v];if(Array.isArray(v)||ArrayBuffer.isView(v))return ['a',Array.from(v,__parallelPack)];return ['o',Object.entries(v).map(([k,v])=>[k,__parallelPack(v)])];}
-function __parallelUnpack(v){if(v[0]==='b')return BigInt(v[1]);if(v[0]==='s')return v[1];if(v[0]==='a')return v[1].map(__parallelUnpack);if(v[0]==='o')return Object.fromEntries(v[1].map(([k,v])=>[k,__parallelUnpack(v)]));throw Error('invalid worker value');}
+function __parallelPack(v){if(typeof v==='number'&&(!Number.isFinite(v)||Object.is(v,-0)))return ['n',Object.is(v,-0)?'-0':String(v)];if(typeof v==='bigint')return ['b',String(v)];if(v===null||typeof v!=='object')return ['s',v];if(Array.isArray(v)||ArrayBuffer.isView(v))return ['a',Array.from(v,__parallelPack)];return ['o',Object.entries(v).map(([k,v])=>[k,__parallelPack(v)])];}
+function __parallelUnpack(v){if(v[0]==='n')return Number(v[1]);if(v[0]==='b')return BigInt(v[1]);if(v[0]==='s')return v[1];if(v[0]==='a')return v[1].map(__parallelUnpack);if(v[0]==='o')return Object.fromEntries(v[1].map(([k,v])=>[k,__parallelUnpack(v)]));throw Error('invalid worker value');}
 function __parallelReply(task){
  const header=new Int32Array(task.header),data=new Uint8Array(task.data);
  try{
