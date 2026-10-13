@@ -13,6 +13,7 @@ pub mod portable_definition;
 mod state;
 mod state_capture;
 mod owned_values;
+mod wire_values;
 mod primitives;
 type Env = BTreeMap<String, (String, Type)>;
 fn quote(s: &str) -> String {
@@ -1638,8 +1639,18 @@ export const functions = Object.freeze(Object.fromEntries(metadata.functions.fil
     }
     javascript.push_str(&owned.source());
     javascript.push_str(&format!("const __ownedFunctions=Object.freeze(Object.fromEntries([{}]));\n", owned_entries.join(",")));
+    let mut wire = wire_values::WireValues::new();
+    let mut wire_entries = Vec::new();
+    for (name, schema) in interface["wire"]["functions"].as_object().ok_or("wire functions")? {
+        if !schema["unsupported"].is_null() { continue; }
+        if let (Ok(arguments), Ok(result)) = (wire.for_schema(&schema["arguments"]), wire.for_schema(&schema["result"])) {
+            wire_entries.push(format!("[{},[{},{}]]",quote(name),arguments,result));
+        }
+    }
+    javascript.push_str(&wire.source());
+    javascript.push_str(&format!("const __wireReaders=Object.freeze(Object.fromEntries([{}]));\n",wire_entries.join(",")));
     javascript.push_str(r#"
-export const valueCodecs=(()=>{const codecs={};for(const [name,s] of Object.entries(metadata.wire.functions)){if(s.unsupported)continue;let value;Object.defineProperty(codecs,name,{enumerable:true,get:()=>value??=(Object.freeze({arguments:new ValueCodec(s.arguments),result:new ValueCodec(s.result)}))});}return Object.freeze(codecs);})();
+export const valueCodecs=(()=>{const codecs={};for(const [name,s] of Object.entries(metadata.wire.functions)){if(s.unsupported)continue;let value;Object.defineProperty(codecs,name,{enumerable:true,get:()=>value??=(Object.freeze(Object.hasOwn(__wireReaders,name)?{arguments:createCompiledValueCodec(s.arguments,__wireReaders[name][0]),result:createCompiledValueCodec(s.result,__wireReaders[name][1])}:{arguments:new ValueCodec(s.arguments),result:new ValueCodec(s.result)}))});}return Object.freeze(codecs);})();
 function __callEncoded(name,bytes,limits,compact){
  const f=metadata.functions.find(f=>f.name===name&&!f.internal),codecs=valueCodecs[name];
  if(!f||!codecs)throw Error('unsupported binary function');

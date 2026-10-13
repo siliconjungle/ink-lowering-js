@@ -87,6 +87,11 @@ algorithm recognition or runtime source generation is involved. The copy obeys
 the shared ABI's byte/node/depth limits. Execution itself remains unbounded, and
 declared preconditions still run. Internal owners and unsupported wire types
 reject explicitly. Ordinary `call` retains its existing aliasing contract.
+Compiler-derived `valueCodecs` can use literal materialisers with static field
+names. Complete generic portable/compact validation runs first, including schema,
+Unicode, count and resource checks. Materialisation runs synchronously and returns
+owned values. Arbitrary runtime `createValueCodec` schemas retain generic decoding;
+the emitted materialisers are trusted backend code, not equality certificates.
 Resource policy belongs to the application. This is an intentional ABI change
 from `ink-javascript-values-v1` to `ink-javascript-trusted-values-v2`.
 

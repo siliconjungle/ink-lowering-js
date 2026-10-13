@@ -22,7 +22,7 @@ query echo(packet:Packet)->Packet { return packet; }
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("program.mjs"), format!("{}\nexport{{__stateMetadata,__stateInputCaptures}};export function reference(v,t,b,d){{return __stateInput(v,t,b,d);}}", emitted.javascript)).unwrap();
     fs::write(root.join("test.mjs"), r#"
-import assert from 'node:assert/strict';import {call,callOwned,valueCodecs,createState,__stateMetadata,__stateInputCaptures,reference}from './program.mjs';
+import assert from 'node:assert/strict';import {call,callOwned,valueCodecs,ValueCodec,createState,__stateMetadata,__stateInputCaptures,reference}from './program.mjs';
 const a=__stateMetadata.actions.find(a=>a.name==='echo'),capture=__stateInputCaptures[a.index][0],type=a.params[0].type;
 const tree=call('node',[call('node',[call('leaf',[])])]);
 const packet={tree,words:[0,4294967295],pair:[-0,{F32Bits:0x7fc12345}],option:{Some:4},result:{Err:'雪'},wide:18446744073709551615n,exact:{Int:'-12345678901234567890'},tag:'0123456789ABCDEF0123456789ABCDEF',mode:'Mode.Off',['__proto__']:'own'};
@@ -30,6 +30,10 @@ const objects=v=>{const found=new Set(),visit=x=>{if(x&&typeof x==='object'&&!fo
 for(const [name,input]of [['owned_packet',packet],['owned_tree',tree],['owned_words',new Uint32Array([1,2,3])]]){
  const codec=valueCodecs[name].result,plain=call(name,[input]),bytes=codec.encode(plain),owned=callOwned(name,[input]);
  assert.deepEqual(owned,codec.decode(bytes));const original=objects(input);for(const node of objects(owned))assert.equal(original.has(node),false);
+ const generic=new ValueCodec(codec.descriptor);assert.deepEqual(codec.decode(bytes),generic.decode(bytes));
+ for(let i=0;i<bytes.length;i++){const bad=bytes.slice();bad[i]^=255;const accepts=fn=>{try{fn();return true;}catch{return false;}};assert.equal(accepts(()=>codec.decode(bad)),accepts(()=>generic.decode(bad)));}
+ const compact=codec.compact(),plainCompact=generic.compact(),short=compact.encode(plain);assert.deepEqual(compact.decode(short),plainCompact.decode(short));
+ for(let i=0;i<short.length;i++){const bad=short.slice();bad[i]^=255;const accepts=fn=>{try{fn();return true;}catch{return false;}};assert.equal(accepts(()=>compact.decode(bad)),accepts(()=>plainCompact.decode(bad)));}
  for(const limits of [{bytes:bytes.length},{bytes:bytes.length-1},{nodes:0},{nodes:1},{nodes:10},{depth:0},{depth:1},{depth:128}]){
   const accepts=fn=>{try{fn();return true;}catch{return false;}};assert.equal(accepts(()=>callOwned(name,[input],limits)),accepts(()=>codec.encode(plain,limits)));
  }
