@@ -7,6 +7,7 @@ use std::{
 };
 struct Emit<'a> {
     elisions: BTreeSet<String>,
+    sums:super::sum_layout::Sums,
     program: &'a ink_core::syntax::Program,
     projection: &'a ink_core::action_model::Projection,
     types: BTreeMap<String, (usize, Type, Sort)>,
@@ -53,7 +54,7 @@ impl Emit<'_> {
         } else {format!("return __node(0,[{}]);",args.join(","))}
     },
     Type::Option(a)=>format!("if(Object.hasOwn(v,'Some'))return __node(1,[{}]);return __node(0,[]);",self.read_mode(a,"v.Some","d+1","internal")?),
-    Type::Result(a,b)=>format!("if(Object.hasOwn(v,'Ok'))return __node(0,[{}]);return __node(1,[{}]);",self.read_mode(a,"v.Ok","d+1","internal")?,self.read_mode(b,"v.Err","d+1","internal")?),
+    Type::Result(a,b)=>{let view=self.sums.view_type(p,t,"v")?;format!("const branch=internal?{view}:v;if(Object.hasOwn(branch,'Ok'))return __node(0,[{}]);return __node(1,[{}]);",self.read_mode(a,"branch.Ok","d+1","internal")?,self.read_mode(b,"branch.Err","d+1","internal")?)},
     Type::Vector(a,n)=>{let args=(0..*n).map(|i|self.read_mode(a,&format!("v[{i}]"),"d+1","internal")).collect::<LangResult<Vec<_>>>()?;format!("return __node(0,[{}]);",args.join(","))},
     Type::List(a)=>format!("let tail=__node(0,[]);for(let i=v.length-1;i>=0;i--)tail=__node(1,[{},tail]);return tail;",self.read_mode(a,"v[i]","d+1","internal")?),
     _=>return Err("unsupported standalone source codec".into()),
@@ -96,10 +97,10 @@ impl Emit<'_> {
         Ok(out)
     }
 }
-pub(crate) fn maintained_support(module: &ink_core::core::CheckedModule, views:&ink_core::maintained::CheckedViews,elisions:&std::collections::BTreeSet<String>) -> LangResult<String> {
+pub(crate) fn maintained_support(module: &ink_core::core::CheckedModule, views:&ink_core::maintained::CheckedViews,elisions:&std::collections::BTreeSet<String>,sums:&super::sum_layout::Sums) -> LangResult<String> {
     let projection=ink_core::action_model::Projection::derive(module)?;
     let types=projection.types.iter().enumerate().map(|(i,(key,sort))|Ok((key.clone(),(i,serde_json::from_str::<Type>(key).map_err(|e|e.to_string())?,sort.clone())))).collect::<LangResult<BTreeMap<_,_>>>()?;
-    let e=Emit{elisions:elisions.clone(),program:module.program(),projection:&projection,types};
+    let e=Emit{elisions:elisions.clone(),sums:sums.clone(),program:module.program(),projection:&projection,types};
     let mut out=super::definition_literal::lower(views.definition(),&projection.codec_declarations()?)?;
     out.push_str("const __encoder=new TextEncoder();\n");
     out.push_str(&e.codecs()?);
@@ -138,7 +139,7 @@ pub fn lower(checked: &CheckedRepresentation) -> LangResult<String> {
             ))
         })
         .collect::<LangResult<BTreeMap<_, _>>>()?;
-    let e = Emit { elisions:Default::default(), program:checked.module().program(),projection:checked.projection(), types };
+    let e = Emit { elisions:Default::default(), sums:Default::default(), program:checked.module().program(),projection:checked.projection(), types };
     let p = checked.module().program();
     let plan = checked.plan();
     let projection = checked.projection();

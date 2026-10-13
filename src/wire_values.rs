@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) struct WireValues {
     elisions: BTreeSet<String>,
+    sums:super::sum_layout::Sums,
     private: bool,
     native_f32: bool,
     functions: BTreeMap<String, (String, String)>,
@@ -14,6 +15,7 @@ impl WireValues {
     pub fn new() -> Self {
         Self {
             elisions: BTreeSet::new(),
+            sums:Default::default(),
             private: false,
             native_f32: false,
             functions: BTreeMap::new(),
@@ -22,11 +24,13 @@ impl WireValues {
     pub fn private(elisions: &BTreeSet<String>, native_f32: bool) -> Self {
         Self {
             elisions: elisions.clone(),
+            sums:Default::default(),
             private: true,
             native_f32,
             functions: BTreeMap::new(),
         }
     }
+    pub fn with_sums(mut self,sums:&super::sum_layout::Sums)->Self{self.sums=sums.clone();self}
     pub fn source(&self) -> String {
         self.functions
             .values()
@@ -133,9 +137,19 @@ impl WireValues {
                 format!("const value=reader.byte()?{{Some:{next}(reader)}}:{{None:null}};")
             }
             "result" => {
-                let yes = self.compile(&ty["ok"], named, true)?;
-                let no = self.compile(&ty["error"], named, true)?;
-                format!("const value=reader.byte()?{{Err:{no}(reader)}}:{{Ok:{yes}(reader)}};")
+                if self.private && self.sums.selected(ty){
+                    let leaves=super::sum_layout::Sums::leaves(ty);let mut readers=Vec::new();
+                    for leaf in &leaves{readers.push(self.compile(leaf,named,true)?);}
+                    fn branch(at:usize,readers:&[String])->String{
+                        let count=readers.len()-1;
+                        let tail=if at+1==count{format!("value={{tag:{count},payload:{}(reader)}};",readers[count])}else{let next=at+1;format!("const end{next}=reader.frame();{}reader.finish(end{next});",branch(next,readers))};
+                        format!("if(reader.byte()===0){{value={{tag:{at},payload:{}(reader)}};}}else{{{tail}}}",readers[at])
+                    }
+                    format!("let value;{}",branch(0,&readers))
+                }else{
+                    let yes=self.compile(&ty["ok"],named,true)?;let no=self.compile(&ty["error"],named,true)?;
+                    format!("const value=reader.byte()?{{Err:{no}(reader)}}:{{Ok:{yes}(reader)}};")
+                }
             }
             _ => return Err("unsupported literal wire type".into()),
         };
