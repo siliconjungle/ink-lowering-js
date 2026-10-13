@@ -80,6 +80,13 @@ keep values stable during calls. Invalid caller values are outside the ABI
 contract and have no specified diagnostic or result.
 
 Pure calls have no execution timeout or collection size limit.
+`callOwned(name, args, limits)` has the same stable, well-typed input contract as
+`call`, but returns a canonical logical result with every container detached from
+caller inputs. Literal typed copy functions use static field names; no JSON
+algorithm recognition or runtime source generation is involved. The copy obeys
+the shared ABI's byte/node/depth limits. Execution itself remains unbounded, and
+declared preconditions still run. Internal owners and unsupported wire types
+reject explicitly. Ordinary `call` retains its existing aliasing contract.
 Resource policy belongs to the application. This is an intentional ABI change
 from `ink-javascript-values-v1` to `ink-javascript-trusted-values-v2`.
 

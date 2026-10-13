@@ -12,6 +12,7 @@ pub mod definition;
 pub mod portable_definition;
 mod state;
 mod state_capture;
+mod owned_values;
 mod primitives;
 type Env = BTreeMap<String, (String, Type)>;
 fn quote(s: &str) -> String {
@@ -1624,6 +1625,19 @@ export const functions = Object.freeze(Object.fromEntries(metadata.functions.fil
     }
     javascript.push_str(ink_abi::VALUE_WIRE_JS_SOURCE);
     javascript.push_str(ink_abi::JSON_VALUE_JS_SOURCE);
+    let mut owned = owned_values::OwnedValues::new(p);
+    let mut owned_entries = Vec::new();
+    let mut unsupported_owned = Vec::new();
+    for (i, function) in p.functions.iter().enumerate() {
+        if interface["functions"][i]["internal"] == json!(true)
+            || !interface["wire"]["functions"][&function.name]["unsupported"].is_null() { continue; }
+        match owned.for_type(&function.result) {
+            Ok(copy) => owned_entries.push(format!("[{},{}]", quote(&function.name), copy)),
+            Err(reason) => unsupported_owned.push(json!({"function":function.name,"reason":reason})),
+        }
+    }
+    javascript.push_str(&owned.source());
+    javascript.push_str(&format!("const __ownedFunctions=Object.freeze(Object.fromEntries([{}]));\n", owned_entries.join(",")));
     javascript.push_str(r#"
 export const valueCodecs=(()=>{const codecs={};for(const [name,s] of Object.entries(metadata.wire.functions)){if(s.unsupported)continue;let value;Object.defineProperty(codecs,name,{enumerable:true,get:()=>value??=(Object.freeze({arguments:new ValueCodec(s.arguments),result:new ValueCodec(s.result)}))});}return Object.freeze(codecs);})();
 function __callEncoded(name,bytes,limits,compact){
@@ -1636,6 +1650,12 @@ function __callEncoded(name,bytes,limits,compact){
 }
 export function callBinary(name,bytes,limits={}){return __callEncoded(name,bytes,limits,false);}
 export function callCompact(name,bytes,limits={}){return __callEncoded(name,bytes,limits,true);}
+// Same stable, well-typed caller inputs as call; the result owns every container.
+// The checked source return type justifies trusted copying, not arbitrary input.
+export function callOwned(name,args,limits={}){
+ if(!Object.hasOwn(__ownedFunctions,name)||!Object.hasOwn(functions,name))throw Error('unsupported owned function');
+ const result=call(name,args);return __ownedFunctions[name](result,createValueCaptureBudget(limits),0);
+}
 "#);
     for (i, f) in p.functions.iter().enumerate() {
         if matches!(f.result, Type::List(_))
@@ -1694,6 +1714,7 @@ export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.f
         "JavaScript engine and host"
     ]);
     manifest["caller_contract"]=json!("trusted, well-typed target-native values; no input validation, snapshot capture or host resource budgets");
+    manifest["owned_result_contract"] = json!({"functions":owned_entries.len(),"unsupported":unsupported_owned,"inputs":"same trusted caller contract","results":"canonical detached values with ABI byte/node/depth limits"});
     manifest["scope"]=json!("trusted pure functions and temporary collections; state/actions with portable snapshots and ordered transaction events");
     Ok(Emission {
         javascript,
