@@ -29,6 +29,10 @@ type Env = BTreeMap<String, (String, Type)>;
 /// [0, 2^64): and/or/xor stay in range and other results wrap explicitly.
 /// Operands may be evaluated only once, so rotations call shared helpers.
 pub(crate) fn word_expression(name: &str, a: &str, b: &str, t: &Type) -> String {
+    // Width conversions cross Number/BigInt carriers; bind the operand once
+    // at the call site and preserve the exact unsigned low bits.
+    if name == "word_widen_u32_to_u64" { return format!("BigInt({a})"); }
+    if name == "word_narrow_u64_to_u32" { return format!("Number(BigInt.asUintN(32,{a}))"); }
     match t {
         Type::U32 | Type::I32 => {
             let signed = *t == Type::I32;
