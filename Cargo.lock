@@ -65,7 +65,7 @@ dependencies = [
 [[package]]
 name = "ink-abi"
 version = "0.1.0"
-source = "git+https://github.com/siliconjungle/ink-abi?rev=90a7a93c6be095cb906601ec2b40c8a1467adbdf#90a7a93c6be095cb906601ec2b40c8a1467adbdf"
+source = "git+https://github.com/siliconjungle/ink-abi?rev=70c999f51643124da9ff488b720f7d0805dd2ae4#70c999f51643124da9ff488b720f7d0805dd2ae4"
 dependencies = [
  "serde",
  "serde_json",
@@ -75,7 +75,7 @@ dependencies = [
 [[package]]
 name = "ink-core"
 version = "0.1.0"
-source = "git+https://github.com/siliconjungle/ink-lang?rev=8de6fd78459f67f96084e1f509227c9393ef4439#8de6fd78459f67f96084e1f509227c9393ef4439"
+source = "git+https://github.com/siliconjungle/ink-lang?rev=987c48c119af7cc603807dd22a2782181d06b205#987c48c119af7cc603807dd22a2782181d06b205"
 dependencies = [
  "num-bigint",
  "num-traits",

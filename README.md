@@ -124,6 +124,69 @@ The default Number output policy rejects decimal precision loss; use
 `numbers: 'bigint'` for exact integers or `numbers: 'string'` for exact tokens.
 See the pinned ABI's README for the complete input and numeric contracts.
 
+### Direct typed construction
+
+Opaque-value codecs expose explicit `decodeFused` and `decodeCompactFused`
+alternatives using the ABI's checked literal reader. It validates frames,
+typed scalar payloads, counted sequences and source resource bounds during owned
+construction. Selected record and sum layouts preserve their complete logical
+wire nodes. The independent generic decoder remains a conformance oracle. Baseline `decode` methods retain
+pre-validation until comparable lifecycle evidence selects an alternative; JSON
+format invariants still belong to the JSON adapter or checked source properties.
+
+Each `compiledValues` codec exposes a frozen `descriptor`, `resolve(type)` and
+`builder(limits)` for typed stream adapters. The builder accepts source-order
+`open(constructorIndex)`, `scalar(value)` and `close()` events. `finish()` returns
+an opaque, module-owned handle; `abort()` discards the session. Incomplete,
+ill-typed, over-budget or reentrant sessions reject. No method exposes private
+composite nodes or accepts unchecked private children.
+
+`openPath(indices)` combines unary constructor events into one frame.
+`scalarPath(indices, value)` and `emptyPath(indices)` complete such paths without
+an intermediate frame. Reusable paths must be frozen arrays of data properties.
+Literal plans retain every source node's resource charge, even when the database
+has selected record elision or a flat sum representation. Combining charges
+requires every original check to succeed; potential failures replay those checks
+in order. Constructor composition is fixed boundary machinery, not rewrite
+selection or a source evaluator.
+
+`JsonCodec.parseCompiled(codec, text, limits)` uses this interface directly.
+It preserves exact number tokens, member order, Unicode validation, duplicate
+rejection and portable bytes. Construction is opt-in: conformance does not
+establish a speedup, and complete text lifecycles still require measurement.
+
+`codec.visit(handle, visitor, limits)` emits portable-schema events through
+`begin()`, `end()`, `byte(value)`, `word(value)`, `wide(value)`, `text(value)` and
+`count(value)` methods. The source descriptor determines each scalar's meaning
+and field order. The literal emitted writer supplies events; no AST is evaluated.
+The visitor receives neither private composites nor writer callbacks. Node,
+depth and portable byte budgets apply, and a visitor exception ends traversal.
+This supports streaming serializers and observers without a logical tree or
+binary buffer. Format-specific validation and output bounds remain the adapter's
+responsibility; the visitor API alone establishes no performance claim.
+
+`codec.reducer(factory)` binds a host algebra once to the checked source type.
+It returns `reduce(handle, context, limits)`, using literal emitted traversal
+rather than interpreting descriptors at each value. The factory receives a
+frozen node descriptor and its index. `children` lists child indices; records
+also supply source-order `fields`. Recursive references reuse their node index.
+Return a function for each scalar, record, option or result, or a
+`{start, step, finish}` algebra for each list/vector:
+
+- Scalars: `(ownedScalar, context)`; Int and F32 use their public wrapper shapes.
+- Records: `(...fieldResults, context)` in source field order.
+- Options: `(tag, childResult, context)`, with 0 for None and 1 for Some.
+- Results: `(tag, childResult, context)`, with 0 for Ok and 1 for Err.
+- Collections: `start(length, context)`, `step(accumulator, childResult, index,
+  context)` and `finish(accumulator, context)`.
+
+Callbacks receive immutable scalars, fresh scalar wrappers and their own child
+results. They cannot obtain private composites. Source node, depth and byte
+limits apply even when an algebra discards a field. Callbacks may run before a
+later resource failure; exceptions end that invocation. Reentrant invocations
+have independent budgets. Host algebras remain trusted boundary code and confer
+no rewrite authority. Algorithms and physical-layout proofs stay in knowledge.
+
 ## Validation
 
 ```sh

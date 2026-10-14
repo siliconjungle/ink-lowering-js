@@ -36,7 +36,11 @@ function __sumRestore(node,index,payload){
  if(node.selected)return {tag:index,payload};
  return index===0?{Ok:payload}:{Err:__sumRestore(node.error,index-1,payload)};
 }
+const __sumViews=new WeakMap();
 function __sumView(key,value){
  const node=__sumRoots.get(key);if(!node)return value;
- return value.tag===0?{Ok:value.payload}:{Err:Object.hasOwn(value,'tail')?value.tail:__sumRestore(node.error,value.tag-1,value.payload)};
+ let views=__sumViews.get(value);if(!views){views=new Map();__sumViews.set(value,views);}
+ if(views.has(key))return views.get(key);
+ const view=value.tag===0?{Ok:value.payload}:{Err:Object.hasOwn(value,'tail')?value.tail:__sumRestore(node.error,value.tag-1,value.payload)};
+ views.set(key,view);return view;
 }

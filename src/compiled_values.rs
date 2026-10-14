@@ -119,6 +119,8 @@ pub(super) fn emit(
         })
         .collect::<LangResult<BTreeMap<_, _>>>()?;
     let mut capture = super::value_capture::Captures::new(elisions, native_f32).with_sums(sums);
+    let mut constructors=super::constructors::Constructors::new(elisions,sums);
+    let mut reductions=super::value_reduce::Reductions::new(elisions,sums,native_f32);
     let mut read = super::wire_values::WireValues::private(elisions, native_f32).with_sums(sums);
     let mut owned = super::owned_values::OwnedValues::private(p, elisions, native_f32).with_sums(sums);
     let mut write = Writers {
@@ -164,8 +166,10 @@ pub(super) fn emit(
             let name = format!("__compiledCodec{}", roots.len());
             // Factories remain lazy so unused exported value boundaries do not
             // eagerly construct recursive codecs at module initialization.
-            let capture = capture.compile(&schema["root"], &schema["named"])?;
-            definitions.push_str(&format!("let {name}Value;function {name}(){{return {name}Value??=__compiledCodec({schema},{capture},{reader},{writer},{copy});}}\n"));
+            let capture_name = capture.compile(&schema["root"], &schema["named"])?;
+            let constructor_root=constructors.compile(&schema["root"],&schema["named"],&mut capture)?;
+            let reduction_root=reductions.compile(&schema["root"],&schema["named"])?;
+            definitions.push_str(&format!("let {name}Value;function {name}(){{return {name}Value??=__compiledCodec({schema},{capture_name},{reader},{writer},{copy},{constructor_root},{reduction_root},__reduceValue{reduction_root});}}\n"));
             roots.insert(key, name.clone());
             codecs.push(name);
         }
@@ -203,6 +207,8 @@ pub(super) fn emit(
         .map(|(_, s)| s.as_str())
         .collect::<String>();
     source += include_str!("compiled_values.mjs");
+    source += &constructors.source();
+    source += &reductions.source();
     source += &definitions;
     source += &format!(
         "const __compiledEntries=new Map([{}]);\n",

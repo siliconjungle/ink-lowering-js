@@ -1,4 +1,4 @@
-//! Literal materialisation after the complete ABI validator accepts a buffer.
+//! Literal materialisation with typed checks supplied to the shared ABI reader.
 use super::quote;
 use ink_core::LangResult;
 use serde_json::Value;
@@ -98,12 +98,16 @@ impl WireValues {
             }
             "int" => {
                 if self.private {
-                    "const value=BigInt(reader.text(end));".into()
+                    "const value=BigInt(reader.text(end,'int'));".into()
                 } else {
-                    "const value={Int:reader.text(end)};".into()
+                    "const value={Int:reader.text(end,'int')};".into()
                 }
             }
-            "string" | "enum" | "id" => "const value=reader.text(end);".into(),
+            "string" | "enum" | "id" => {
+                let kind=ty["kind"].as_str().unwrap();
+                let variants=if kind=="enum" {format!(",{name}Variants")} else {String::new()};
+                format!("const value=reader.text(end,{}{variants});",quote(kind))
+            },
             "record" => {
                 if self.private
                     && elide_root
@@ -130,7 +134,8 @@ impl WireValues {
             }
             "list" | "vector" => {
                 let next = self.compile(&ty["element"], named, true)?;
-                format!("const n=reader.count(),value=new Array(n);for(let i=0;i<n;i++)value[i]={next}(reader);")
+                let size=if ty["kind"]=="vector" {ty["size"].to_string()} else {String::new()};
+                format!("const n=reader.count({size}),value=new Array(n);for(let i=0;i<n;i++)value[i]={next}(reader);")
             }
             "option" => {
                 let next = self.compile(&ty["element"], named, true)?;
@@ -153,7 +158,8 @@ impl WireValues {
             }
             _ => return Err("unsupported literal wire type".into()),
         };
-        let source=format!("function {name}(reader){{const end=reader.frame();{body}reader.finish(end);return value;}}\n");
+        let constants=if ty["kind"]=="enum" {format!("const {name}Variants=Object.freeze({});\n",ty["variants"])} else {String::new()};
+        let source=format!("{constants}function {name}(reader){{const end=reader.frame();{body}reader.finish(end);return value;}}\n");
         self.functions.insert(key, (name.clone(), source));
         Ok(name)
     }
