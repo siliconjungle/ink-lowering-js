@@ -124,6 +124,39 @@ The default Number output policy rejects decimal precision loss; use
 `numbers: 'bigint'` for exact integers or `numbers: 'string'` for exact tokens.
 See the pinned ABI's README for the complete input and numeric contracts.
 
+### Direct typed construction
+
+Each `compiledValues` codec exposes a frozen `descriptor`, `resolve(type)` and
+`builder(limits)` for typed stream adapters. The builder accepts source-order
+`open(constructorIndex)`, `scalar(value)` and `close()` events. `finish()` returns
+an opaque, module-owned handle; `abort()` discards the session. Incomplete,
+ill-typed, over-budget or reentrant sessions reject. No method exposes private
+composite nodes or accepts unchecked private children.
+
+`openPath(indices)` combines unary constructor events into one frame.
+`scalarPath(indices, value)` and `emptyPath(indices)` complete such paths without
+an intermediate frame. Reusable paths must be frozen arrays of data properties.
+Literal plans retain every source node's resource charge, even when the database
+has selected record elision or a flat sum representation. Combining charges
+requires every original check to succeed; potential failures replay those checks
+in order. Constructor composition is fixed boundary machinery, not rewrite
+selection or a source evaluator.
+
+`JsonCodec.parseCompiled(codec, text, limits)` uses this interface directly.
+It preserves exact number tokens, member order, Unicode validation, duplicate
+rejection and portable bytes. Construction is opt-in: conformance does not
+establish a speedup, and complete text lifecycles still require measurement.
+
+`codec.visit(handle, visitor, limits)` emits portable-schema events through
+`begin()`, `end()`, `byte(value)`, `word(value)`, `wide(value)`, `text(value)` and
+`count(value)` methods. The source descriptor determines each scalar's meaning
+and field order. The literal emitted writer supplies events; no AST is evaluated.
+The visitor receives neither private composites nor writer callbacks. Node,
+depth and portable byte budgets apply, and a visitor exception ends traversal.
+This supports streaming serializers and observers without a logical tree or
+binary buffer. Format-specific validation and output bounds remain the adapter's
+responsibility; the visitor API alone establishes no performance claim.
+
 ## Validation
 
 ```sh
