@@ -1332,15 +1332,15 @@ impl Emitter<'_> {
 /// Emit an ES module. Backend implementation and the JavaScript engine are
 /// trusted; checked source/rewrite evidence does not certify emitted machine code.
 pub fn lower(module: &CheckedModule) -> LangResult<Emission> {
-    lower_with_layout(module, None, &BTreeSet::new(),&[])
+    lower_with_layout(module, None, &BTreeSet::new(),&[],&[])
 }
 pub fn lower_planned(plan: &ink_core::planning::CheckedPlan) -> LangResult<Emission> {
-    plan.require_source_layout_capabilities(true,true)?;
+    plan.require_source_layout_and_boundary_capabilities(true,true,true)?;
     plan.require_source_storage_capabilities(true,true,true)?;
     let layout=ink_core::snapshot::layout(plan.original().program())?;
     let elisions=plan.physical().map(|p|p.plan().record_elisions.iter().map(|l|l.record.clone()).collect()).unwrap_or_default();
     let sums=plan.physical().map(|p|p.plan().sum_spines.iter().map(|l|l.sum_type.clone()).collect::<Vec<_>>()).unwrap_or_default();
-    let mut emission=lower_with_layout(plan.module(),Some(&layout),&elisions,&sums)?;
+    let mut emission=lower_with_layout(plan.module(),Some(&layout),&elisions,&sums,plan.physical().map(|p|p.plan().boundary_readers.as_slice()).unwrap_or(&[]))?;
     if let Some(physical)=plan.physical(){
         if !physical.plan().dictionary_tables.is_empty(){
             let selected=plan.module().program().states.iter().map(|s|physical.plan().dictionary_tables.binary_search(&s.name).is_ok()).collect::<Vec<_>>();
@@ -1368,7 +1368,7 @@ pub fn lower_planned(plan: &ink_core::planning::CheckedPlan) -> LangResult<Emiss
 /// Emit selected code with the snapshot origin authenticated by the core.
 pub fn lower_selected(selected: &ink_core::optimisation::CheckedSelection) -> LangResult<Emission> {
     let layout = ink_core::snapshot::selected_layout(selected)?;
-    let mut emission = lower_with_layout(selected.module(), Some(&layout), &BTreeSet::new(),&[])?;
+    let mut emission = lower_with_layout(selected.module(), Some(&layout), &BTreeSet::new(),&[],&[])?;
     emission.manifest["selection"] =
         serde_json::to_value(selected.evidence()).map_err(|e| e.to_string())?;
     Ok(emission)
@@ -1378,6 +1378,7 @@ fn lower_with_layout(
     layout: Option<&ink_core::snapshot_wire::Layout>,
     elisions: &BTreeSet<String>,
     sum_types:&[Type],
+    boundary_readers:&[ink_core::physical::BoundaryReader],
 ) -> LangResult<Emission> {
     let p = module.program();
     // Stateful functions share the exact-bit carrier with actions/snapshots.
@@ -1713,8 +1714,10 @@ function __callEncoded(name,bytes,limits,compact){
  const input=compact?codecs.arguments.compact():codecs.arguments,output=compact?codecs.result.compact():codecs.result;
  const entry=__compiledEntries.get(name);
  if(entry){
-  entry.argumentCodec??=createCompiledValueCodec(metadata.wire.functions[name].arguments,entry.arguments);
-  const values=(compact?entry.argumentCodec.compact():entry.argumentCodec).decode(bytes,limits),args=f.params.map(p=>values[p.name]);
+  const slot=compact?1:0;
+  entry.argumentCodecs[slot]??=(entry.boundaryReaders[slot]?createFusedValueCodec:createCompiledValueCodec)(metadata.wire.functions[name].arguments,entry.arguments);
+  const decoder=entry.argumentCodecs[slot];
+  const values=(compact?decoder.compact():decoder).decode(bytes,limits),args=f.params.map(p=>values[p.name]);
   if(entry.precondition!==null&&__implementations[entry.precondition](...args)!==true)throw Error('contract precondition failed');
   return __compiledEncodeResult(entry,__implementations[entry.index](...args),limits,compact);
  }
@@ -1731,7 +1734,7 @@ export function callOwned(name,args,limits={}){
  const result=__ownedImplementations[name](...args);return __ownedFunctions[name](result,createValueCaptureBudget(limits),0);
 }
 "#);
-    javascript.push_str(&compiled_values::emit(p,elisions,native_f32,&emitter.equality.sums)?);
+    javascript.push_str(&compiled_values::emit(p,elisions,native_f32,&emitter.equality.sums,boundary_readers)?);
     for (i, f) in p.functions.iter().enumerate() {
         if matches!(f.result, Type::List(_))
             && (!elisions.is_empty() || !sum_types.is_empty() || interface["functions"][i]["result"]["element"]

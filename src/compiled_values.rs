@@ -107,6 +107,7 @@ pub(super) fn emit(
     elisions: &BTreeSet<String>,
     native_f32: bool,
     sums:&super::sum_layout::Sums,
+    boundaries:&[ink_core::physical::BoundaryReader],
 ) -> LangResult<String> {
     let named = p
         .records
@@ -141,6 +142,8 @@ pub(super) fn emit(
         {
             continue;
         }
+        let portable=boundaries.iter().any(|b|b.function==f.name&&b.format==ink_core::physical::BoundaryFormat::Portable);
+        let compact=boundaries.iter().any(|b|b.function==f.name&&b.format==ink_core::physical::BoundaryFormat::Compact);
         let mut codecs = vec![];
         let mut supported = true;
         for ty in f.params.iter().map(|(_, t)| t).chain([&f.result]) {
@@ -154,8 +157,8 @@ pub(super) fn emit(
             };
             let key = schema["identity"]
                 .as_str()
-                .ok_or("private schema identity")?
-                .to_owned();
+                .ok_or("private schema identity")?;
+            let key=format!("{key}:{portable}:{compact}");
             if let Some(name) = roots.get(&key) {
                 codecs.push(name.clone());
                 continue;
@@ -169,21 +172,23 @@ pub(super) fn emit(
             let capture_name = capture.compile(&schema["root"], &schema["named"])?;
             let constructor_root=constructors.compile(&schema["root"],&schema["named"],&mut capture)?;
             let reduction_root=reductions.compile(&schema["root"],&schema["named"])?;
-            definitions.push_str(&format!("let {name}Value;function {name}(){{return {name}Value??=__compiledCodec({schema},{capture_name},{reader},{writer},{copy},{constructor_root},{reduction_root},__reduceValue{reduction_root});}}\n"));
+            definitions.push_str(&format!("let {name}Value;function {name}(){{return {name}Value??=__compiledCodec({schema},{capture_name},{reader},{writer},{copy},{constructor_root},{reduction_root},__reduceValue{reduction_root},{portable},{compact});}}\n"));
             roots.insert(key, name.clone());
             codecs.push(name);
         }
         if !supported {
+            if portable||compact {return Err("selected boundary reader has no supported wire schema".into());}
             continue;
         }
         let result = codecs.pop().ok_or("compiled result codec")?;
         let args_read = if contract["functions"][&f.name]["unsupported"].is_null() {
             read.for_arguments_schema(&contract["functions"][&f.name]["arguments"])?
         } else {
+            if portable||compact {return Err("selected boundary reader has no supported argument schema".into());}
             "null".into()
         };
         entries.push(format!(
-            "[{},{{index:{index},params:[{}],result:{result},arguments:{args_read},argumentCodec:null,precondition:{}}}]",
+            "[{},{{index:{index},params:[{}],result:{result},arguments:{args_read},argumentCodecs:[null,null],boundaryReaders:[{portable},{compact}],precondition:{}}}]",
             quote(&f.name),
             codecs.join(","),
             p.contracts
