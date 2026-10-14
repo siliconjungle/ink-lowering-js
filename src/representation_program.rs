@@ -187,7 +187,7 @@ pub(crate) fn maintained_support(module: &ink_core::core::CheckedModule, views:&
             let value=if ids.iter().any(|(_,id)|*id==keep){format!("__nextKeep{keep}")}else{"undefined".into()};
             write!(installs,"{{const value={value};if(publish)rt.changedOutputs[{keep}]=rt.keeps[{keep}]!==value?rt.changedOutputEpoch:0;rt.keeps[{keep}]=value;}}").unwrap();
         }
-        Ok(Some(format!("{declarations}if(prior===undefined){{{}}}else if(next===undefined){{{}}}else{{{}}}__storeDirect(rt,{root},key,prior,next,slot);const publish=rt.meta.outputPublication&&!rt.observers.directRoots[{root}]&&rt.observers.active;if(publish&&++rt.changedOutputEpoch===4294967296){{rt.changedOutputs.fill(0);rt.changedOutputEpoch=1;}}{installs}",branch("insert"),branch("remove"),branch("replace"))))
+        Ok(Some(format!("{declarations}if(prior===undefined){{{}}}else if(next===undefined){{{}}}else{{{}}}__stateStoreRoot{root}(rt,key,prior,next,slot);const publish=rt.meta.outputPublication&&!rt.observers.directRoots[{root}]&&rt.observers.active;if(publish&&++rt.changedOutputEpoch===4294967296){{rt.changedOutputs.fill(0);rt.changedOutputEpoch=1;}}{installs}",branch("insert"),branch("remove"),branch("replace"))))
     }).collect::<LangResult<Vec<_>>>()?;
     Ok(MaintainedSupport{source:format!("const __compiledMaintained=(()=>{{{out}const __views=[{entries}];__views.prepareRoots=[{}];__views.directRoots=[{}];return __views;}})();\n",preparers.join(","),directs.join(",")),kernels})
 }

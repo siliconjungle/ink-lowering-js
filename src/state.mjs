@@ -114,7 +114,7 @@ function __storeDirect(rt,index,key,prior,next,slot){
  const table=rt.tables[index];__invalidateSnapshotRow(rt,index,key);
  if((prior!==undefined)!==(next!==undefined))__tableMembership(rt,index,key,next!==undefined);
  if(rt.changeTracking)__recordChange(rt,index,key,prior,next);
- if(slot===undefined){if(next===undefined)table.delete(key);else table.set(key,next);}
+ if(slot===undefined||table instanceof __ColumnTable){if(next===undefined)table.delete(key);else table.set(key,next);}
  else{
   // The checked preflight lookup retains the dense slot until this commit.
   // No callback or source write can intervene; sparse keys retain exact identity.
@@ -142,6 +142,7 @@ function __emit(rt,channel,value){
 // Wide keys retain their original full-width value in the sparse fallback.
 class __DenseTable{
  constructor(capacity){this.limit=capacity;this.dense=[];for(let i=0;i<capacity;i++)this.dense.push(undefined);this.sparse=new Map();this.members=new Set();}
+ clear(){this.dense.fill(undefined);this.sparse.clear();this.members.clear();__tableOrder.delete(this);return this;}
  slot(key){const i=Number(key);return Number.isInteger(i)&&i>=0&&i<this.limit?i:-1;}
  get size(){return this.members.size;}
  get(key){const i=this.slot(key);return i<0?this.sparse.get(key):this.dense[i];}
@@ -157,8 +158,9 @@ class __ColumnTable {
  constructor(root){
   this.limit=root.columnPrefix.capacity;this.keyBig=root.key.kind==='u64';
   this.fields=root.value.fields;this.exactNumbers=root.columnPrefix.exactNumbers;
+  this.plainWords=root.columnPrefix.plainWords;this.scratch=__columnScratch(root.value.fields);
   this.present=new Uint8Array(this.limit);this.count=0;this.sparse=new Map();
-  this.lanes=this.fields.map(f=>f.type.kind==='u64'?(this.exactNumbers?new Float64Array(this.limit):new BigUint64Array(this.limit)):f.type.kind==='i32'?new Int32Array(this.limit):f.type.kind==='bool'?new Uint8Array(this.limit):new Uint32Array(this.limit));
+  this.lanes=this.fields.map(f=>f.type.kind==='u64'?(this.exactNumbers?new Float64Array(this.limit):this.plainWords?new Array(this.limit).fill(0n):new BigUint64Array(this.limit)):f.type.kind==='i32'?new Int32Array(this.limit):f.type.kind==='bool'?new Uint8Array(this.limit):new Uint32Array(this.limit));
   this.wide=this.fields.map(f=>f.type.kind==='u64'&&this.exactNumbers?new Map():null);
  }
  slot(key){const i=Number(key);return Number.isInteger(i)&&i>=0&&i<this.limit?i:-1;}
@@ -172,7 +174,12 @@ class __ColumnTable {
  *entries(){for(const key of this.keys())yield [key,this.get(key)];}
  [Symbol.iterator](){return this.entries();}
 }
-function __newTables(meta,prefixes,old){return meta.roots.map((root,i)=>{const t=root.columnPrefix?new __ColumnTable(root):prefixes[i]?new __DenseTable(prefixes[i]):new Map();if(old)for(const [k,v]of old[i])t.set(k,v);return t;});}
+function __columnScratch(fields){const row={};for(const f of fields)Object.defineProperty(row,f.name,{value:f.type.kind==='u64'?0n:f.type.kind==='bool'?false:0,writable:true,enumerable:true,configurable:true});return row;}
+function __newTables(meta,prefixes,old,spares){return meta.roots.map((root,i)=>{const prior=spares?.[i];const t=root.columnPrefix?new __ColumnTable(root):prefixes[i]?(prior instanceof __DenseTable&&prior.limit===prefixes[i]?prior.clear():new __DenseTable(prefixes[i])):new Map();if(old)for(const [k,v]of old[i])t.set(k,v);return t;});}
+// Only inactive containers are reused. Consume the spare before preparation so
+// a failed invariant/rebuild cannot expose its partially reconstructed contents.
+// Rows remain immutable; the current logical state changes only at installation.
+function __restoreTables(rt,prefixes,old){const spares=rt.restoreSpares;rt.restoreSpares=null;return __newTables(rt.meta,prefixes,old,spares);}
 function __cachedKeep(ctx,rt,index,compute){
  if(rt.cell&&rt.meta.keepInvalidations[rt.cell.index].includes(index)){
   const view=rt.viewByKeep[index];
@@ -227,7 +234,7 @@ function __createState(meta,implementations,captures=null,views=[],prefixes=[]){
  rt.keepBefore=meta.keeps.length?new Array(meta.keeps.length):null;
  rt.changedRoots=new Set();rt.changedOutputs=new Array(meta.keeps.length).fill(0);rt.changedOutputEpoch=0;
  rt.snapshotRows=meta.snapshotRows?meta.roots.map(()=>new Map()):null;
- rt.changeTracking=false;rt.changeLog=[];rt.changeEpoch=0;rt.changeTokens=new Map();
+ rt.restoreSpares=null;rt.changeTracking=false;rt.changeLog=[];rt.changeEpoch=0;rt.changeTokens=new Map();
  const actionMap=new Map(meta.actions.map(a=>[a.name,{...a,inputs:captures?captures[a.index]:a.params.map(p=>__stateCapture(p.type)),output:__stateResult(a.result)}]));
  const eventOutput=new Map(meta.events.map(e=>[e.name,__stateResult(e.type)]));
  rt.eventOutput=eventOutput;
@@ -374,9 +381,9 @@ function __createState(meta,implementations,captures=null,views=[],prefixes=[]){
   async invokeAsync(name,args){
    if(typeof __parallelInvokeAsync!=='function')return invoke(name,args);
    if(rt.busy||rt.host)throw Error('parallel state call requires transaction boundary');const captured=structuredClone(args);rt.busy=true;observers.hold();let completed=false;
-   try{const snapshot=await __snapshotEncode(meta,rt);const reply=await __parallelInvokeAsync(name,captured,snapshot);const s=await __snapshotDecode(meta,reply.snapshot);const candidate={...rt,tables:__newTables(meta,prefixes,s.tables),keeps:rt.keeps.map(()=>undefined)};__rebuildViews(candidate);rt.tables=candidate.tables;rt.version=__storedCommit(meta,s.version);rt.outbox=__eventLog(meta,s.outbox);rt.keeps=candidate.keeps;if(rt.snapshotRows)rt.snapshotRows=meta.roots.map(()=>new Map());rt.changeEpoch++;rt.changeLog.length=0;completed=true;return reply.value;}finally{rt.busy=false;if(completed)observers.commit(meta.roots.map((_,i)=>i));observers.release();}
+   try{const snapshot=await __snapshotEncode(meta,rt);const reply=await __parallelInvokeAsync(name,captured,snapshot);const s=await __snapshotDecode(meta,reply.snapshot);const candidate={...rt,tables:__restoreTables(rt,prefixes,s.tables),keeps:rt.keeps.map(()=>undefined)};__rebuildViews(candidate);const previousTables=rt.tables;rt.tables=candidate.tables;rt.restoreSpares=previousTables.map(table=>table instanceof __DenseTable?table:null);rt.version=__storedCommit(meta,s.version);rt.outbox=__eventLog(meta,s.outbox);rt.keeps=candidate.keeps;if(rt.snapshotRows)rt.snapshotRows=meta.roots.map(()=>new Map());rt.changeEpoch++;rt.changeLog.length=0;completed=true;return reply.value;}finally{rt.busy=false;if(completed)observers.commit(meta.roots.map((_,i)=>i));observers.release();}
   },
   checkpoint(limits){if(rt.busy)throw Error('checkpoint requires transaction boundary');return __snapshotEncode(meta,rt,limits);},
-  async restore(bytes,limits){if(rt.host)throw Error('restore during transaction');if(rt.busy)throw Error('restore requires transaction boundary');rt.busy=true;rt.ctx.fuel=100000000;observers.hold();let restored=false;try{const s=await __snapshotDecode(meta,bytes,limits);const candidate={...rt,tables:__newTables(meta,prefixes,s.tables),version:__storedCommit(meta,s.version),outbox:s.outbox,keeps:rt.keeps.map(()=>undefined)};__rebuildViews(candidate);for(const name of meta.invariantChecks||[]){const a=actionMap.get(name);if(implementations[a.index](rt.ctx,candidate)!==true)throw Error('snapshot violates state invariant');}rt.tables=candidate.tables;rt.version=__storedCommit(meta,s.version);rt.outbox=__eventLog(meta,s.outbox);rt.keeps=candidate.keeps;if(rt.snapshotRows)rt.snapshotRows=meta.roots.map(()=>new Map());rt.changeEpoch++;rt.changeLog.length=0;restored=true;}finally{rt.busy=false;if(restored)observers.commit(meta.roots.map((_,i)=>i));observers.release();}},
+  async restore(bytes,limits){if(rt.host)throw Error('restore during transaction');if(rt.busy)throw Error('restore requires transaction boundary');rt.busy=true;rt.ctx.fuel=100000000;observers.hold();let restored=false;try{const s=await __snapshotDecode(meta,bytes,limits);const candidate={...rt,tables:__restoreTables(rt,prefixes,s.tables),version:__storedCommit(meta,s.version),outbox:s.outbox,keeps:rt.keeps.map(()=>undefined)};__rebuildViews(candidate);for(const name of meta.invariantChecks||[]){const a=actionMap.get(name);if(implementations[a.index](rt.ctx,candidate)!==true)throw Error('snapshot violates state invariant');}const previousTables=rt.tables;rt.tables=candidate.tables;rt.restoreSpares=previousTables.map(table=>table instanceof __DenseTable?table:null);rt.version=__storedCommit(meta,s.version);rt.outbox=__eventLog(meta,s.outbox);rt.keeps=candidate.keeps;if(rt.snapshotRows)rt.snapshotRows=meta.roots.map(()=>new Map());rt.changeEpoch++;rt.changeLog.length=0;restored=true;}finally{rt.busy=false;if(restored)observers.commit(meta.roots.map((_,i)=>i));observers.release();}},
  });
 }
