@@ -93,12 +93,17 @@ fn input(p:&Program,projection:&Projection,elisions:&BTreeSet<String>,t:&Type,na
         _=>Value::Opaque,
     })
 }
-pub(crate) fn function(p:&Program,projection:&Projection,ds:&BTreeMap<String,Declaration>,elisions:&BTreeSet<String>,params:&[(&str,&Type)],body:&Term)->LangResult<String>{
+pub(crate) fn body(p:&Program,projection:&Projection,ds:&BTreeMap<String,Declaration>,elisions:&BTreeSet<String>,params:&[(&str,&Type)],body:&Term)->LangResult<(String,String)>{
     let mut emitter=Emit{ds,active:BTreeSet::new(),next:0,work:0};
     let mut out=String::new();
     let env=params.iter().map(|(n,t)|Ok((n.to_string(),input(p,projection,elisions,t,n,0)?))).collect::<LangResult<BTreeMap<_,_>>>()?;
     let value=emitter.expr(body,&env,&mut out,0)?;
-    Ok(format!("({})=>{{{out}return {};}}",params.iter().map(|p|p.0).collect::<Vec<_>>().join(","),value.scalar()?))
+    Ok((out,value.scalar()?))
+}
+
+pub(crate) fn function(p:&Program,projection:&Projection,ds:&BTreeMap<String,Declaration>,elisions:&BTreeSet<String>,params:&[(&str,&Type)],term:&Term)->LangResult<String>{
+    let (out,value)=body(p,projection,ds,elisions,params,term)?;
+    Ok(format!("({})=>{{{out}return {value};}}",params.iter().map(|p|p.0).collect::<Vec<_>>().join(",")))
 }
 
 #[cfg(test)]
