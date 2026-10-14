@@ -20,7 +20,9 @@ function __compiledValueEvents(sink,limits){
  const budget=createValueCaptureBudget(limits);let depth=0,closed=false;
  const active=()=>{if(closed)throw Error('compiled value visitor is closed');};
  const writer=Object.freeze({
-  frame(emit){active();budget.enter(depth,4);depth++;sink.begin();try{emit();sink.end();}finally{depth--;}}
+  openFrame(){active();budget.enter(depth,4);depth++;sink.begin();return 0;}
+  ,closeFrame(){active();if(depth===0)throw Error('wire frame boundary');try{sink.end();}finally{depth--;}}
+  ,frame(emit){active();budget.enter(depth,4);depth++;sink.begin();try{emit();sink.end();}finally{depth--;}}
   ,byte(value){active();budget.add(1);sink.byte(value);}
   ,word(value){active();budget.add(4);sink.word(value);}
   ,wide(value){active();budget.add(8);sink.wide(value);}
