@@ -83,7 +83,7 @@ impl Writers<'_> {
                     let leaves=super::sum_layout::Sums::leaves(ty);let count=leaves.len()-1;let mut cases=String::new();
                     for (i,leaf) in leaves.iter().enumerate(){let next=self.compile(leaf,named)?;let levels=if i<count{i+1}else{count};
                         let mut body=format!("writer.byte({});{next}(writer,value.payload,compact);",if i<count{0}else{1});
-                        for _ in 1..levels{body=format!("writer.byte(1);writer.frame(()=>{{{body}}});");}
+                        for _ in 1..levels{body=format!("writer.byte(1);{{const frame=writer.openFrame();{body}writer.closeFrame(frame);}}");}
                         cases.push_str(&format!("case {i}:{{{body}break;}}"));
                     }
                     format!("switch(value.tag){{{cases}default:throw Error('private sum tag');}}")
@@ -96,7 +96,7 @@ impl Writers<'_> {
             key,
             (
                 name.clone(),
-                format!("function {name}(writer,value,compact){{writer.frame(()=>{{{body}}});}}\n"),
+                format!("function {name}(writer,value,compact){{const frame=writer.openFrame();{body}writer.closeFrame(frame);}}\n"),
             ),
         );
         Ok(name)
