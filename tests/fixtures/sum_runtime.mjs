@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';import fs from 'node:fs';
 import * as ordinary from './runtime-ordinary.mjs';
-const files=['runtime-flat.mjs',...fs.readdirSync(new URL('.',import.meta.url)).filter(n=>/^runtime-one-\d+\.mjs$/.test(n))];
+const files=['runtime-composed.mjs','runtime-flat.mjs',...fs.readdirSync(new URL('.',import.meta.url)).filter(n=>/^runtime-one-\d+\.mjs$/.test(n))];
 const outcome=fn=>{try{return {value:fn()};}catch(e){return {error:e.message};}};
 const admission=run=>{try{return {value:run()};}catch{return {rejected:true};}};
 const rebuild=codec=>codec.reducer(node=>{
@@ -13,6 +13,25 @@ const rebuild=codec=>codec.reducer(node=>{
 });
 for(const file of files){
  const flat=await import('./'+file),inputs=[{Ok:5},{Err:{Ok:'雪'}},{Err:{Err:true}}];
+ const stateJson=new ordinary.JsonCodec(ordinary.valueCodecs.json_identity.result);
+ for(const text of ['null','true','1e1000','"雪"','[1,false,null]','{"a":["x",2]}']){
+  const value=stateJson.parse(text),before=structuredClone(value);
+  assert.deepEqual(flat.createState().invoke('json_echo',[value]),ordinary.createState().invoke('json_echo',[value]));
+  assert.deepEqual(value,before);
+ }
+ for(const invalid of [null,{},[],{payload:{Ok:{extra:1}}},{payload:{Err:{Ok:{item0:7}}}},{payload:{Err:{Err:{Ok:{item0:7}}}}}]){
+  assert.deepEqual(outcome(()=>flat.createState().invoke('json_echo',[invalid])),outcome(()=>ordinary.createState().invoke('json_echo',[invalid])));
+ }
+ for(const depth of [0,2,8,12]){
+  const trace=module=>{
+   const log=[],value=stateJson.parse('['.repeat(depth)+'"雪"'+']'.repeat(depth));
+   let leaf=value;for(let i=0;i<depth;i++)leaf=leaf.payload.Err.Err.Err.Err.Ok.item0[0];
+   const record=leaf.payload.Err.Err.Err.Ok;
+   Object.defineProperty(record,'item0',{enumerable:true,get(){log.push('leaf');return '雪';}});
+   return {reply:outcome(()=>module.createState().invoke('json_echo',[value])),log};
+  };
+  assert.deepEqual(trace(flat),trace(ordinary),'state capture preserves getter ordering and deep resource failures');
+ }
  const construct=(module,codec,value,limits={})=>{const builder=codec.builder(limits);const feed=(type,value)=>{const t=codec.resolve(type);switch(t.kind){case 'record':builder.open(0);for(const f of t.fields)feed(f.type,value[f.name]);builder.close();break;case 'list':case 'vector':builder.open(0);for(const x of value)feed(t.element,x);builder.close();break;case 'result':{const ok=Object.hasOwn(value,'Ok');builder.open(ok?0:1);feed(ok?t.ok:t.error,ok?value.Ok:value.Err);builder.close();break;}case 'option':{const some=Object.hasOwn(value,'Some');builder.open(some?1:0);if(some)feed(t.element,value.Some);builder.close();break;}default:builder.scalar(value);}};feed(codec.descriptor.root,value);return builder.finish();};
  for(const x of inputs)for(const name of ['identity','mapped','errors','folded','wide']){
   const expected=ordinary.callOwned(name,[x]);assert.deepEqual(flat.call(name,[x]),ordinary.call(name,[x]));assert.deepEqual(flat.callOwned(name,[x]),expected);

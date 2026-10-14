@@ -6,6 +6,7 @@ use ink_core::{
     syntax::{parse, Type},
 };
 use std::{fs, process::Command};
+#[path="support/record_codec.rs"] mod record_codec;
 
 // Test authoring is separate from emission. Admission replays both ordinary
 // equality proofs over the compiler's exact exported codec declarations.
@@ -186,6 +187,19 @@ fn sum_layouts_preserve_boundaries_transactions_and_exact_wire_resources() {
         };
         fs::write(directory.join(filename), selected.javascript).unwrap();
     }
+    let elisions=module.program().records.keys()
+        .filter(|name| ink_core::record_codec::schema(&module,name).is_ok())
+        .map(|name|record_codec::layout(&module,name)).collect::<Vec<_>>();
+    let physical:physical::Plan=serde_json::from_value(serde_json::json!({
+        "schema":1,"semantics":physical::SEMANTICS,"input_core_sha256":module.identity().unwrap(),
+        "sum_spines":layouts,"record_elisions":elisions
+    })).unwrap();
+    let composed=planning::check(&module,&planning::Package{
+        schema:1,semantics:planning::SEMANTICS.into(),input_core_sha256:module.identity().unwrap(),
+        steps:vec![planning::Step::Physical(physical)]
+    }).unwrap();
+    let code=ink_lowering_js::lower_planned(&composed).unwrap().javascript;
+    fs::write(directory.join("runtime-composed.mjs"),code).unwrap();
     fs::write(
         directory.join("run.mjs"),
         include_str!("fixtures/sum_runtime.mjs"),
