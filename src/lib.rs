@@ -19,6 +19,7 @@ mod wire_values;
 mod compiled_values;
 mod constructors;
 mod value_capture;
+mod value_reduce;
 mod primitives;
 type Env = BTreeMap<String, (String, Type)>;
 fn quote(s: &str) -> String {

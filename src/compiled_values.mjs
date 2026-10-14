@@ -29,7 +29,30 @@ function __compiledValueEvents(sink,limits){
  });
  return {writer,close(){closed=true;}};
 }
-function __compiledCodec(schema,capture,read,write,copy,constructorRoot){
+function __compiledReduction(factory,root,reduce,identity){
+ if(typeof factory!=='function')throw Error('compiled reduction factory');
+ const reducers=[],seen=new Set(),nodes=__reductionNodes();
+ const prepare=index=>{
+  if(seen.has(index))return;seen.add(index);
+  const node=nodes[index];
+  for(const child of node.children)prepare(child);
+  const reducer=factory(node,index);
+  if(node.kind==='list'||node.kind==='vector'){
+   const start=reducer?.start,step=reducer?.step,finish=reducer?.finish;
+   if(typeof start!=='function'||typeof step!=='function'||typeof finish!=='function')throw Error('compiled collection reduction');
+   reducers[index]=Object.freeze({start,step,finish});
+  }else{
+   if(typeof reducer!=='function')throw Error('compiled value reduction');
+   reducers[index]=reducer;
+  }
+ };
+ prepare(root);Object.freeze(reducers);
+ return Object.freeze(function(handle,context,limits={}){
+  const value=__compiledUnwrap(handle,identity),budget=createValueCaptureBudget(limits);
+  return reduce(value,reducers,budget,0,context);
+ });
+}
+function __compiledCodec(schema,capture,read,write,copy,constructorRoot,reductionRoot,reduce){
  const privateCodec=createCompiledValueCodec(schema,read),publicCodec=privateCodec;
  const identity=schema.identity;
  const codec=Object.freeze({
@@ -45,6 +68,7 @@ function __compiledCodec(schema,capture,read,write,copy,constructorRoot){
   encodeCompact(handle,limits={}){const value=__compiledUnwrap(handle,identity);return publicCodec.compact().encodeWith(writer=>write(writer,value,true),limits);},
   materialize(handle,limits={}){return copy(__compiledUnwrap(handle,identity),createValueCaptureBudget(limits),0);},
   builder(limits={}){return __valueBuilder(__constructorNodes(),constructorRoot,identity,limits);},
+  reducer(factory){return __compiledReduction(factory,reductionRoot,reduce,identity);},
   visit(handle,sink,limits={}){
    const value=__compiledUnwrap(handle,identity),events=__compiledValueEvents(sink,limits);
    try{write(events.writer,value,false);}finally{events.close();}

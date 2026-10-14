@@ -173,6 +173,16 @@ for(const limits of [{values:0},{values:2},{depth:0},{depth:2},{bytes:200}]){con
 const c=ink.compiledValues.collision,collisionResult=ink.callCompiled('collision',[c.params[0].capture({value:3}),c.params[1].capture(4)]);assert.equal(c.result.materialize(collisionResult),7);const collisionBytes=ink.valueCodecs.collision.arguments.encode({value:{value:3},other:4});assert.deepEqual(ink.callBinary('collision',collisionBytes),plain.callBinary('collision',collisionBytes));
 const inputCodec=ink.compiledValues.identity.params[0],resultCodec=ink.compiledValues.identity.result;
 const inputHandle=inputCodec.capture(packet),resultHandle=ink.callCompiled('identity',[inputHandle]);
+const reduce=resultCodec.reducer(node=>{
+ if(node.kind==='record')return (...values)=>Object.fromEntries(node.fields.map((name,index)=>[name,values[index]]));
+ if(node.kind==='list'||node.kind==='vector')return {start:()=>[],step:(out,value)=>{out.push(value);return out;},finish:out=>out};
+ if(node.kind==='result')return (tag,value)=>tag?{Err:value}:{Ok:value};
+ if(node.kind==='option')return (tag,value)=>tag?{Some:value}:{None:null};
+ return value=>value;
+});
+assert.deepEqual(reduce(resultHandle),resultCodec.materialize(resultHandle));
+const reduced=reduce(resultHandle);reduced.pair.first.value.value.words[0]=99;reduced.float.value.F32Bits=0;
+assert.deepEqual(reduce(resultHandle),resultCodec.materialize(resultHandle));
 for(const value of [...invalid,{...packet,extra:1},{...packet,exact:{value:{Int:'-0'}}},{...packet,proto:{['__proto__']:'\ud800'}},{...packet,float:{value:Infinity}}])for(const limits of [{nodes:0},{nodes:1},{nodes:2},{nodes:5},{nodes:20},{nodes:1000000},{depth:0},{depth:1},{depth:3},{depth:128},{bytes:0},{bytes:40},{bytes:41},{bytes:50},{bytes:200},{bytes:16777216}])assert.deepEqual(ink.wireCaptureProbe(value,limits,true),ink.wireCaptureProbe(value,limits,false));
 for(const limits of [{nodes:1},{nodes:2},{nodes:10},{nodes:1000000},{bytes:40},{bytes:100},{depth:2}]){const trace=literal=>{const reads=[],host={};for(const key of Object.keys(packet))Object.defineProperty(host,key,{enumerable:true,get(){reads.push(key);return packet[key];}});return {result:ink.wireCaptureProbe(host,limits,literal),reads};};assert.deepEqual(trace(true),trace(false));}
 
