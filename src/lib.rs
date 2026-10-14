@@ -96,6 +96,17 @@ fn zero(t: &Type) -> &'static str {
     }
 }
 
+// Reassert checked word types at collection loads. This is an identity on
+// admitted values, including ordinary Array inputs; it lets the JS engine keep
+// word arithmetic in integer registers without changing storage or loop order.
+fn word_load(value: &str, t: &Type) -> String {
+    match t {
+        Type::U32 => format!("({value}>>>0)"),
+        Type::I32 => format!("({value}|0)"),
+        _ => value.into(),
+    }
+}
+
 fn needs_parallel(e: &Expr, p: &Program, seen: &mut std::collections::BTreeSet<String>) -> bool {
     let mut found = false;
     ink_core::analysis::walk(e, |node: &Expr| match node {
@@ -494,7 +505,7 @@ impl Emitter<'_> {
                     self.line(format!("let {acc}={};", zero(&inner)));
                     let i = self.fresh();
                     self.line(format!("for(let {i}=0;{i}<{len};{i}++){{"));
-                    let element = self.bind(&format!("{xs}[{i}]"));
+                    let element = self.bind(&word_load(&format!("{xs}[{i}]"), &inner));
                     self.line(format!(
                         "{acc}={};",
                         self.arithmetic("+", &acc, &element, &inner)
@@ -512,9 +523,9 @@ impl Emitter<'_> {
                 }
                 let i = self.fresh();
                 self.line(format!("for(let {i}=0;{i}<{len};{i}++){{"));
-                let element = self.bind(&format!("{xs}[{i}]"));
+                let element = self.bind(&word_load(&format!("{xs}[{i}]"), &inner));
                 let (callback, params, result) = if let Some((ys, other)) = second {
-                    let right = self.bind(&format!("{ys}[{i}]"));
+                    let right = self.bind(&word_load(&format!("{ys}[{i}]"), &other));
                     (
                         &args[1],
                         vec![(element.clone(), *inner), (right, other)],
@@ -619,7 +630,15 @@ impl Emitter<'_> {
                     format!("{xs}.slice(0,{count})")
                 }
             }
-            "sort" => format!("__sort({xs})"),
+            "sort" => match *inner {
+                // The fixed sort primitive orders integers numerically. Keep
+                // its temporary private and return an ordinary owned List so
+                // subsequent literal concatenation can still grow it.
+                Type::U32 => format!("Array.from(Uint32Array.from({xs}).sort())"),
+                Type::I32 => format!("Array.from(Int32Array.from({xs}).sort())"),
+                Type::U64 => format!("Array.from(BigUint64Array.from({xs}).sort())"),
+                _ => format!("__sort({xs})"),
+            },
             "concat" => {
                 let ys = self.expr(&args[0], env, Some(t))?;
                 let ys = self.bind(&ys);
@@ -643,7 +662,7 @@ impl Emitter<'_> {
                 self.line(format!("let {acc}={};", zero(&inner)));
                 let i = self.fresh();
                 self.line(format!("for(let {i}=0;{i}<{len};{i}++){{"));
-                let element = self.bind(&format!("{xs}[{i}]"));
+                let element = self.bind(&word_load(&format!("{xs}[{i}]"), &inner));
                 self.line(format!(
                     "{acc}={};{out}[{i}]={acc};}}",
                     self.arithmetic("+", &acc, &element, &inner)
@@ -674,9 +693,9 @@ impl Emitter<'_> {
                 });
                 let i = self.fresh();
                 self.line(format!("for(let {i}=0;{i}<{len};{i}++){{"));
-                let element = self.bind(&format!("{xs}[{i}]"));
+                let element = self.bind(&word_load(&format!("{xs}[{i}]"), &inner));
                 let (callback, params, result) = if let Some((ys, other)) = second {
-                    let right = self.bind(&format!("{ys}[{i}]"));
+                    let right = self.bind(&word_load(&format!("{ys}[{i}]"), &other));
                     (
                         &args[1],
                         vec![(element.clone(), *inner), (right, other)],
@@ -1313,7 +1332,7 @@ impl Emitter<'_> {
                 } else {
                     format!("for(let {index}=0;{index}<{xs}.length;{index}++){{")
                 });
-                let element = self.bind(&format!("{xs}[{index}]"));
+                let element = self.bind(&word_load(&format!("{xs}[{index}]"), &inner));
                 let values = [(element, *inner), (out.clone(), t.clone())];
                 let stop = if n == "fold_until" {
                     let (body, local) = Self::callback(&args[2], env, &values)?;
@@ -1349,7 +1368,7 @@ impl Emitter<'_> {
                         "let {out}={};for(let {index}=0;{index}<{xs}.length;{index}++){{",
                         zero(&t)
                     ));
-                    let value = self.bind(&format!("{xs}[{index}]"));
+                    let value = self.bind(&word_load(&format!("{xs}[{index}]"), &t));
                     self.line(format!("{out}={};}}", self.arithmetic("+", &out, &value, &t)));
                     out
                 }
