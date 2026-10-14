@@ -5,6 +5,7 @@ function __word(op,a,b,bits) {
   const x=BigInt(a), y=BigInt(b??0), unsigned=BigInt.asUintN(Number(width),x);
   let r;
   switch(op) {
+    case 'word_widen_u32_to_u64':case 'word_narrow_u64_to_u32':r=x;break;
     case 'word_not':r=~x;break;
     case 'word_and':r=x&y;break;
     case 'word_or':r=x|y;break;
