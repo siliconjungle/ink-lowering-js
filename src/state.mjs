@@ -114,7 +114,7 @@ function __storeDirect(rt,index,key,prior,next,slot){
  const table=rt.tables[index];__invalidateSnapshotRow(rt,index,key);
  if((prior!==undefined)!==(next!==undefined))__tableMembership(rt,index,key,next!==undefined);
  if(rt.changeTracking)__recordChange(rt,index,key,prior,next);
- if(slot===undefined||table instanceof __ColumnTable){if(next===undefined)table.delete(key);else table.set(key,next);}
+ if(slot===undefined){if(next===undefined)table.delete(key);else table.set(key,next);}
  else{
   // The checked preflight lookup retains the dense slot until this commit.
   // No callback or source write can intervene; sparse keys retain exact identity.
@@ -158,9 +158,8 @@ class __ColumnTable {
  constructor(root){
   this.limit=root.columnPrefix.capacity;this.keyBig=root.key.kind==='u64';
   this.fields=root.value.fields;this.exactNumbers=root.columnPrefix.exactNumbers;
-  this.plainWords=root.columnPrefix.plainWords;this.scratch=__columnScratch(root.value.fields);
   this.present=new Uint8Array(this.limit);this.count=0;this.sparse=new Map();
-  this.lanes=this.fields.map(f=>f.type.kind==='u64'?(this.exactNumbers?new Float64Array(this.limit):this.plainWords?new Array(this.limit).fill(0n):new BigUint64Array(this.limit)):f.type.kind==='i32'?new Int32Array(this.limit):f.type.kind==='bool'?new Uint8Array(this.limit):new Uint32Array(this.limit));
+  this.lanes=this.fields.map(f=>f.type.kind==='u64'?(this.exactNumbers?new Float64Array(this.limit):new BigUint64Array(this.limit)):f.type.kind==='i32'?new Int32Array(this.limit):f.type.kind==='bool'?new Uint8Array(this.limit):new Uint32Array(this.limit));
   this.wide=this.fields.map(f=>f.type.kind==='u64'&&this.exactNumbers?new Map():null);
  }
  slot(key){const i=Number(key);return Number.isInteger(i)&&i>=0&&i<this.limit?i:-1;}
@@ -174,7 +173,6 @@ class __ColumnTable {
  *entries(){for(const key of this.keys())yield [key,this.get(key)];}
  [Symbol.iterator](){return this.entries();}
 }
-function __columnScratch(fields){const row={};for(const f of fields)Object.defineProperty(row,f.name,{value:f.type.kind==='u64'?0n:f.type.kind==='bool'?false:0,writable:true,enumerable:true,configurable:true});return row;}
 function __newTables(meta,prefixes,old,spares){return meta.roots.map((root,i)=>{const prior=spares?.[i];const t=root.columnPrefix?new __ColumnTable(root):prefixes[i]?(prior instanceof __DenseTable&&prior.limit===prefixes[i]?prior.clear():new __DenseTable(prefixes[i])):new Map();if(old)for(const [k,v]of old[i])t.set(k,v);return t;});}
 // Only inactive containers are reused. Consume the spare before preparation so
 // a failed invariant/rebuild cannot expose its partially reconstructed contents.
