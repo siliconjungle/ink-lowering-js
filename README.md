@@ -157,6 +157,28 @@ This supports streaming serializers and observers without a logical tree or
 binary buffer. Format-specific validation and output bounds remain the adapter's
 responsibility; the visitor API alone establishes no performance claim.
 
+`codec.reducer(factory)` binds a host algebra once to the checked source type.
+It returns `reduce(handle, context, limits)`, using literal emitted traversal
+rather than interpreting descriptors at each value. The factory receives a
+frozen node descriptor and its index. `children` lists child indices; records
+also supply source-order `fields`. Recursive references reuse their node index.
+Return a function for each scalar, record, option or result, or a
+`{start, step, finish}` algebra for each list/vector:
+
+- Scalars: `(ownedScalar, context)`; Int and F32 use their public wrapper shapes.
+- Records: `(...fieldResults, context)` in source field order.
+- Options: `(tag, childResult, context)`, with 0 for None and 1 for Some.
+- Results: `(tag, childResult, context)`, with 0 for Ok and 1 for Err.
+- Collections: `start(length, context)`, `step(accumulator, childResult, index,
+  context)` and `finish(accumulator, context)`.
+
+Callbacks receive immutable scalars, fresh scalar wrappers and their own child
+results. They cannot obtain private composites. Source node, depth and byte
+limits apply even when an algebra discards a field. Callbacks may run before a
+later resource failure; exceptions end that invocation. Reentrant invocations
+have independent budgets. Host algebras remain trusted boundary code and confer
+no rewrite authority. Algorithms and physical-layout proofs stay in knowledge.
+
 ## Validation
 
 ```sh

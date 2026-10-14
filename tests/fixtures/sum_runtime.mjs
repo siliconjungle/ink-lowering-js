@@ -2,6 +2,14 @@ import assert from 'node:assert/strict';import fs from 'node:fs';
 import * as ordinary from './runtime-ordinary.mjs';
 const files=['runtime-flat.mjs',...fs.readdirSync(new URL('.',import.meta.url)).filter(n=>/^runtime-one-\d+\.mjs$/.test(n))];
 const outcome=fn=>{try{return {value:fn()};}catch(e){return {error:e.message};}};
+const rebuild=codec=>codec.reducer(node=>{
+ assert.ok(Object.isFrozen(node));assert.ok(Object.isFrozen(node.children));
+ if(node.kind==='record')return (...values)=>Object.fromEntries(node.fields.map((name,i)=>[name,values[i]]));
+ if(node.kind==='list'||node.kind==='vector')return {start:()=>[],step:(out,value)=>{out.push(value);return out;},finish:out=>out};
+ if(node.kind==='result')return (tag,value)=>tag?{Err:value}:{Ok:value};
+ if(node.kind==='option')return (tag,value)=>tag?{Some:value}:{None:null};
+ return value=>value;
+});
 for(const file of files){
  const flat=await import('./'+file),inputs=[{Ok:5},{Err:{Ok:'雪'}},{Err:{Err:true}}];
  const construct=(module,codec,value,limits={})=>{const builder=codec.builder(limits);const feed=(type,value)=>{const t=codec.resolve(type);switch(t.kind){case 'record':builder.open(0);for(const f of t.fields)feed(f.type,value[f.name]);builder.close();break;case 'list':case 'vector':builder.open(0);for(const x of value)feed(t.element,x);builder.close();break;case 'result':{const ok=Object.hasOwn(value,'Ok');builder.open(ok?0:1);feed(ok?t.ok:t.error,ok?value.Ok:value.Err);builder.close();break;}case 'option':{const some=Object.hasOwn(value,'Some');builder.open(some?1:0);if(some)feed(t.element,value.Some);builder.close();break;}default:builder.scalar(value);}};feed(codec.descriptor.root,value);return builder.finish();};
@@ -36,12 +44,15 @@ for(const file of files){
  const codec=module.compiledValues.json_identity.params[0],json=new module.JsonCodec(module.valueCodecs.json_identity.result);
  assert.ok(Object.isFrozen(codec.descriptor));
  for(const text of samples){const h=json.parseCompiled(codec,text),expected=json.parse(text);assert.deepEqual(codec.materialize(h),expected);assert.deepEqual(codec.encode(h),json.values.encode(expected));assert.deepEqual(codec.encodeCompact(h),json.values.compact().encode(expected));const result=module.callCompiled('json_identity',[h]);assert.equal(json.stringify(codec.materialize(result)),json.stringify(expected));
+  assert.equal(json.stringifyCompiled(codec,result),json.stringify(expected));
   for(const limits of [{nodes:0},{nodes:1},{nodes:3},{nodes:8},{depth:0},{depth:3},{bytes:40},{bytes:100},{}]){
    const a=outcome(()=>json.parseCompiled(codec,text,limits)&&true),b=outcome(()=>codec.capture(json.parse(text,limits),limits)&&true);assert.equal('value' in a,'value' in b,text+JSON.stringify(limits));
+   assert.equal('value' in outcome(()=>json.stringifyCompiled(codec,h,limits)),'value' in outcome(()=>json.stringify(codec.materialize(h,limits),limits)),text+JSON.stringify(limits));
   }
  }
  for(const text of ['','nul','[1,]','{"x":1,"\\u0078":2}','"\\ud800"','{"x":}','1e','01','true false'])assert.throws(()=>json.parseCompiled(codec,text),text);
  assert.throws(()=>json.parseCompiled(module.compiledValues.identity.params[0],'{}'),/schema mismatch/);
+ assert.throws(()=>json.stringifyCompiled(module.compiledValues.identity.params[0],module.compiledValues.identity.params[0].capture({Ok:1})),/schema mismatch/);
 
  }
  // The generic event visitor exposes only immutable wire scalars and source
@@ -52,6 +63,14 @@ for(const file of files){
   const values=name==='identity'?inputs:name==='leafs'?leafCases:['null','[1,true,"雪"]','{"__proto__":{"unknown":1e1000}}'].map(text=>new ordinary.JsonCodec(ordinary.valueCodecs.json_identity.result).parse(text));
   for(const input of values){
    const a=selected.capture(input),b=baseline.capture(input);assert.deepEqual(events(selected,a),events(baseline,b));
+   const reduce=rebuild(selected),plainReduce=rebuild(baseline);
+   assert.deepEqual(reduce(a),selected.materialize(a));assert.deepEqual(reduce(a),plainReduce(b));
+   for(const limits of [{nodes:0},{nodes:1},{nodes:4},{depth:0},{depth:2},{bytes:0},{bytes:4},{bytes:40},{bytes:60},{}])assert.deepEqual(outcome(()=>reduce(a,null,limits)),outcome(()=>selected.materialize(a,limits)));
+   assert.throws(()=>reduce(b),/owner mismatch/);
+   assert.throws(()=>selected.reducer(()=>null),/reduction/);
+   const throws=selected.reducer(node=>node.kind==='list'||node.kind==='vector'?{start(){throw Error('algebra failure');},step(){},finish(){}}:()=>{throw Error('algebra failure');});
+   assert.throws(()=>throws(a),/algebra failure/);assert.deepEqual(reduce(a),selected.materialize(a));
+   const owned=reduce(a);if(owned&&typeof owned==='object'){owned.extra='owned';assert.deepEqual(selected.materialize(a),input);}
    for(const limits of [{nodes:0},{nodes:1},{nodes:4},{depth:0},{depth:2},{bytes:40},{bytes:60},{}])assert.equal('value' in outcome(()=>events(selected,a,limits)),'value' in outcome(()=>selected.encode(a,limits)));
    assert.throws(()=>selected.visit(a,{begin(){}}),/visitor method/);
    assert.throws(()=>selected.visit(b,Object.fromEntries(['begin','end','byte','word','wide','text','count'].map(name=>[name,()=>{}]))),/owner mismatch/);
