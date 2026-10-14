@@ -174,17 +174,7 @@ impl StateEmitter<'_> {
                         .zip(ts)
                         .map(|(a, t)| self.expr(a, env, Some(&t)))
                         .collect::<LangResult<Vec<_>>>()?;
-                    format!(
-                        "__word({},{},{},{})",
-                        quote(name),
-                        vals[0],
-                        vals.get(1).map(String::as_str).unwrap_or("0"),
-                        match t {
-                            Type::I32 => -32,
-                            Type::U32 => 32,
-                            _ => 64,
-                        }
-                    )
+                    super::word_expression(name, &vals[0], vals.get(1).map(String::as_str).unwrap_or("0"), &t)
                 }
                 "choose" => format!(
                     "({}?{}:{})",
