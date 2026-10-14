@@ -767,6 +767,35 @@ impl Emitter<'_> {
                 // Literal record equality evaluates every field in source order,
                 // then compares stored values without allocating either wrapper.
                 if op == "==" || op == "!=" {
+                    // Literal sequences have known extents. Evaluate both full
+                    // operands before comparing their stored elements, including
+                    // when the extents differ. Contained floats use structural
+                    // bit identity rather than scalar IEEE equality.
+                    if let (Expr::Call(an, aa), Expr::Call(bn, ba)) = (a.as_ref(), b.as_ref()) {
+                        if an == "list" && bn == "list" && aa.len() + ba.len() <= 64 {
+                            if let Type::List(inner) = &at {
+                                let mut values = Vec::new();
+                                for args in [aa, ba] {
+                                    let mut row = Vec::new();
+                                    for expr in args {
+                                        let value = self.expr(expr, env, Some(inner))?;
+                                        row.push(self.bind(&value));
+                                    }
+                                    values.push(row);
+                                }
+                                let eq = if aa.len() != ba.len() {
+                                    "false".into()
+                                } else if aa.is_empty() {
+                                    "true".into()
+                                } else {
+                                    values[0].iter().zip(&values[1])
+                                        .map(|(a,b)| self.value_equal(inner,a,b))
+                                        .collect::<LangResult<Vec<_>>>()?.join("&&")
+                                };
+                                return Ok(format!("{}({eq})", if op == "!=" { "!" } else { "" }));
+                            }
+                        }
+                    }
                     if let (Expr::Record(an, aa), Expr::Record(bn, ba)) = (a.as_ref(), b.as_ref()) {
                         if an == bn {
                             let fields = self.p.records[an].clone();

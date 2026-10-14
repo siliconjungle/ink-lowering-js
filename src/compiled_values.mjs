@@ -2,15 +2,16 @@
 // are checked by this module's closure; copied/foreign objects cannot forge them.
 const __compiledHandles=new WeakMap();
 const __compiledBindings=new WeakMap();
-function __compiledHandle(identity,value){
+function __compiledHandle(identity,value,guaranteed=false){
  const handle=Object.freeze(Object.create(null));
- __compiledHandles.set(handle,{identity,value});return handle;
+ __compiledHandles.set(handle,{identity,value,guaranteed});return handle;
 }
-function __compiledUnwrap(handle,identity){
+function __compiledEntry(handle,identity){
  const entry=__compiledHandles.get(handle);
  if(!entry||entry.identity!==identity)throw Error('compiled value type or owner mismatch');
- return entry.value;
+ return entry;
 }
+function __compiledUnwrap(handle,identity){return __compiledEntry(handle,identity).value;}
 // Emit the portable schema's framing/scalar events without creating a buffer
 // or exposing private composite nodes. Only this wrapper receives callbacks
 // from the literal writer; host visitors never receive those closures.
