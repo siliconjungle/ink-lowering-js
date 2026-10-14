@@ -309,6 +309,7 @@ function __createState(meta,implementations,captures=null,views=[],prefixes=[]){
   a.kernels=[false,true].map(only=>__statePreflightFactories[a.index](run,a,inputs,a.output,only,rt,begin,complete,abort,end));
  }
  return Object.freeze({
+  subscribeValues(queries,callback,options){if(rt.busy||rt.host)throw Error('subscription requires transaction boundary');return observers.subscribeValues(queries,callback,options);},
   subscribeGroup(queries,callback,options){if(rt.busy||rt.host)throw Error('subscription requires transaction boundary');return observers.subscribeGroup(queries,callback,options);},
   subscribe(...args){if(rt.busy||rt.host)throw Error('subscription requires transaction boundary');return observers.subscribe(...args);},
   batch:observers.batch,flushSubscriptions:observers.flush,takeSubscriptionErrors:observers.takeErrors,
