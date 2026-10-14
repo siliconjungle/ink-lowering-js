@@ -268,3 +268,10 @@ function __scan(xs, zero, add) {
 }
 // @helper __sort
 const __sort = xs => Array.from(xs).sort((a,b) => a < b ? -1 : a > b ? 1 : 0);
+
+// @helper __wordSort
+function __wordSort(xs,Storage){
+ const sorted=Storage.from(xs).sort(),out=new Array(sorted.length);
+ for(let i=0;i<sorted.length;i++)out[i]=sorted[i];
+ return out;
+}
