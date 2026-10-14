@@ -1332,7 +1332,7 @@ impl Emitter<'_> {
 /// Emit an ES module. Backend implementation and the JavaScript engine are
 /// trusted; checked source/rewrite evidence does not certify emitted machine code.
 pub fn lower(module: &CheckedModule) -> LangResult<Emission> {
-    lower_with_layout(module, None, &BTreeSet::new(),&[],&[],None)
+    lower_with_layout(module, None, &BTreeSet::new(),&[],&[],None,&[])
 }
 pub fn lower_planned(plan: &ink_core::planning::CheckedPlan) -> LangResult<Emission> {
     plan.require_source_layout_and_boundary_capabilities(true,true,true)?;
@@ -1340,7 +1340,8 @@ pub fn lower_planned(plan: &ink_core::planning::CheckedPlan) -> LangResult<Emiss
     let layout=ink_core::snapshot::layout(plan.original().program())?;
     let elisions=plan.physical().map(|p|p.plan().record_elisions.iter().map(|l|l.record.clone()).collect()).unwrap_or_default();
     let sums=plan.physical().map(|p|p.plan().sum_spines.iter().map(|l|l.sum_type.clone()).collect::<Vec<_>>()).unwrap_or_default();
-    let mut emission=lower_with_layout(plan.module(),Some(&layout),&elisions,&sums,plan.physical().map(|p|p.plan().boundary_readers.as_slice()).unwrap_or(&[]),plan.protocol())?;
+    let support=plan.maintained().map(|views|representation_program::maintained_support(plan.module(),views,&elisions,&sum_layout::Sums::new(plan.module().program(),&sums)?,plan.protocol().is_some_and(|p|p.plan().inline_maintenance))).transpose()?;
+    let mut emission=lower_with_layout(plan.module(),Some(&layout),&elisions,&sums,plan.physical().map(|p|p.plan().boundary_readers.as_slice()).unwrap_or(&[]),plan.protocol(),support.as_ref().map(|s|s.kernels.as_slice()).unwrap_or(&[]))?;
     if let Some(physical)=plan.physical(){
         if !physical.plan().dictionary_tables.is_empty(){
             let selected=plan.module().program().states.iter().map(|s|physical.plan().dictionary_tables.binary_search(&s.name).is_ok()).collect::<Vec<_>>();
@@ -1356,7 +1357,7 @@ pub fn lower_planned(plan: &ink_core::planning::CheckedPlan) -> LangResult<Emiss
         }
     }
     if let Some(views)=plan.maintained(){
-        let support=representation_program::maintained_support(plan.module(),views,&elisions,&sum_layout::Sums::new(plan.module().program(),&sums)?,plan.protocol().is_some_and(|p|p.plan().inline_maintenance))?;
+        let support=&support.as_ref().expect("maintained support").source;
         emission.javascript=format!("{support}{}",emission.javascript);
         emission.javascript=emission.javascript.replace("__createState(__stateMetadata,__actions,__stateInputCaptures)","__createState(__stateMetadata,__actions,__stateInputCaptures,__compiledMaintained)");
         emission.javascript=emission.javascript.replace("__createState(__stateMetadata,__actions,__stateInputCaptures,[],__densePrefixes)","__createState(__stateMetadata,__actions,__stateInputCaptures,__compiledMaintained,__densePrefixes)");
@@ -1368,7 +1369,7 @@ pub fn lower_planned(plan: &ink_core::planning::CheckedPlan) -> LangResult<Emiss
 /// Emit selected code with the snapshot origin authenticated by the core.
 pub fn lower_selected(selected: &ink_core::optimisation::CheckedSelection) -> LangResult<Emission> {
     let layout = ink_core::snapshot::selected_layout(selected)?;
-    let mut emission = lower_with_layout(selected.module(), Some(&layout), &BTreeSet::new(),&[],&[],None)?;
+    let mut emission = lower_with_layout(selected.module(), Some(&layout), &BTreeSet::new(),&[],&[],None,&[])?;
     emission.manifest["selection"] =
         serde_json::to_value(selected.evidence()).map_err(|e| e.to_string())?;
     Ok(emission)
@@ -1380,6 +1381,7 @@ fn lower_with_layout(
     sum_types:&[Type],
     boundary_readers:&[ink_core::physical::BoundaryReader],
     protocol:Option<&ink_core::protocol::CheckedProtocol>,
+    kernels:&[Option<String>],
 ) -> LangResult<Emission> {
     let p = module.program();
     // Stateful functions share the exact-bit carrier with actions/snapshots.
@@ -1606,9 +1608,9 @@ fn lower_with_layout(
     ));
     let state = if !p.actions.is_empty() || !p.states.is_empty() || !p.keeps.is_empty() {
         let (code, metadata) = if let Some(layout) = layout {
-            state::emit_with_sums(module, layout, elisions,&emitter.equality.sums,protocol)?
+            state::emit_with_sums(module, layout, elisions,&emitter.equality.sums,protocol,kernels)?
         } else {
-            state::emit_with_sums(module, &ink_core::snapshot::layout(p)?, elisions,&emitter.equality.sums,protocol)?
+            state::emit_with_sums(module, &ink_core::snapshot::layout(p)?, elisions,&emitter.equality.sums,protocol,kernels)?
         };
         javascript.push_str(include_str!("snapshot.mjs"));
         javascript.push_str(&code);

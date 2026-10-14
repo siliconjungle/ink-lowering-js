@@ -97,7 +97,11 @@ impl Emit<'_> {
         Ok(out)
     }
 }
-pub(crate) fn maintained_support(module: &ink_core::core::CheckedModule, views:&ink_core::maintained::CheckedViews,elisions:&std::collections::BTreeSet<String>,sums:&super::sum_layout::Sums,inline_direct:bool) -> LangResult<String> {
+pub(crate) struct MaintainedSupport {
+    pub source:String,
+    pub kernels:Vec<Option<String>>,
+}
+pub(crate) fn maintained_support(module: &ink_core::core::CheckedModule, views:&ink_core::maintained::CheckedViews,elisions:&std::collections::BTreeSet<String>,sums:&super::sum_layout::Sums,inline_direct:bool) -> LangResult<MaintainedSupport> {
     let projection=ink_core::action_model::Projection::derive(module)?;
     let types=projection.types.iter().enumerate().map(|(i,(key,sort))|Ok((key.clone(),(i,serde_json::from_str::<Type>(key).map_err(|e|e.to_string())?,sort.clone())))).collect::<LangResult<BTreeMap<_,_>>>()?;
     let e=Emit{elisions:elisions.clone(),sums:sums.clone(),program:module.program(),projection:&projection,types};
@@ -109,6 +113,7 @@ pub(crate) fn maintained_support(module: &ink_core::core::CheckedModule, views:&
     let mut fallback=false;
     let mut native_roots=vec![true;module.program().states.len()];
     let mut inline_bodies=BTreeMap::<(usize,&str),String>::new();
+    let mut kernel_bodies=BTreeMap::<(usize,&str),String>::new();
     let mut root_views=vec![Vec::new();module.program().states.len()];
     for ((v,s),zero) in views.package().views.iter().zip(views.subjects()).zip(views.zeros()) {
         let root=module.program().states.iter().position(|r|r.name==s.table).unwrap();
@@ -122,7 +127,8 @@ pub(crate) fn maintained_support(module: &ink_core::core::CheckedModule, views:&
         let contribution=|r:&str|call(contribution_id,vec![var("key"),var(r)]);
         let c=|a,b|call(&v.combine,vec![a,b]);
         let inv=|a|call(&v.inverse,vec![a]);
-        let replacement=if let Some(u)=&v.update{call(&u.function,vec![var("total"),contribution("old"),contribution("row")])}
+        let replacement=if let Some(u)=&v.row_update{call(&u.function,vec![var("total"),var("key"),var("old"),var("row")])}
+            else if let Some(u)=&v.update{call(&u.function,vec![var("total"),contribution("old"),contribution("row")])}
             else{c(c(var("total"),inv(contribution("old"))),contribution("row"))};
         let candidates=[
             ("contribution",vec![("key",key.as_ref()),("row",row.as_ref())],contribution("row"),format!("(key,row)=>f_{}({},{})",contribution_id,e.read_mode(key,"key","0","true")?,e.read_mode(row,"row","0","true")?)),
@@ -139,6 +145,7 @@ pub(crate) fn maintained_support(module: &ink_core::core::CheckedModule, views:&
                     if ["insert","remove","replace"].contains(&name){
                         let bindings=params.iter().filter_map(|(n,_)|match *n{"total"=>Some(format!("const total=rt.keeps[{keep}];")),"row"=>Some("const row=next;".into()),"old"=>Some("const old=prior;".into()),_=>None}).collect::<String>();
                         inline_bodies.insert((view_index,name),format!("{{{bindings}{code}rt.viewNext[{keep}]={value};}}"));
+                        kernel_bodies.insert((view_index,name),format!("{{{bindings}{code}__nextKeep{keep}={value};}}"));
                     }
                     format!("({})=>{{{code}return {value};}}",params.iter().map(|p|p.0).collect::<Vec<_>>().join(","))
                 },
@@ -168,7 +175,21 @@ pub(crate) fn maintained_support(module: &ink_core::core::CheckedModule, views:&
         if native_roots[root]{format!("(rt,key,prior,next)=>{{if(prior===undefined){{{}}}else if(next===undefined){{{}}}else{{{}}}}}",branch("insert","next"),branch("remove","prior"),branch("replace","prior,next"))}
         else{format!("(rt,key,prior,next)=>{{{}}}",ids.iter().map(|(i,k)|format!("rt.viewNext[{k}]=__viewValue(__views[{i}],rt.keeps[{k}],key,prior,next);")).collect::<String>())}
     }).collect::<Vec<_>>();
-    Ok(format!("const __compiledMaintained=(()=>{{{out}const __views=[{entries}];__views.prepareRoots=[{}];__views.directRoots=[{}];return __views;}})();\n",preparers.join(","),directs.join(",")))
+    let ir=ink_core::action_ir::CheckedActions::elaborate(module)?;
+    let effects=ink_core::effects::CheckedEffects::derive(&ir)?;
+    let kernels=root_views.iter().enumerate().map(|(root,ids)|->LangResult<Option<String>>{
+        if !inline_direct||!native_roots[root]||ids.is_empty(){return Ok(None);}
+        let declarations=ids.iter().map(|(_,keep)|format!("let __nextKeep{keep};")).collect::<String>();
+        let branch=|method:&str|ids.iter().map(|(i,_)|kernel_bodies.get(&(*i,method)).expect("native maintained body").clone()).collect::<String>();
+        let mut installs=String::new();
+        for (keep,k) in module.program().keeps.iter().enumerate(){
+            if !effects.keep(&k.name).ok_or("missing keep effects")?.access.reads.contains(&module.program().states[root].name){continue;}
+            let value=if ids.iter().any(|(_,id)|*id==keep){format!("__nextKeep{keep}")}else{"undefined".into()};
+            write!(installs,"{{const value={value};if(publish)rt.changedOutputs[{keep}]=rt.keeps[{keep}]!==value?rt.changedOutputEpoch:0;rt.keeps[{keep}]=value;}}").unwrap();
+        }
+        Ok(Some(format!("{declarations}if(prior===undefined){{{}}}else if(next===undefined){{{}}}else{{{}}}__storeDirect(rt,{root},key,prior,next,slot);const publish=rt.meta.outputPublication&&!rt.observers.directRoots[{root}]&&rt.observers.active;if(publish&&++rt.changedOutputEpoch===4294967296){{rt.changedOutputs.fill(0);rt.changedOutputEpoch=1;}}{installs}",branch("insert"),branch("remove"),branch("replace"))))
+    }).collect::<LangResult<Vec<_>>>()?;
+    Ok(MaintainedSupport{source:format!("const __compiledMaintained=(()=>{{{out}const __views=[{entries}];__views.prepareRoots=[{}];__views.directRoots=[{}];return __views;}})();\n",preparers.join(","),directs.join(",")),kernels})
 }
 
 pub fn lower(checked: &CheckedRepresentation) -> LangResult<String> {

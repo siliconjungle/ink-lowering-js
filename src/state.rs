@@ -326,11 +326,15 @@ impl StateEmitter<'_> {
                     // Fixed table primitives take typed arguments directly.
                     // Keep the generic dispatcher for compound operations only.
                     if self.preflight && ["put","insert","replace","remove"].contains(&n.as_str()) {
+                        // Dense plans admit only canonical unsigned integer keys.
+                        // Number conversion cannot round a key outside the at-most
+                        // 2^20 prefix into it. Capture its fixed capacity at bind;
+                        // restore preserves the selected layout and capacity.
                         let mode=if n=="insert"{1}else if n=="replace"{2}else{0};
                         let next=if n=="remove"{"undefined".into()}else{values[1].clone()};
                         let result=if n=="remove" {"(__stagePrior===undefined?{None:null}:{Some:__stagePrior})"} else {"null"};
                         let membership=if mode==1 {"(__stagePrior!==undefined?__preflightError('insert key already present'):null)"}else if mode==2{"(__stagePrior===undefined?__preflightError('replace key absent'):null)"}else{"null"};
-                        return Ok(format!("(__stageRoot={i},__stageKey={},__stageNext={next},__stageSlot=__dense{i}?rt.tables[{i}].slot(__stageKey):undefined,__stagePrior=__stageSlot===undefined?rt.tables[{i}].get(__stageKey):__stageSlot<0?rt.tables[{i}].sparse.get(__stageKey):rt.tables[{i}].dense[__stageSlot],{membership},__stageChanged=__stagePrior===undefined?__stageNext!==undefined:__stageNext===undefined||!__stateRootEquals[{i}](__stagePrior,__stageNext),{result})",values[0]));
+                        return Ok(format!("(__stageRoot={i},__stageKey={},__stageNext={next},__stageSlot=__dense{i}?Number(__stageKey):undefined,__stageSlot=__dense{i}&&__stageSlot>=__denseLimit{i}?-1:__stageSlot,__stagePrior=__stageSlot===undefined?rt.tables[{i}].get(__stageKey):__stageSlot<0?rt.tables[{i}].sparse.get(__stageKey):rt.tables[{i}].dense[__stageSlot],{membership},__stageChanged=__stagePrior===undefined?__stageNext!==undefined:__stageNext===undefined||!__stateRootEquals[{i}](__stagePrior,__stageNext),{result})",values[0]));
                     }
                     if n=="get"||n=="contains"||n=="remove" {
                         let helper=match n.as_str(){"get"=>"__tableGet","contains"=>"__tableContains",_=>"__tableRemove"};
@@ -447,6 +451,7 @@ pub(crate) fn emit_with_sums(
     elisions: &BTreeSet<String>,
     sums:&super::sum_layout::Sums,
     protocol:Option<&ink_core::protocol::CheckedProtocol>,
+    kernels:&[Option<String>],
 ) -> LangResult<(String, Value)> {
     let p = module.program();
     let checked_actions = ink_core::action_ir::CheckedActions::elaborate(module)?;
@@ -527,6 +532,12 @@ pub(crate) fn emit_with_sums(
         let use_preflight=explicit==Some(&ink_core::protocol::Execution::Preflight)||inferred==Some(ink_core::protocol::Execution::Preflight);
         let direct_keep=protocol.filter(|p|p.plan().direct_reads.contains(&a.name)).and_then(|_|capabilities[i].direct_keep);
         if use_preflight {
+            // Checked preflight bodies exclude calls into source functions,
+            // queries and changes, and all ingress is owned before evaluation.
+            // Maintained definitions and codecs have no host callbacks. Thus
+            // nobody can observe an in-progress flag before commit/publication:
+            // retain the entry boundary check but omit writes and cleanup for
+            // that flag. Host transactions still use the journalled fallback.
             let locals=a.params.iter().enumerate().map(|(j,(_,t))|format!("const b{j}={};",if matches!(t,Type::U64|Type::U32|Type::I32|Type::Bool|Type::Unit|Type::String)||matches!(t,Type::Named(n) if p.enums.contains_key(n)){format!("p{j}")}else{format!("ownedInputs?p{j}:inputs[{j}](p{j})")})).collect::<String>();
             let mut native_env=Env::new();for (j,(n,t)) in a.params.iter().enumerate(){native_env.insert(n.clone(),(format!("b{j}"),t.clone()));}
             emitter.preflight=true;
@@ -537,18 +548,36 @@ pub(crate) fn emit_with_sums(
             let result=if ink_core::action_shape::fresh_native_result(&checked_actions,i)&&!sums.contains_type(p,&a.result)?{"value"}else{"output(value)"};
             let writes=&effects.action(&a.name).ok_or("missing action effects")?.access.writes;
             let root=p.states.iter().enumerate().filter(|(_,s)|writes.contains(&s.name)).map(|(i,_)|i).collect::<Vec<_>>();
-            let dense_bindings=root.iter().map(|r|format!("const __dense{r}=rt.tables[{r}] instanceof __DenseTable;")).collect::<String>();
+            let dense_bindings=root.iter().map(|r|format!("const __dense{r}=rt.tables[{r}] instanceof __DenseTable;const __denseLimit{r}=__dense{r}?rt.tables[{r}].limit:0;")).collect::<String>();
             let (bindings,prepare,commit)=if root.len()==1 {
                 let r=root[0];(format!("const prepare=rt.views.directRoots?.[{r}];"),"if(prepare)prepare(rt,__stageKey,__stagePrior,__stageNext);".to_string(),format!("__stateCommitRoot{r}(rt,__stageKey,__stagePrior,__stageNext,__stageSlot);"))
             }else{(String::new(),"__prepareDirect(rt,__stageRoot,__stageKey,__stagePrior,__stageNext);".to_string(),"__commitDirect(rt,__stageRoot,__stageKey,__stagePrior,__stageNext,__stageSlot);".to_string())};
+            let inline_kernel=if root.len()==1{kernels.get(root[0]).and_then(|k|k.as_ref())}else{None};
+            let publish_root=if root.len()==1{root[0].to_string()}else{"__stageRoot".to_string()};
             let generic=bound_factories.last().unwrap();
             let advance=if protocol.is_some_and(|p|p.plan().compact_commits.is_some()){"__nextCommit(rt.version)"}else{"rt.version+1n"};
-            let (event_prepare,event_commit)=if protocol.is_some_and(|p|p.plan().event_columns) {
-                ("const events=only?null:__eventChannel!==null?[{commit:publicNext,position:0n,channel:__eventChannel,value:rt.eventOutput.get(__eventChannel)(__eventValue)}]:[];", "if(__eventChannel!==null)rt.outbox.append(next,0n,__eventChannel,__eventValue);")
-            }else{
-                ("let event=null;if(__eventChannel!==null)event={commit:next,position:0n,channel:__eventChannel,value:__eventValue};const events=only?null:event?[{...event,commit:publicNext,value:rt.eventOutput.get(__eventChannel)(__eventValue)}]:[];", "if(event)rt.outbox.push(event);")
+            let column_events=protocol.is_some_and(|p|p.plan().event_columns);
+            let factory=|result_only:bool,fused:bool| {
+                let prepare=if fused{""}else{prepare.as_str()};
+                let commit=if fused{format!("{{const key=__stageKey,prior=__stagePrior,next=__stageNext,slot=__stageSlot;{}}}",inline_kernel.expect("native root kernel"))}else{commit.clone()};
+                let event_prepare=match (column_events,result_only) {
+                    (true,true)=>"",
+                    (true,false)=>"const events=__eventChannel!==null?[{commit:publicNext,position:0n,channel:__eventChannel,value:rt.eventOutput.get(__eventChannel)(__eventValue)}]:[];",
+                    (false,true)=>"let event=null;if(__eventChannel!==null)event={commit:next,position:0n,channel:__eventChannel,value:__eventValue};",
+                    (false,false)=>"let event=null;if(__eventChannel!==null)event={commit:next,position:0n,channel:__eventChannel,value:__eventValue};const events=event?[{...event,commit:publicNext,value:rt.eventOutput.get(__eventChannel)(__eventValue)}]:[];",
+                };
+                let event_commit=if column_events{"if(__eventChannel!==null)rt.outbox.append(next,0n,__eventChannel,__eventValue);"}else{"if(event)rt.outbox.push(event);"};
+                let failed=if result_only{"result"}else{"{result,committed:false,version:__versionWord(rt.version),events:[]}"};
+                let public_next=if result_only{""}else{"const publicNext=__versionWord(next);"};
+                let successful=if result_only{"result"}else{"{result,committed:true,version:publicNext,events}"};
+                format!("({})=>{{if(rt.host)return fallback({});if(rt.busy)throw Error('state operation already in progress');{locals}let __stageRoot=-1,__stageKey,__stagePrior,__stageNext,__stageSlot,__stageChanged=false,__eventChannel=null,__eventValue;let value;__inkBody:{{{abort}}}const result={result};if({failure})return {failed};if(rt.version===18446744073709551615n)throw Error('commit sequence exhausted');const next={advance};{public_next}if(__stageChanged){{{prepare}}}{event_prepare}if(__stageChanged){{{commit}}}{event_commit}rt.version=next;if(__stageChanged)schedules[{publish_root}]?.(publicationOutputs,rt.changedOutputEpoch);return {successful};}}",params.join(","),params.join(","))
             };
-            preflight_factories.push(format!("(run,a,inputs,output,only,rt,begin,complete,abort,end,ownedInputs=false)=>{{const fallback=ownedInputs?({})=>run(a,[{}],null,output,only,true):({generic})(run,a,inputs,output,only,rt,begin,complete,abort,end);{bindings}{dense_bindings}return ({})=>{{if(rt.host)return fallback({});if(rt.busy)throw Error('state operation already in progress');{locals}rt.busy=true;let __released=false;let __stageRoot=-1,__stageKey,__stagePrior,__stageNext,__stageSlot,__stageChanged=false,__eventChannel=null,__eventValue;try{{let value;__inkBody:{{{abort}}}const result={result};if({failure})return only?result:{{result,committed:false,version:__versionWord(rt.version),events:[]}};if(rt.version===18446744073709551615n)throw Error('commit sequence exhausted');const next={advance};const publicNext=only?null:__versionWord(next);if(__stageChanged){{{prepare}}}{event_prepare}if(__stageChanged){{{commit}}}{event_commit}rt.version=next;rt.busy=false;__released=true;if(__stageChanged&&rt.observers.active)rt.observers.commitRoot(__stageRoot,rt.meta.outputPublication?rt.changedOutputs:null,rt.changedOutputEpoch);return only?result:{{result,committed:true,version:publicNext,events}};}}finally{{if(!__released)rt.busy=false;}}}};}}",params.join(","),params.join(","),params.join(","),params.join(",")));
+            // Full replies retain preparation before fallible public event
+            // copying. Result-only kernels can compute scalar keeps in locals
+            // and commit them directly without intermediate runtime scratch.
+            let only_body=factory(true,inline_kernel.is_some());let complete_body=factory(false,false);
+            preflight_factories.push(format!("(run,a,inputs,output,only,rt,begin,complete,abort,end,ownedInputs=false)=>{{const fallback=ownedInputs?({})=>run(a,[{}],null,output,only,true):({generic})(run,a,inputs,output,only,rt,begin,complete,abort,end);{bindings}{dense_bindings}const schedules=rt.observers.rootSchedules,publicationOutputs=rt.meta.outputPublication?rt.changedOutputs:null;return only?{only_body}:{complete_body};}}",params.join(","),params.join(",")));
+
         }else {preflight_factories.push("null".into());}
         equal_results.push(format!("(a,b)=>{}",emitter.equality.expr(&a.result,"a","b")?));
         let mut env = Env::new();
@@ -573,7 +602,7 @@ pub(crate) fn emit_with_sums(
     }
     for (root,keeps) in keep_invalidations.iter().enumerate(){
         let updates=keeps.iter().map(|k|format!("{{const value=rt.viewByKeep[{k}]?rt.viewNext[{k}]:undefined;if(publish)rt.changedOutputs[{k}]=rt.keeps[{k}]!==value?rt.changedOutputEpoch:0;rt.keeps[{k}]=value;}}" )).collect::<String>();
-        code.push_str(&format!("function __stateCommitRoot{root}(rt,key,prior,next,slot){{__storeDirect(rt,{root},key,prior,next,slot);const publish=rt.meta.outputPublication&&rt.observers.active&&!rt.observers.directRoots[{root}];if(publish&&++rt.changedOutputEpoch===4294967296){{rt.changedOutputs.fill(0);rt.changedOutputEpoch=1;}}{updates}}}\n"));
+        code.push_str(&format!("function __stateCommitRoot{root}(rt,key,prior,next,slot){{__storeDirect(rt,{root},key,prior,next,slot);const publish=rt.meta.outputPublication&&!rt.observers.directRoots[{root}]&&rt.observers.active;if(publish&&++rt.changedOutputEpoch===4294967296){{rt.changedOutputs.fill(0);rt.changedOutputEpoch=1;}}{updates}}}\n"));
     }
     code.push_str(&format!("const __stateDirectReadFactories=[{}];\n",direct_read_factories.join(",")));
     code.push_str(&emitter.equality.source());
@@ -587,7 +616,7 @@ pub(crate) fn emit_with_sums(
         .iter()
         .map(|(n, t)| Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?,"snapshotType":ink_core::snapshot_wire::descriptor(&layout.events.iter().find(|(name,_)|name==n).unwrap().1)})))
         .collect::<LangResult<Vec<_>>>()?;
-    let mut state = json!({"actions":actions,"roots":roots,"events":events,"keeps":keeps,"keepInvalidations":keep_invalidations,"invariantChecks":p.contracts.invariant_checks,"outputPublication":protocol.is_some_and(|p|p.plan().output_publication),"snapshotRows":protocol.is_some_and(|p|p.plan().snapshot_rows),"eventColumns":protocol.is_some_and(|p|p.plan().event_columns),"compactCommits":protocol.is_some_and(|p|p.plan().compact_commits.is_some()),"snapshot":{"program":layout.program,"schema":layout.schema}});
+    let mut state = json!({"actions":actions,"roots":roots,"events":events,"keeps":keeps,"keepInvalidations":keep_invalidations,"invariantChecks":p.contracts.invariant_checks,"outputPublication":protocol.is_some_and(|p|p.plan().output_publication),"snapshotRows":protocol.is_some_and(|p|p.plan().snapshot_rows),"eventColumns":protocol.is_some_and(|p|p.plan().event_columns),"eventRuns":protocol.is_some_and(|p|p.plan().event_runs),"compactCommits":protocol.is_some_and(|p|p.plan().compact_commits.is_some()),"snapshot":{"program":layout.program,"schema":layout.schema}});
     if let Some(protocol)=protocol {
         for prefix in &protocol.plan().columns {
             let i=p.states.iter().position(|s|s.name==prefix.table).unwrap();

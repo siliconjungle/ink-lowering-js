@@ -1,7 +1,7 @@
 // Fixed subscription lifecycle. Root/output edges derive from checked source;
 // values and ownership codecs are compiled from each query's declared type.
 function __createObservers(prepare){
- const subscriptions=new Map(),byRoot=new Map(),errors=[],directRoots=[];
+ const subscriptions=new Map(),byRoot=new Map(),errors=[],directRoots=[],rootSchedules=[];
  let pending=[],spare=[];
  let next=0,held=0,flushing=false;
  function report(s,error,phase){errors.push({query:s?.query??null,error,phase});if(s?.onError)try{s.onError(error);}catch(e){errors.push({query:s.query,error:e,phase:'error-handler'});}}
@@ -30,10 +30,26 @@ function __createObservers(prepare){
   if(typeof callback!=='function'||onError!==undefined&&typeof onError!=='function')throw TypeError('subscription callback');
   const s={...q,id:next++,query,callback,onError,active:true,queued:false,deliver:false,delivery:undefined};
   if(s.pair){s.value0=s.pairState?s.pairState.keeps[s.keep0]:s.read0();s.value1=s.pairState?s.pairState.keeps[s.keep1]:s.read1();}else{s.value=s.capture(s.read());}subscriptions.set(s.id,s);
-  for(const root of s.roots){let ids=byRoot.get(root);if(!ids)byRoot.set(root,ids=[]);ids.push(s);directRoots[root]=ids.length===1&&s.pairState?s:null;}
-  const dispose=()=>{if(!subscriptions.delete(s.id))return;s.active=false;for(const root of s.roots){const ids=byRoot.get(root);ids.splice(ids.indexOf(s),1);directRoots[root]=ids.length===1&&ids[0].pairState?ids[0]:null;if(!ids.length)byRoot.delete(root);}};
+  for(const root of s.roots){let ids=byRoot.get(root);if(!ids)byRoot.set(root,ids=[]);ids.push(s);schedule(root,ids);}
+  const dispose=()=>{if(!subscriptions.delete(s.id))return;s.active=false;for(const root of s.roots){const ids=byRoot.get(root);ids.splice(ids.indexOf(s),1);schedule(root,ids);if(!ids.length)byRoot.delete(root);}};
   if(immediate)try{if(s.pair)callback(s.value0,s.value1);else callback(s.output(s.value));}catch(e){dispose();throw e;}
   return dispose;
+ }
+ // Bind the publication implementation when consumers change, instead of
+ // rediscovering the one-consumer schedule on each source mutation.
+ function schedule(root,ids){
+  const s=directRoots[root]=ids.length===1&&ids[0].pairState?ids[0]:null;
+  rootSchedules[root]=!ids.length?null:s?()=>publishPair(s):(outputs,epoch)=>{enqueueRoot(root,outputs,epoch);flush();};
+ }
+ function publishPair(s){
+  const a=s.pairState.keeps[s.keep0],b=s.pairState.keeps[s.keep1];
+  if(s.value0===a&&s.value1===b)return;
+  if(!held&&!flushing&&!pending.length){
+   s.value0=a;s.value1=b;flushing=true;
+   try{s.callback(a,b);}catch(e){report(s,e,'listener');}finally{flushing=false;}
+   flush(1);return;
+  }
+  if(!s.queued){s.queued=true;pending.push(s);}flush();
  }
  function enqueueRoot(root,outputs,epoch){
   const slots=byRoot.get(root);if(!slots)return;
@@ -47,7 +63,7 @@ function __createObservers(prepare){
   }
  }
  return {
-  directRoots,
+  directRoots,rootSchedules,
   get active(){return subscriptions.size!==0;},
   subscribe(query,args,callback,options){return install(query,prepare(query,args),callback,options);},
   subscribeGroup(queries,callback,options){
@@ -78,21 +94,7 @@ function __createObservers(prepare){
   // A checked single-root action supplies a reusable array of changed outputs.
   // No root carrier, Set, affected-ID array or Map lookup per delivery is needed.
   commitRoot(root,outputs=null,epoch=0){
-   if(!subscriptions.size)return;
-   const s=directRoots[root];
-   // The one-consumer schedule reads its committed slots exactly once. It also
-   // handles held/reentrant publication without reconstructing output flags.
-   if(s){
-    const a=s.pairState.keeps[s.keep0],b=s.pairState.keeps[s.keep1];
-    if(s.value0===a&&s.value1===b)return;
-    if(!held&&!flushing&&!pending.length){
-     s.value0=a;s.value1=b;flushing=true;
-     try{s.callback(a,b);}catch(e){report(s,e,'listener');}finally{flushing=false;}
-     flush(1);return;
-    }
-    if(!s.queued){s.queued=true;pending.push(s);}flush();return;
-   }
-   enqueueRoot(root,outputs,epoch);flush();
+   rootSchedules[root]?.(outputs,epoch);
   },
   hold(){held++;return pending.slice();},
   release(){if(!held)throw Error('subscription boundary mismatch');held--;flush();},

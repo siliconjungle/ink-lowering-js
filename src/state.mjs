@@ -124,7 +124,7 @@ function __storeDirect(rt,index,key,prior,next,slot){
 }
 function __commitDirect(rt,index,key,prior,next,slot){
  __storeDirect(rt,index,key,prior,next,slot);
- const publishOutputs=rt.meta.outputPublication&&rt.observers.active&&!rt.observers.directRoots[index];
+ const publishOutputs=rt.meta.outputPublication&&!rt.observers.directRoots[index]&&rt.observers.active;
  if(publishOutputs&&++rt.changedOutputEpoch===4294967296){rt.changedOutputs.fill(0);rt.changedOutputEpoch=1;}
 
  for(const keep of rt.meta.keepInvalidations[index]){
