@@ -110,16 +110,20 @@ function __prepareDirect(rt,index,key,prior,next){
  if(prepare)prepare(rt,key,prior,next);
  else for(const view of rt.viewsByRoot[index])rt.viewNext[view.keep]=__viewValue(view,rt.keeps[view.keep],key,prior,next);
 }
-function __commitDirect(rt,index,key,prior,next){
+function __storeDirect(rt,index,key,prior,next){
  const table=rt.tables[index];__invalidateSnapshotRow(rt,index,key);
  if((prior!==undefined)!==(next!==undefined))__tableMembership(rt,index,key,next!==undefined);
  if(rt.changeTracking)__recordChange(rt,index,key,prior,next);
  if(next===undefined)table.delete(key);else table.set(key,next);
- const publishOutputs=rt.meta.outputPublication&&rt.observers.active;
- if(publishOutputs)rt.changedOutputs.clear();
+}
+function __commitDirect(rt,index,key,prior,next){
+ __storeDirect(rt,index,key,prior,next);
+ const publishOutputs=rt.meta.outputPublication&&rt.observers.active&&!rt.observers.directRoots[index];
+ if(publishOutputs&&++rt.changedOutputEpoch===4294967296){rt.changedOutputs.fill(0);rt.changedOutputEpoch=1;}
+
  for(const keep of rt.meta.keepInvalidations[index]){
   const value=rt.viewByKeep[keep]?rt.viewNext[keep]:undefined;
-  if(publishOutputs&&rt.keeps[keep]!==value)rt.changedOutputs.add(keep);
+  if(publishOutputs)rt.changedOutputs[keep]=rt.keeps[keep]!==value?rt.changedOutputEpoch:0;
   rt.keeps[keep]=value;
  }
 }
@@ -127,9 +131,12 @@ function __emit(rt,channel,value){
  if(rt.eventCount++===0){rt.eventChannel=channel;rt.eventValue=value;}
  else rt.staged.push([channel,value]);
 }
+// Checked prefix capacities are at most 2^20. Number conversion is exact
+// inside that prefix; rounding a wide word cannot move it into the prefix.
+// Wide keys retain their original full-width value in the sparse fallback.
 class __DenseTable{
- constructor(capacity){this.limit=capacity;this.bigLimit=BigInt(capacity);this.dense=[];this.sparse=new Map();this.members=new Set();}
- slot(key){return (typeof key==='bigint'?key>=0n&&key<this.bigLimit:Number.isInteger(key)&&key>=0&&key<this.limit)?Number(key):-1;}
+ constructor(capacity){this.limit=capacity;this.dense=[];for(let i=0;i<capacity;i++)this.dense.push(undefined);this.sparse=new Map();this.members=new Set();}
+ slot(key){const i=Number(key);return Number.isInteger(i)&&i>=0&&i<this.limit?i:-1;}
  get size(){return this.members.size;}
  get(key){const i=this.slot(key);return i<0?this.sparse.get(key):this.dense[i];}
  has(key){return this.get(key)!==undefined;}
@@ -142,13 +149,13 @@ class __DenseTable{
 }
 class __ColumnTable {
  constructor(root){
-  this.limit=root.columnPrefix.capacity;this.bigLimit=BigInt(this.limit);this.keyBig=root.key.kind==='u64';
+  this.limit=root.columnPrefix.capacity;this.keyBig=root.key.kind==='u64';
   this.fields=root.value.fields;this.exactNumbers=root.columnPrefix.exactNumbers;
   this.present=new Uint8Array(this.limit);this.count=0;this.sparse=new Map();
   this.lanes=this.fields.map(f=>f.type.kind==='u64'?(this.exactNumbers?new Float64Array(this.limit):new BigUint64Array(this.limit)):f.type.kind==='i32'?new Int32Array(this.limit):f.type.kind==='bool'?new Uint8Array(this.limit):new Uint32Array(this.limit));
   this.wide=this.fields.map(f=>f.type.kind==='u64'&&this.exactNumbers?new Map():null);
  }
- slot(key){return (typeof key==='bigint'?key>=0n&&key<this.bigLimit:Number.isInteger(key)&&key>=0&&key<this.limit)?Number(key):-1;}
+ slot(key){const i=Number(key);return Number.isInteger(i)&&i>=0&&i<this.limit?i:-1;}
  get size(){return this.count+this.sparse.size;}
  has(key){const i=this.slot(key);return i<0?this.sparse.has(key):this.present[i]!==0;}
  get(key){const i=this.slot(key);if(i<0)return this.sparse.get(key);if(!this.present[i])return undefined;const row=Object.create(null);for(let j=0;j<this.fields.length;j++){const f=this.fields[j],v=this.lanes[j][i];row[f.name]=f.type.kind==='bool'?v!==0:f.type.kind==='u64'&&this.exactNumbers?(this.wide[j].get(i)??BigInt(v)):v;}return row;}
@@ -212,7 +219,7 @@ function __createState(meta,implementations,captures=null,views=[],prefixes=[]){
  rt.eventCount=0;rt.eventChannel=null;rt.eventValue=null;
  rt.viewNext=new Array(meta.keeps.length);rt.cell=null;rt.cellMode=false;rt.ctx={fuel:100000000};
  rt.keepBefore=meta.keeps.length?new Array(meta.keeps.length):null;
- rt.changedRoots=new Set();rt.changedOutputs=new Set();
+ rt.changedRoots=new Set();rt.changedOutputs=new Array(meta.keeps.length).fill(0);rt.changedOutputEpoch=0;
  rt.snapshotRows=meta.snapshotRows?meta.roots.map(()=>new Map()):null;
  rt.changeTracking=false;rt.changeLog=[];rt.changeEpoch=0;rt.changeTokens=new Map();
  const actionMap=new Map(meta.actions.map(a=>[a.name,{...a,inputs:captures?captures[a.index]:a.params.map(p=>__stateCapture(p.type)),output:__stateResult(a.result)}]));
@@ -224,7 +231,7 @@ function __createState(meta,implementations,captures=null,views=[],prefixes=[]){
   const captured=a.inputs.map((convert,i)=>convert(args[i]));
   const publicArgs=captured.map((v,i)=>__stateResult(a.params[i].type)(v));
   const scalar=['u64','u32','i32','bool','string','unit','enum','id'].includes(a.result.kind);
-  return {scalar,direct:scalar&&a.directKeep!==null&&a.directKeep!==undefined?()=>rt.keeps[a.directKeep]:null,roots:a.roots,outputs:rt.meta.outputPublication&&a.directKeep!==null&&a.directKeep!==undefined?[a.directKeep]:[],read:!a.precondition&&a.params.length===0?readZero(a,true):()=>run(a,publicArgs,null,null,true),capture:scalar?v=>v:__stateCapture(a.result),output:scalar?v=>v:a.output,equal:__stateQueryEquals[a.index]};
+  return {scalar,committed:scalar&&a.directKeep!==null&&a.directKeep!==undefined?{state:rt,keep:a.directKeep}:null,direct:scalar&&a.directKeep!==null&&a.directKeep!==undefined?()=>rt.keeps[a.directKeep]:null,roots:a.roots,outputs:rt.meta.outputPublication&&a.directKeep!==null&&a.directKeep!==undefined?[a.directKeep]:[],read:!a.precondition&&a.params.length===0?readZero(a,true):()=>run(a,publicArgs,null,null,true),capture:scalar?v=>v:__stateCapture(a.result),output:scalar?v=>v:a.output,equal:__stateQueryEquals[a.index]};
  });
  function invoke(name,args){const a=actionMap.get(name);if(!a)throw Error(`unknown action ${name}`);return run(a,args);}
  function readZero(a,resultOnly){
