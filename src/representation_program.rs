@@ -114,6 +114,7 @@ pub(crate) fn maintained_support(module: &ink_core::core::CheckedModule, views:&
         // Extremum views need the ordered-multiset controller, which only the
         // Rust lowering provides; this target fails closed.
         if v.extremum.is_some(){return Err("JavaScript maintained extremum views are not implemented; select a Rust plan".into());}
+        if v.group.is_some(){return Err("JavaScript maintained grouped views are not implemented; select a Rust plan".into());}
         let root=module.program().states.iter().position(|r|r.name==s.table).unwrap();
         let keep=module.program().keeps.iter().position(|k|k.name==s.keep).unwrap();
         let Type::Table(key,row)=&module.program().states[root].ty else {unreachable!()};
