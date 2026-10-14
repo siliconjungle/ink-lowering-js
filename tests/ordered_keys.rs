@@ -10,7 +10,7 @@ const strings=['','a','a\0','a雪','雪','é','e\u0301','\ud7ff','\ue000','𐀀'
 for(const a of strings)for(const b of strings)assert.equal(Math.sign(__keyCompare(a,b,{kind:'string'})),Math.sign(utf8(a,b)));
 let seed=1234567;const random=n=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed%n;};
 for(const [type,keys,compare]of [[{kind:'string'},strings,utf8],[{kind:'u32'},[0,1,2,97,4294967295],(a,b)=>a-b],[{kind:'u64'},[0n,1n,97n,18446744073709551615n],(a,b)=>a<b?-1:a>b?1:0]]){
- const rt={tables:[new Map()],meta:{roots:[{key:type}]},seen:[new Set()],undo:[],viewsByRoot:[[]],cell:null,cellMode:false};
+ const rt={tables:[new Map()],meta:{roots:[{key:type}]},seen:[new Set()],undo:[],viewsByRoot:[[]],activeViewRoots:new Uint8Array(1),cell:null,cellMode:false};
  const check=()=>{const expected=[...rt.tables[0].keys()].sort(compare);assert.deepEqual(__orderedKeys(rt,0),expected);assert.deepEqual(__table(rt,0,'values',[]),expected.map(k=>rt.tables[0].get(k)));};
  for(let turn=0;turn<1000;turn++){
   const before=new Map(rt.tables[0]);
