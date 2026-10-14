@@ -2,7 +2,7 @@
 //! existing physical witnesses supply storage choices. No algorithm discovery.
 use super::{descriptor, quote};
 use ink_core::{
-    syntax::{Program, Type},
+    syntax::{Expr,Program, Type},
     LangResult,
 };
 use serde_json::Value;
@@ -199,10 +199,22 @@ pub(super) fn emit(
             if portable||compact {return Err("selected boundary reader has no supported argument schema".into());}
             "null".into()
         };
+        let mut predicates=Vec::new();let mut needs_invariants=Vec::new();
+        for (name,ty) in &f.params {
+            let guards=ink_core::contracts::values::predicates(p,ty,Expr::Var(name.clone()))?;
+            needs_invariants.push(!guards.is_empty());predicates.extend(guards);
+        }
+        let expected=predicates.iter().rev().cloned().fold(Expr::Bool(true),|rest,e|Expr::Binary("&&".into(),Box::new(e),Box::new(rest)));
+        // Only exact source-derived type guards may consume a handle's checked
+        // value guarantee. Additional declared requires clauses still execute.
+        let only_type_guards=!predicates.is_empty()&&p.contracts.precondition_checks.get(&f.name)
+            .and_then(|name|p.functions.iter().find(|g|&g.name==name))
+            .is_some_and(|guard|guard.params==f.params&&guard.body==expected);
         entries.push(format!(
-            "[{},{{index:{index},params:[{}],result:{result},arguments:{args_read},argumentCodecs:[null,null],boundaryReaders:[{portable},{compact}],precondition:{}}}]",
+            "[{},{{index:{index},params:[{}],result:{result},arguments:{args_read},argumentCodecs:[null,null],boundaryReaders:[{portable},{compact}],onlyTypeGuards:{only_type_guards},needsInvariants:{},precondition:{}}}]",
             quote(&f.name),
             codecs.join(","),
+            serde_json::to_string(&needs_invariants).map_err(|e|e.to_string())?,
             p.contracts
                 .precondition_checks
                 .get(&f.name)
@@ -237,9 +249,15 @@ export const compiledValues=Object.freeze(Object.fromEntries([...__compiledEntri
 export function callCompiled(name,args){
  const entry=__compiledEntries.get(name);
  if(!entry||!Array.isArray(args)||args.length!==entry.params.length)throw Error('unsupported compiled call');
- const values=entry.params.map((codec,i)=>__compiledUnwrap(args[i],codec().identity));
- if(entry.precondition!==null&&__implementations[entry.precondition](...values)!==true)throw Error('contract precondition failed');
- return __compiledHandle(entry.result().identity,__implementations[entry.index](...values));
+ const owned=entry.params.map((codec,i)=>__compiledEntry(args[i],codec().identity)),values=owned.map(v=>v.value);
+ const established=entry.onlyTypeGuards&&entry.needsInvariants.every((needed,i)=>!needed||owned[i].guaranteed);
+ if(entry.precondition!==null&&!established){
+  if(__implementations[entry.precondition](...values)!==true)throw Error('contract precondition failed');
+  for(let i=0;i<owned.length;i++)if(entry.needsInvariants[i])owned[i].guaranteed=true;
+ }
+ // Checked source outputs satisfy their declared value interfaces. Private
+ // handles expose only detached copies and never retain mutable host inputs.
+ return __compiledHandle(entry.result().identity,__implementations[entry.index](...values),true);
 }
 "#;
     Ok(source)

@@ -320,7 +320,7 @@ impl StateEmitter<'_> {
                         let next=if n=="remove"{"undefined".into()}else{values[1].clone()};
                         let result=if n=="remove" {"(__stagePrior===undefined?{None:null}:{Some:__stagePrior})"} else {"null"};
                         let membership=if mode==1 {"(__stagePrior!==undefined?__preflightError('insert key already present'):null)"}else if mode==2{"(__stagePrior===undefined?__preflightError('replace key absent'):null)"}else{"null"};
-                        return Ok(format!("(__stageRoot={i},__stageKey={},__stageNext={next},__stagePrior=rt.tables[{i}].get(__stageKey),{membership},__stageChanged=__stagePrior===undefined?__stageNext!==undefined:__stageNext===undefined||!__stateRootEquals[{i}](__stagePrior,__stageNext),{result})",values[0]));
+                        return Ok(format!("(__stageRoot={i},__stageKey={},__stageNext={next},__stageSlot=__dense{i}?rt.tables[{i}].slot(__stageKey):undefined,__stagePrior=__stageSlot===undefined?rt.tables[{i}].get(__stageKey):__stageSlot<0?rt.tables[{i}].sparse.get(__stageKey):rt.tables[{i}].dense[__stageSlot],{membership},__stageChanged=__stagePrior===undefined?__stageNext!==undefined:__stageNext===undefined||!__stateRootEquals[{i}](__stagePrior,__stageNext),{result})",values[0]));
                     }
                     if n=="get"||n=="contains"||n=="remove" {
                         let helper=match n.as_str(){"get"=>"__tableGet","contains"=>"__tableContains",_=>"__tableRemove"};
@@ -451,11 +451,12 @@ pub(crate) fn emit_with_sums(
     };
     emitter.equality.elisions=elisions.clone();
     emitter.equality.sums=sums.clone();
-    let mut code = include_str!("observers.mjs").to_string()+include_str!("state.mjs");
+    let mut code = include_str!("observers.mjs").to_string()+include_str!("event_columns.mjs")+include_str!("state.mjs");
     let mut actions = vec![];
     let mut captures = super::state_capture::Captures::with_elisions(p,elisions).with_sums(sums);
     let mut capture_lists = Vec::new();
     let mut keeps = vec![];
+    let mut direct_read_factories=vec![];
     let mut equal_results=vec![];
     let equal_roots=p.states.iter().map(|s|{let Type::Table(_,t)=&s.ty else{return Err("state root".into())};Ok(format!("(a,b)=>{}",emitter.equality.expr(t,"a","b")?))}).collect::<LangResult<Vec<_>>>()?;
     let mut bound_factories=vec![];
@@ -526,11 +527,18 @@ pub(crate) fn emit_with_sums(
             let result=if ink_core::action_shape::fresh_native_result(&checked_actions,i)&&!sums.contains_type(p,&a.result)?{"value"}else{"output(value)"};
             let writes=&effects.action(&a.name).ok_or("missing action effects")?.access.writes;
             let root=p.states.iter().enumerate().filter(|(_,s)|writes.contains(&s.name)).map(|(i,_)|i).collect::<Vec<_>>();
+            let dense_bindings=root.iter().map(|r|format!("const __dense{r}=rt.tables[{r}] instanceof __DenseTable;")).collect::<String>();
             let (bindings,prepare,commit)=if root.len()==1 {
-                let r=root[0];(format!("const prepare=rt.views.directRoots?.[{r}];"),"if(prepare)prepare(rt,__stageKey,__stagePrior,__stageNext);".to_string(),format!("__stateCommitRoot{r}(rt,__stageKey,__stagePrior,__stageNext);"))
-            }else{(String::new(),"__prepareDirect(rt,__stageRoot,__stageKey,__stagePrior,__stageNext);".to_string(),"__commitDirect(rt,__stageRoot,__stageKey,__stagePrior,__stageNext);".to_string())};
+                let r=root[0];(format!("const prepare=rt.views.directRoots?.[{r}];"),"if(prepare)prepare(rt,__stageKey,__stagePrior,__stageNext);".to_string(),format!("__stateCommitRoot{r}(rt,__stageKey,__stagePrior,__stageNext,__stageSlot);"))
+            }else{(String::new(),"__prepareDirect(rt,__stageRoot,__stageKey,__stagePrior,__stageNext);".to_string(),"__commitDirect(rt,__stageRoot,__stageKey,__stagePrior,__stageNext,__stageSlot);".to_string())};
             let generic=bound_factories.last().unwrap();
-            preflight_factories.push(format!("(run,a,inputs,output,only,rt,begin,complete,abort,end,ownedInputs=false)=>{{const fallback=ownedInputs?({})=>run(a,[{}],null,output,only,true):({generic})(run,a,inputs,output,only,rt,begin,complete,abort,end);{bindings}return ({})=>{{if(rt.host)return fallback({});if(rt.busy)throw Error('state operation already in progress');{locals}rt.busy=true;let __released=false;let __stageRoot=-1,__stageKey,__stagePrior,__stageNext,__stageChanged=false,__eventChannel=null,__eventValue;try{{let value;__inkBody:{{{abort}}}const result={result};if({failure})return only?result:{{result,committed:false,version:rt.version,events:[]}};if(rt.version===18446744073709551615n)throw Error('commit sequence exhausted');const next=rt.version+1n;if(__stageChanged){{{prepare}}}let event=null;if(__eventChannel!==null)event={{commit:next,position:0n,channel:__eventChannel,value:__eventValue}};const events=only?null:event?[{{...event,value:rt.eventOutput.get(__eventChannel)(__eventValue)}}]:[];if(__stageChanged){{{commit}}}if(event)rt.outbox.push(event);rt.version=next;rt.busy=false;__released=true;if(__stageChanged&&rt.observers.active)rt.observers.commitRoot(__stageRoot,rt.meta.outputPublication?rt.changedOutputs:null,rt.changedOutputEpoch);return only?result:{{result,committed:true,version:next,events}};}}finally{{if(!__released)rt.busy=false;}}}};}}",params.join(","),params.join(","),params.join(","),params.join(",")));
+            let advance=if protocol.is_some_and(|p|p.plan().compact_commits.is_some()){"__nextCommit(rt.version)"}else{"rt.version+1n"};
+            let (event_prepare,event_commit)=if protocol.is_some_and(|p|p.plan().event_columns) {
+                ("const events=only?null:__eventChannel!==null?[{commit:publicNext,position:0n,channel:__eventChannel,value:rt.eventOutput.get(__eventChannel)(__eventValue)}]:[];", "if(__eventChannel!==null)rt.outbox.append(next,0n,__eventChannel,__eventValue);")
+            }else{
+                ("let event=null;if(__eventChannel!==null)event={commit:next,position:0n,channel:__eventChannel,value:__eventValue};const events=only?null:event?[{...event,commit:publicNext,value:rt.eventOutput.get(__eventChannel)(__eventValue)}]:[];", "if(event)rt.outbox.push(event);")
+            };
+            preflight_factories.push(format!("(run,a,inputs,output,only,rt,begin,complete,abort,end,ownedInputs=false)=>{{const fallback=ownedInputs?({})=>run(a,[{}],null,output,only,true):({generic})(run,a,inputs,output,only,rt,begin,complete,abort,end);{bindings}{dense_bindings}return ({})=>{{if(rt.host)return fallback({});if(rt.busy)throw Error('state operation already in progress');{locals}rt.busy=true;let __released=false;let __stageRoot=-1,__stageKey,__stagePrior,__stageNext,__stageSlot,__stageChanged=false,__eventChannel=null,__eventValue;try{{let value;__inkBody:{{{abort}}}const result={result};if({failure})return only?result:{{result,committed:false,version:__versionWord(rt.version),events:[]}};if(rt.version===18446744073709551615n)throw Error('commit sequence exhausted');const next={advance};const publicNext=only?null:__versionWord(next);if(__stageChanged){{{prepare}}}{event_prepare}if(__stageChanged){{{commit}}}{event_commit}rt.version=next;rt.busy=false;__released=true;if(__stageChanged&&rt.observers.active)rt.observers.commitRoot(__stageRoot,rt.meta.outputPublication?rt.changedOutputs:null,rt.changedOutputEpoch);return only?result:{{result,committed:true,version:publicNext,events}};}}finally{{if(!__released)rt.busy=false;}}}};}}",params.join(","),params.join(","),params.join(","),params.join(",")));
         }else {preflight_factories.push("null".into());}
         equal_results.push(format!("(a,b)=>{}",emitter.equality.expr(&a.result,"a","b")?));
         let mut env = Env::new();
@@ -550,12 +558,14 @@ pub(crate) fn emit_with_sums(
         let roots=p.states.iter().enumerate().filter(|(_,s)|reads.contains(&s.name)).map(|(i,_)|i).collect::<Vec<_>>();
         let single_cell=ink_core::action_shape::maximum_cell_writes(&checked_actions,i).is_some_and(|n|n<=1);
         let fresh_result=ink_core::action_shape::fresh_native_result(&checked_actions,i) && !sums.contains_type(p,&a.result)?;
+        direct_read_factories.push(if fresh_result {direct_keep.map(|k|format!("rt=>()=>{{if(rt.busy)throw Error('state operation already in progress');return rt.keeps[{k}];}}" )).unwrap_or("null".into())}else{"null".into()});
         actions.push(json!({"index":i,"name":a.name,"singleCell":single_cell&&explicit!=Some(&ink_core::protocol::Execution::Transactional),"directKeep":direct_keep,"freshResult":fresh_result,"roots":roots,"precondition":p.contracts.precondition_checks.get(&a.name),"change":a.kind==ActionKind::Change,"fallible":matches!(a.result,Type::Result(..)),"flatFailure":sums.selected(&descriptor(&a.result,p,&mut BTreeSet::new())?),"params":a.params.iter().map(|(n,t)|Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?}))).collect::<LangResult<Vec<_>>>()?,"result":descriptor(&a.result,p,&mut BTreeSet::new())?}));
     }
     for (root,keeps) in keep_invalidations.iter().enumerate(){
         let updates=keeps.iter().map(|k|format!("{{const value=rt.viewByKeep[{k}]?rt.viewNext[{k}]:undefined;if(publish)rt.changedOutputs[{k}]=rt.keeps[{k}]!==value?rt.changedOutputEpoch:0;rt.keeps[{k}]=value;}}" )).collect::<String>();
-        code.push_str(&format!("function __stateCommitRoot{root}(rt,key,prior,next){{__storeDirect(rt,{root},key,prior,next);const publish=rt.meta.outputPublication&&rt.observers.active&&!rt.observers.directRoots[{root}];if(publish&&++rt.changedOutputEpoch===4294967296){{rt.changedOutputs.fill(0);rt.changedOutputEpoch=1;}}{updates}}}\n"));
+        code.push_str(&format!("function __stateCommitRoot{root}(rt,key,prior,next,slot){{__storeDirect(rt,{root},key,prior,next,slot);const publish=rt.meta.outputPublication&&rt.observers.active&&!rt.observers.directRoots[{root}];if(publish&&++rt.changedOutputEpoch===4294967296){{rt.changedOutputs.fill(0);rt.changedOutputEpoch=1;}}{updates}}}\n"));
     }
+    code.push_str(&format!("const __stateDirectReadFactories=[{}];\n",direct_read_factories.join(",")));
     code.push_str(&emitter.equality.source());
     code.push_str(&captures.source());
     code.push_str(&format!("const __stateQueryEquals=[{}];\n",equal_results.join(",")));
@@ -567,7 +577,7 @@ pub(crate) fn emit_with_sums(
         .iter()
         .map(|(n, t)| Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?,"snapshotType":ink_core::snapshot_wire::descriptor(&layout.events.iter().find(|(name,_)|name==n).unwrap().1)})))
         .collect::<LangResult<Vec<_>>>()?;
-    let mut state = json!({"actions":actions,"roots":roots,"events":events,"keeps":keeps,"keepInvalidations":keep_invalidations,"invariantChecks":p.contracts.invariant_checks,"outputPublication":protocol.is_some_and(|p|p.plan().output_publication),"snapshotRows":protocol.is_some_and(|p|p.plan().snapshot_rows),"snapshot":{"program":layout.program,"schema":layout.schema}});
+    let mut state = json!({"actions":actions,"roots":roots,"events":events,"keeps":keeps,"keepInvalidations":keep_invalidations,"invariantChecks":p.contracts.invariant_checks,"outputPublication":protocol.is_some_and(|p|p.plan().output_publication),"snapshotRows":protocol.is_some_and(|p|p.plan().snapshot_rows),"eventColumns":protocol.is_some_and(|p|p.plan().event_columns),"compactCommits":protocol.is_some_and(|p|p.plan().compact_commits.is_some()),"snapshot":{"program":layout.program,"schema":layout.schema}});
     if let Some(protocol)=protocol {
         for prefix in &protocol.plan().columns {
             let i=p.states.iter().position(|s|s.name==prefix.table).unwrap();
