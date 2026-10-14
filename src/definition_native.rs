@@ -101,6 +101,7 @@ pub(crate) fn body(p:&Program,projection:&Projection,ds:&BTreeMap<String,Declara
     Ok((out,value.scalar()?))
 }
 
+#[cfg(test)]
 pub(crate) fn function(p:&Program,projection:&Projection,ds:&BTreeMap<String,Declaration>,elisions:&BTreeSet<String>,params:&[(&str,&Type)],term:&Term)->LangResult<String>{
     let (out,value)=body(p,projection,ds,elisions,params,term)?;
     Ok(format!("({})=>{{{out}return {value};}}",params.iter().map(|p|p.0).collect::<Vec<_>>().join(",")))

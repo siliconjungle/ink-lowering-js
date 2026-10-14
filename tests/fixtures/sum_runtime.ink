@@ -31,3 +31,4 @@ query reused(key:u32)->Reused reads(Items){let row=Items.get(key).fold(fn(row)=>
 enum Json{Null,Boolean(Bool),Number(String),Text(String),Array(List<Json>),Object(List<JsonMember>),}
 record JsonMember{key:String,value:Json,}
 fn json_identity(document:Json)->Json{return document;}
+query json_echo(document:Json)->Json{return document;}

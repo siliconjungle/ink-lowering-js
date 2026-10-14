@@ -83,7 +83,7 @@ impl Writers<'_> {
                     let leaves=super::sum_layout::Sums::leaves(ty);let count=leaves.len()-1;let mut cases=String::new();
                     for (i,leaf) in leaves.iter().enumerate(){let next=self.compile(leaf,named)?;let levels=if i<count{i+1}else{count};
                         let mut body=format!("writer.byte({});{next}(writer,value.payload,compact);",if i<count{0}else{1});
-                        for _ in 1..levels{body=format!("writer.byte(1);writer.frame(()=>{{{body}}});");}
+                        for _ in 1..levels{body=format!("writer.byte(1);{{const frame=writer.openFrame();{body}writer.closeFrame(frame);}}");}
                         cases.push_str(&format!("case {i}:{{{body}break;}}"));
                     }
                     format!("switch(value.tag){{{cases}default:throw Error('private sum tag');}}")
@@ -96,7 +96,7 @@ impl Writers<'_> {
             key,
             (
                 name.clone(),
-                format!("function {name}(writer,value,compact){{writer.frame(()=>{{{body}}});}}\n"),
+                format!("function {name}(writer,value,compact){{const frame=writer.openFrame();{body}writer.closeFrame(frame);}}\n"),
             ),
         );
         Ok(name)
@@ -131,6 +131,9 @@ pub(super) fn emit(
         functions: BTreeMap::new(),
     };
     let mut roots = BTreeMap::<String, String>::new();
+    // Exact private declaration literals share syntax only. A factory returns
+    // a fresh object lazily, preserving ownership and avoiding a retained pool.
+    let mut named_groups = BTreeMap::<String, (String, String)>::new();
     let mut definitions = String::new();
     let mut entries = vec![];
     let contract = ink_abi::wire_contract::source_contract(p)?;
@@ -172,7 +175,16 @@ pub(super) fn emit(
             let capture_name = capture.compile(&schema["root"], &schema["named"])?;
             let constructor_root=constructors.compile(&schema["root"],&schema["named"],&mut capture)?;
             let reduction_root=reductions.compile(&schema["root"],&schema["named"])?;
-            definitions.push_str(&format!("let {name}Value;function {name}(){{return {name}Value??=__compiledCodec({schema},{capture_name},{reader},{writer},{copy},{constructor_root},{reduction_root},__reduceValue{reduction_root},{portable},{compact});}}\n"));
+            let named_json = serde_json::to_string(&schema["named"]).map_err(|e|e.to_string())?;
+            let group = if let Some((symbol,_)) = named_groups.get(&named_json) {symbol.clone()} else {
+                let symbol=format!("__compiledNamed{}",named_groups.len());
+                named_groups.insert(named_json.clone(),(symbol.clone(),format!("function {symbol}(){{return {named_json};}}\n")));
+                symbol
+            };
+            let schema_literal=format!("{{{}}}",schema.as_object().ok_or("compiled schema object")?.iter().map(|(key,value)|{
+                format!("{}:{}",quote(key),if key=="named" {format!("{group}()")}else{value.to_string()})
+            }).collect::<Vec<_>>().join(","));
+            definitions.push_str(&format!("let {name}Value;function {name}(){{return {name}Value??=__compiledCodec({schema_literal},{capture_name},{reader},{writer},{copy},{constructor_root},{reduction_root},__reduceValue{reduction_root},{portable},{compact});}}\n"));
             roots.insert(key, name.clone());
             codecs.push(name);
         }
@@ -214,6 +226,7 @@ pub(super) fn emit(
     source += include_str!("compiled_values.mjs");
     source += &constructors.source();
     source += &reductions.source();
+    source += &named_groups.values().map(|(_,code)|code.as_str()).collect::<String>();
     source += &definitions;
     source += &format!(
         "const __compiledEntries=new Map([{}]);\n",
