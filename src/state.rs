@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 struct StateEmitter<'a> {
     p: &'a Program,
     next: usize,
+    preflight: bool,
     execution: &'a ink_core::action_ir::Execution,
     equality: super::TypedEquality<'a>,
 }
@@ -324,6 +325,13 @@ impl StateEmitter<'_> {
                         .collect::<LangResult<Vec<_>>>()?;
                     // Fixed table primitives take typed arguments directly.
                     // Keep the generic dispatcher for compound operations only.
+                    if self.preflight && ["put","insert","replace","remove"].contains(&n.as_str()) {
+                        let mode=if n=="insert"{1}else if n=="replace"{2}else{0};
+                        let next=if n=="remove"{"undefined".into()}else{values[1].clone()};
+                        let result=if n=="remove" {"(__stagePrior===undefined?{None:null}:{Some:__stagePrior})"} else {"null"};
+                        let membership=if mode==1 {"(__stagePrior!==undefined?__preflightError('insert key already present'):null)"}else if mode==2{"(__stagePrior===undefined?__preflightError('replace key absent'):null)"}else{"null"};
+                        return Ok(format!("(__stageRoot={i},__stageKey={},__stageNext={next},__stagePrior=rt.tables[{i}].get(__stageKey),{membership},__stageChanged=__stagePrior===undefined?__stageNext!==undefined:__stageNext===undefined||!__stateRootEquals[{i}](__stagePrior,__stageNext),{result})",values[0]));
+                    }
                     if n=="get"||n=="contains"||n=="remove" {
                         let helper=match n.as_str(){"get"=>"__tableGet","contains"=>"__tableContains",_=>"__tableRemove"};
                         return Ok(format!("{helper}(rt,{i},{})",values[0]));
@@ -390,7 +398,8 @@ impl StateEmitter<'_> {
                             Type::Option(_) => "option",
                             _ => "result",
                         };
-                        let mapped=format!("__mapValue({x},{},{},({var})=>{{__tick(ctx);return {body};}})",quote(kind),quote(n));
+                        let tick=if self.preflight{""}else{"__tick(ctx);"};
+                        let mapped=format!("__mapValue({x},{},{},({var})=>{{{tick}return {body};}})",quote(kind),quote(n));
                         if matches!(t,Type::Result(..)){format!("((v)=>Object.hasOwn(v,'Ok')?{}:{})({mapped})",self.equality.sums.make_type(self.p,&t,"Ok","v.Ok")?,self.equality.sums.make_type(self.p,&t,"Err","v.Err")?)}else{mapped}
                     }
                 }
@@ -401,7 +410,7 @@ impl StateEmitter<'_> {
     fn block(&mut self, body: &[Statement], env: &mut Env, result: &Type) -> LangResult<String> {
         let mut code = String::new();
         for s in body {
-            code.push_str("__tick(ctx);");
+            if !self.preflight {code.push_str("__tick(ctx);");}
             match s {
                 Statement::Let(n, t, e) => {
                     let at = self.infer(e, env, t.as_ref())?;
@@ -410,10 +419,12 @@ impl StateEmitter<'_> {
                     code.push_str(&format!("const {v}={e};"));
                     env.insert(n.clone(), (v, at));
                 }
+                Statement::Return(e) if self.preflight => code.push_str(&format!("value={};break __inkBody;",self.expr(e,env,Some(result))?)),
                 Statement::Return(e) => {
                     code.push_str(&format!("return {};", self.expr(e, env, Some(result))?))
                 }
                 Statement::Expr(e) => code.push_str(&format!("{};", self.expr(e, env, None)?)),
+                Statement::Emit(n, e) if self.preflight => code.push_str(&format!("__eventChannel={};__eventValue={};",quote(n),self.expr(e,env,Some(&self.p.events[n]))?)),
                 Statement::Emit(n, e) => code.push_str(&format!(
                     "__emit(rt,{},{});",
                     quote(n),
@@ -435,6 +446,7 @@ pub(crate) fn emit_with_sums(
     layout: &ink_core::snapshot_wire::Layout,
     elisions: &BTreeSet<String>,
     sums:&super::sum_layout::Sums,
+    protocol:Option<&ink_core::protocol::CheckedProtocol>,
 ) -> LangResult<(String, Value)> {
     let p = module.program();
     let checked_actions = ink_core::action_ir::CheckedActions::elaborate(module)?;
@@ -443,6 +455,7 @@ pub(crate) fn emit_with_sums(
     let mut emitter = StateEmitter {
         p,
         next: 0,
+        preflight: false,
         execution: &execution,
         equality: super::TypedEquality::new(p, "__stateValueEqual"),
     };
@@ -456,6 +469,8 @@ pub(crate) fn emit_with_sums(
     let mut equal_results=vec![];
     let equal_roots=p.states.iter().map(|s|{let Type::Table(_,t)=&s.ty else{return Err("state root".into())};Ok(format!("(a,b)=>{}",emitter.equality.expr(t,"a","b")?))}).collect::<LangResult<Vec<_>>>()?;
     let mut bound_factories=vec![];
+    let mut preflight_factories=vec![];
+    let capabilities=ink_core::protocol::capabilities(module)?;
     let mut keep_invalidations = vec![Vec::<usize>::new(); p.states.len()];
     for (i, k) in execution.keeps().iter().enumerate() {
         let e = emitter.expr(&k.value, &Env::new(), Some(&k.ty))?;
@@ -506,6 +521,22 @@ pub(crate) fn emit_with_sums(
         }else{
             bound_factories.push(format!("(run,a,inputs,output,only)=>({})=>run(a,[{}],null,output,only,true)",params.join(","),captures.join(",")));
         }
+        let explicit=p.contracts.action_protocols.get(&a.name);
+        let inferred=protocol.and_then(|p|p.plan().actions.iter().find(|c|c.action==a.name)).map(|c|c.execution);
+        let use_preflight=explicit==Some(&ink_core::protocol::Execution::Preflight)||inferred==Some(ink_core::protocol::Execution::Preflight);
+        let direct_keep=protocol.filter(|p|p.plan().direct_reads.contains(&a.name)).and_then(|_|capabilities[i].direct_keep);
+        if use_preflight {
+            let locals=a.params.iter().enumerate().map(|(j,(_,t))|format!("const b{j}={};",if matches!(t,Type::U64|Type::U32|Type::I32|Type::Bool|Type::Unit|Type::String)||matches!(t,Type::Named(n) if p.enums.contains_key(n)){format!("p{j}")}else{format!("inputs[{j}](p{j})")})).collect::<String>();
+            let mut native_env=Env::new();for (j,(n,t)) in a.params.iter().enumerate(){native_env.insert(n.clone(),(format!("b{j}"),t.clone()));}
+            emitter.preflight=true;
+            let body=emitter.block(&a.body,&mut native_env,&a.result)?;
+            emitter.preflight=false;
+            let abort=if matches!(a.result,Type::Result(..))&&checked_actions.action(i).unwrap().nodes.iter().any(|n|matches!(n.kind,ink_core::action_ir::Kind::Try{..})){format!("try{{{body}}}catch(e){{if(e instanceof __Abort)value={};else throw e;}}",sums.make_type(p,&a.result,"Err","e.value")?)}else{body};
+            let failure=if matches!(a.result,Type::Result(..)){if sums.selected(&descriptor(&a.result,p,&mut BTreeSet::new())?){"value.tag!==0"}else{"Object.hasOwn(value,'Err')"}}else{"false"};
+            let result=if ink_core::action_shape::fresh_native_result(&checked_actions,i)&&!sums.contains_type(p,&a.result)?{"value"}else{"output(value)"};
+            let generic=bound_factories.last().unwrap();
+            preflight_factories.push(format!("(run,a,inputs,output,only,rt,begin,complete,abort,end)=>{{const fallback=({generic})(run,a,inputs,output,only,rt,begin,complete,abort,end);return ({})=>{{if(rt.host)return fallback({});if(rt.busy)throw Error('state operation already in progress');{locals}rt.busy=true;let __released=false;let __stageRoot=-1,__stageKey,__stagePrior,__stageNext,__stageChanged=false,__eventChannel=null,__eventValue;try{{let value;__inkBody:{{{abort}}}const result={result};if({failure})return only?result:{{result,committed:false,version:rt.version,events:[]}};if(rt.version===18446744073709551615n)throw Error('commit sequence exhausted');const next=rt.version+1n;if(__stageChanged)__prepareDirect(rt,__stageRoot,__stageKey,__stagePrior,__stageNext);let event=null;if(__eventChannel!==null)event={{commit:next,position:0n,channel:__eventChannel,value:__eventValue}};const events=only?null:event?[{{...event,value:rt.eventOutput.get(__eventChannel)(__eventValue)}}]:[];if(__stageChanged)__commitDirect(rt,__stageRoot,__stageKey,__stagePrior,__stageNext);if(event)rt.outbox.push(event);rt.version=next;rt.busy=false;__released=true;if(__stageChanged&&rt.observers.active)rt.observers.commit([__stageRoot],rt.meta.outputPublication?rt.changedOutputs:null);return only?result:{{result,committed:true,version:next,events}};}}finally{{if(!__released)rt.busy=false;}}}};}}",params.join(","),params.join(",")));
+        }else {preflight_factories.push("null".into());}
         equal_results.push(format!("(a,b)=>{}",emitter.equality.expr(&a.result,"a","b")?));
         let mut env = Env::new();
         let mut vars = vec![];
@@ -524,20 +555,27 @@ pub(crate) fn emit_with_sums(
         let roots=p.states.iter().enumerate().filter(|(_,s)|reads.contains(&s.name)).map(|(i,_)|i).collect::<Vec<_>>();
         let single_cell=ink_core::action_shape::maximum_cell_writes(&checked_actions,i).is_some_and(|n|n<=1);
         let fresh_result=ink_core::action_shape::fresh_native_result(&checked_actions,i) && !sums.contains_type(p,&a.result)?;
-        actions.push(json!({"index":i,"name":a.name,"singleCell":single_cell,"freshResult":fresh_result,"roots":roots,"precondition":p.contracts.precondition_checks.get(&a.name),"change":a.kind==ActionKind::Change,"fallible":matches!(a.result,Type::Result(..)),"flatFailure":sums.selected(&descriptor(&a.result,p,&mut BTreeSet::new())?),"params":a.params.iter().map(|(n,t)|Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?}))).collect::<LangResult<Vec<_>>>()?,"result":descriptor(&a.result,p,&mut BTreeSet::new())?}));
+        actions.push(json!({"index":i,"name":a.name,"singleCell":single_cell&&explicit!=Some(&ink_core::protocol::Execution::Transactional),"directKeep":direct_keep,"freshResult":fresh_result,"roots":roots,"precondition":p.contracts.precondition_checks.get(&a.name),"change":a.kind==ActionKind::Change,"fallible":matches!(a.result,Type::Result(..)),"flatFailure":sums.selected(&descriptor(&a.result,p,&mut BTreeSet::new())?),"params":a.params.iter().map(|(n,t)|Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?}))).collect::<LangResult<Vec<_>>>()?,"result":descriptor(&a.result,p,&mut BTreeSet::new())?}));
     }
     code.push_str(&emitter.equality.source());
     code.push_str(&captures.source());
     code.push_str(&format!("const __stateQueryEquals=[{}];\n",equal_results.join(",")));
     code.push_str(&format!("const __stateRootEquals=[{}];\n",equal_roots.join(",")));
-    code.push_str(&format!("const __stateBoundFactories=[{}];\n",bound_factories.join(",")));
+    code.push_str(&format!("const __stateBoundFactories=[{}];const __statePreflightFactories=[{}];\n",bound_factories.join(","),preflight_factories.join(",")));
     let roots=p.states.iter().map(|s|{let Type::Table(k,v)=&s.ty else{return Err("state root".into())};Ok(json!({"name":s.name,"key":descriptor(k,p,&mut BTreeSet::new())?,"value":descriptor(v,p,&mut BTreeSet::new())?,"snapshotKey":ink_core::snapshot_wire::descriptor(&layout.roots.iter().find(|(name,_,_)|name==&s.name).unwrap().1),"snapshotValue":ink_core::snapshot_wire::descriptor(&layout.roots.iter().find(|(name,_,_)|name==&s.name).unwrap().2)}))}).collect::<LangResult<Vec<_>>>()?;
     let events = p
         .events
         .iter()
         .map(|(n, t)| Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?,"snapshotType":ink_core::snapshot_wire::descriptor(&layout.events.iter().find(|(name,_)|name==n).unwrap().1)})))
         .collect::<LangResult<Vec<_>>>()?;
-    let mut state = json!({"actions":actions,"roots":roots,"events":events,"keeps":keeps,"keepInvalidations":keep_invalidations,"invariantChecks":p.contracts.invariant_checks,"snapshot":{"program":layout.program,"schema":layout.schema}});
+    let mut state = json!({"actions":actions,"roots":roots,"events":events,"keeps":keeps,"keepInvalidations":keep_invalidations,"invariantChecks":p.contracts.invariant_checks,"outputPublication":protocol.is_some_and(|p|p.plan().output_publication),"snapshotRows":protocol.is_some_and(|p|p.plan().snapshot_rows),"snapshot":{"program":layout.program,"schema":layout.schema}});
+    if let Some(protocol)=protocol {
+        for prefix in &protocol.plan().columns {
+            let i=p.states.iter().position(|s|s.name==prefix.table).unwrap();
+            state["roots"][i]["columnPrefix"]=json!({"capacity":prefix.capacity,"exactNumbers":prefix.exact_numbers});
+            if elisions.contains(&prefix.codec.record){return Err("column prefix cannot use an elided row carrier".into());}
+        }
+    }
     super::value_layout::snapshots(p,&mut state,elisions,sums)?;
     code.push_str(&format!(
         "const __stateMetadata={state};const __actions=[{}];const __stateInputCaptures=[{}];\n",

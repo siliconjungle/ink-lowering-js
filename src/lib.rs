@@ -1323,7 +1323,7 @@ impl Emitter<'_> {
 /// Emit an ES module. Backend implementation and the JavaScript engine are
 /// trusted; checked source/rewrite evidence does not certify emitted machine code.
 pub fn lower(module: &CheckedModule) -> LangResult<Emission> {
-    lower_with_layout(module, None, &BTreeSet::new(),&[])
+    lower_with_layout(module, None, &BTreeSet::new(),&[],None)
 }
 pub fn lower_planned(plan: &ink_core::planning::CheckedPlan) -> LangResult<Emission> {
     plan.require_source_layout_capabilities(true,true)?;
@@ -1331,7 +1331,7 @@ pub fn lower_planned(plan: &ink_core::planning::CheckedPlan) -> LangResult<Emiss
     let layout=ink_core::snapshot::layout(plan.original().program())?;
     let elisions=plan.physical().map(|p|p.plan().record_elisions.iter().map(|l|l.record.clone()).collect()).unwrap_or_default();
     let sums=plan.physical().map(|p|p.plan().sum_spines.iter().map(|l|l.sum_type.clone()).collect::<Vec<_>>()).unwrap_or_default();
-    let mut emission=lower_with_layout(plan.module(),Some(&layout),&elisions,&sums)?;
+    let mut emission=lower_with_layout(plan.module(),Some(&layout),&elisions,&sums,plan.protocol())?;
     if let Some(physical)=plan.physical(){
         if !physical.plan().dense_prefixes.is_empty(){
             let prefixes=plan.module().program().states.iter().map(|s|physical.plan().dense_prefixes.iter().find(|p|p.table==s.name).map(|p|p.capacity).unwrap_or(0)).collect::<Vec<_>>();
@@ -1352,7 +1352,7 @@ pub fn lower_planned(plan: &ink_core::planning::CheckedPlan) -> LangResult<Emiss
 /// Emit selected code with the snapshot origin authenticated by the core.
 pub fn lower_selected(selected: &ink_core::optimisation::CheckedSelection) -> LangResult<Emission> {
     let layout = ink_core::snapshot::selected_layout(selected)?;
-    let mut emission = lower_with_layout(selected.module(), Some(&layout), &BTreeSet::new(),&[])?;
+    let mut emission = lower_with_layout(selected.module(), Some(&layout), &BTreeSet::new(),&[],None)?;
     emission.manifest["selection"] =
         serde_json::to_value(selected.evidence()).map_err(|e| e.to_string())?;
     Ok(emission)
@@ -1362,6 +1362,7 @@ fn lower_with_layout(
     layout: Option<&ink_core::snapshot_wire::Layout>,
     elisions: &BTreeSet<String>,
     sum_types:&[Type],
+    protocol:Option<&ink_core::protocol::CheckedProtocol>,
 ) -> LangResult<Emission> {
     let p = module.program();
     // Stateful functions share the exact-bit carrier with actions/snapshots.
@@ -1588,9 +1589,9 @@ fn lower_with_layout(
     ));
     let state = if !p.actions.is_empty() || !p.states.is_empty() || !p.keeps.is_empty() {
         let (code, metadata) = if let Some(layout) = layout {
-            state::emit_with_sums(module, layout, elisions,&emitter.equality.sums)?
+            state::emit_with_sums(module, layout, elisions,&emitter.equality.sums,protocol)?
         } else {
-            state::emit_with_sums(module, &ink_core::snapshot::layout(p)?, elisions,&emitter.equality.sums)?
+            state::emit_with_sums(module, &ink_core::snapshot::layout(p)?, elisions,&emitter.equality.sums,protocol)?
         };
         javascript.push_str(include_str!("snapshot.mjs"));
         javascript.push_str(&code);
