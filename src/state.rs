@@ -8,7 +8,6 @@ struct StateEmitter<'a> {
     p: &'a Program,
     next: usize,
     preflight: bool,
-    scratch_roots:BTreeSet<usize>,
     execution: &'a ink_core::action_ir::Execution,
     equality: super::TypedEquality<'a>,
 }
@@ -335,20 +334,6 @@ impl StateEmitter<'_> {
                         let next=if n=="remove"{"undefined".into()}else{values[1].clone()};
                         let result=if n=="remove" {"(__stagePrior===undefined?{None:null}:{Some:__stagePrior})"} else {"null"};
                         let membership=if mode==1 {"(__stagePrior!==undefined?__preflightError('insert key already present'):null)"}else if mode==2{"(__stagePrior===undefined?__preflightError('replace key absent'):null)"}else{"null"};
-                        if self.scratch_roots.contains(&i) {
-                            let next=if let Some(Expr::Record(record,fields))=args.get(1) {
-                                if let Type::Named(want)=vt.as_ref() {
-                                    if record==want {
-                                        let assignments=fields.iter().map(|(field,value)|{
-                                            let ty=self.p.records[record].iter().find(|(name,_)|name==field).ok_or("scratch field type")?.1.clone();
-                                            Ok(format!("__nextScratch{i}[{}]={}",quote(field),self.expr(value,env,Some(&ty))?))
-                                        }).collect::<LangResult<Vec<_>>>()?;
-                                        format!("(__stageSlot>=0?({},__nextScratch{i}):{next})",assignments.join(","))
-                                    } else {next.clone()}
-                                } else {next.clone()}
-                            } else {next.clone()};
-                            return Ok(format!("(__stageRoot={i},__stageKey={},__stageSlot=Number(__stageKey),__stageSlot=__stageSlot>=__columnLimit{i}?-1:__stageSlot,__stageNext={next},__stagePrior=__stageSlot<0?rt.tables[{i}].sparse.get(__stageKey):__columnPeek{i}(rt.tables[{i}],__stageSlot),{membership},__stageChanged=__stagePrior===undefined?__stageNext!==undefined:__stageNext===undefined||!__stateRootEquals[{i}](__stagePrior,__stageNext),{result})",values[0]));
-                        }
                         return Ok(format!("(__stageRoot={i},__stageKey={},__stageNext={next},__stageSlot=__dense{i}?Number(__stageKey):undefined,__stageSlot=__dense{i}&&__stageSlot>=__denseLimit{i}?-1:__stageSlot,__stagePrior=__stageSlot===undefined?rt.tables[{i}].get(__stageKey):__stageSlot<0?rt.tables[{i}].sparse.get(__stageKey):rt.tables[{i}].dense[__stageSlot],{membership},__stageChanged=__stagePrior===undefined?__stageNext!==undefined:__stageNext===undefined||!__stateRootEquals[{i}](__stagePrior,__stageNext),{result})",values[0]));
                     }
                     if n=="get"||n=="contains"||n=="remove" {
@@ -476,7 +461,6 @@ pub(crate) fn emit_with_sums(
         p,
         next: 0,
         preflight: false,
-        scratch_roots:BTreeSet::new(),
         execution: &execution,
         equality: super::TypedEquality::new(p, "__stateValueEqual"),
     };
@@ -556,29 +540,15 @@ pub(crate) fn emit_with_sums(
             // that flag. Host transactions still use the journalled fallback.
             let locals=a.params.iter().enumerate().map(|(j,(_,t))|format!("const b{j}={};",if matches!(t,Type::U64|Type::U32|Type::I32|Type::Bool|Type::Unit|Type::String)||matches!(t,Type::Named(n) if p.enums.contains_key(n)){format!("p{j}")}else{format!("ownedInputs?p{j}:inputs[{j}](p{j})")})).collect::<String>();
             let mut native_env=Env::new();for (j,(n,t)) in a.params.iter().enumerate(){native_env.insert(n.clone(),(format!("b{j}"),t.clone()));}
-            let scalar=|t:&Type|matches!(t,Type::U64|Type::U32|Type::I32|Type::F32|Type::Bool|Type::Unit|Type::String)||matches!(t,Type::Named(n)if p.enums.contains_key(n)||p.ids.contains(n));
-            let scalar_result=match &a.result{Type::Result(ok,error)=>scalar(ok)&&scalar(error),t=>scalar(t)};
-            if scalar_result&&a.emits.iter().all(|n|scalar(&p.events[n])) {
-                if let Some(protocol)=protocol {
-                    for prefix in &protocol.plan().columns {
-                        if effects.action(&a.name).unwrap().access.writes.contains(&prefix.table){
-                            emitter.scratch_roots.insert(p.states.iter().position(|s|s.name==prefix.table).unwrap());
-                        }
-                    }
-                }
-            }
-            let scratch_roots=emitter.scratch_roots.clone();
             emitter.preflight=true;
             let body=emitter.block(&a.body,&mut native_env,&a.result)?;
-            emitter.preflight=false;emitter.scratch_roots.clear();
+            emitter.preflight=false;
             let abort=if matches!(a.result,Type::Result(..))&&checked_actions.action(i).unwrap().nodes.iter().any(|n|matches!(n.kind,ink_core::action_ir::Kind::Try{..})){format!("try{{{body}}}catch(e){{if(e instanceof __Abort)value={};else throw e;}}",sums.make_type(p,&a.result,"Err","e.value")?)}else{body};
             let failure=if matches!(a.result,Type::Result(..)){if sums.selected(&descriptor(&a.result,p,&mut BTreeSet::new())?){"value.tag!==0"}else{"Object.hasOwn(value,'Err')"}}else{"false"};
             let result=if ink_core::action_shape::fresh_native_result(&checked_actions,i)&&!sums.contains_type(p,&a.result)?{"value"}else{"output(value)"};
             let writes=&effects.action(&a.name).ok_or("missing action effects")?.access.writes;
             let root=p.states.iter().enumerate().filter(|(_,s)|writes.contains(&s.name)).map(|(i,_)|i).collect::<Vec<_>>();
             let dense_bindings=root.iter().map(|r|format!("const __dense{r}=rt.tables[{r}] instanceof __DenseTable;const __denseLimit{r}=__dense{r}?rt.tables[{r}].limit:0;")).collect::<String>();
-            let scratch_bindings=scratch_roots.iter().map(|r|format!("const __columnLimit{r}=rt.tables[{r}].limit,__columnPeek{r}=__columnPeekFactories[{r}],__nextScratch{r}=__columnScratch(rt.meta.roots[{r}].value.fields);")).collect::<String>();
-            let host_fallback=if scratch_roots.is_empty(){"rt.host"}else{"rt.host||rt.changeTracking"};
             let (bindings,prepare,commit)=if root.len()==1 {
                 let r=root[0];(format!("const prepare=rt.views.directRoots?.[{r}];"),"if(prepare)prepare(rt,__stageKey,__stagePrior,__stageNext);".to_string(),format!("__stateCommitRoot{r}(rt,__stageKey,__stagePrior,__stageNext,__stageSlot);"))
             }else{(String::new(),"__prepareDirect(rt,__stageRoot,__stageKey,__stagePrior,__stageNext);".to_string(),"__commitDirect(rt,__stageRoot,__stageKey,__stagePrior,__stageNext,__stageSlot);".to_string())};
@@ -600,13 +570,13 @@ pub(crate) fn emit_with_sums(
                 let failed=if result_only{"result"}else{"{result,committed:false,version:__versionWord(rt.version),events:[]}"};
                 let public_next=if result_only{""}else{"const publicNext=__versionWord(next);"};
                 let successful=if result_only{"result"}else{"{result,committed:true,version:publicNext,events}"};
-                format!("({})=>{{if({host_fallback})return fallback({});if(rt.busy)throw Error('state operation already in progress');{locals}let __stageRoot=-1,__stageKey,__stagePrior,__stageNext,__stageSlot,__stageChanged=false,__eventChannel=null,__eventValue;let value;__inkBody:{{{abort}}}const result={result};if({failure})return {failed};if(rt.version===18446744073709551615n)throw Error('commit sequence exhausted');const next={advance};{public_next}if(__stageChanged){{{prepare}}}{event_prepare}if(__stageChanged){{{commit}}}{event_commit}rt.version=next;if(__stageChanged)schedules[{publish_root}]?.(publicationOutputs,rt.changedOutputEpoch);return {successful};}}",params.join(","),params.join(","))
+                format!("({})=>{{if(rt.host)return fallback({});if(rt.busy)throw Error('state operation already in progress');{locals}let __stageRoot=-1,__stageKey,__stagePrior,__stageNext,__stageSlot,__stageChanged=false,__eventChannel=null,__eventValue;let value;__inkBody:{{{abort}}}const result={result};if({failure})return {failed};if(rt.version===18446744073709551615n)throw Error('commit sequence exhausted');const next={advance};{public_next}if(__stageChanged){{{prepare}}}{event_prepare}if(__stageChanged){{{commit}}}{event_commit}rt.version=next;if(__stageChanged)schedules[{publish_root}]?.(publicationOutputs,rt.changedOutputEpoch);return {successful};}}",params.join(","),params.join(","))
             };
             // Full replies retain preparation before fallible public event
             // copying. Result-only kernels can compute scalar keeps in locals
             // and commit them directly without intermediate runtime scratch.
             let only_body=factory(true,inline_kernel.is_some());let complete_body=factory(false,false);
-            preflight_factories.push(format!("(run,a,inputs,output,only,rt,begin,complete,abort,end,ownedInputs=false)=>{{const fallback=ownedInputs?({})=>run(a,[{}],null,output,only,true):({generic})(run,a,inputs,output,only,rt,begin,complete,abort,end);{bindings}{dense_bindings}{scratch_bindings}const schedules=rt.observers.rootSchedules,publicationOutputs=rt.meta.outputPublication?rt.changedOutputs:null;return only?{only_body}:{complete_body};}}",params.join(","),params.join(",")));
+            preflight_factories.push(format!("(run,a,inputs,output,only,rt,begin,complete,abort,end,ownedInputs=false)=>{{const fallback=ownedInputs?({})=>run(a,[{}],null,output,only,true):({generic})(run,a,inputs,output,only,rt,begin,complete,abort,end);{bindings}{dense_bindings}const schedules=rt.observers.rootSchedules,publicationOutputs=rt.meta.outputPublication?rt.changedOutputs:null;return only?{only_body}:{complete_body};}}",params.join(","),params.join(",")));
 
         }else {preflight_factories.push("null".into());}
         equal_results.push(format!("(a,b)=>{}",emitter.equality.expr(&a.result,"a","b")?));
@@ -630,26 +600,9 @@ pub(crate) fn emit_with_sums(
         direct_read_factories.push(if fresh_result {direct_keep.map(|k|format!("rt=>()=>{{if(rt.busy)throw Error('state operation already in progress');return rt.keeps[{k}];}}" )).unwrap_or("null".into())}else{"null".into()});
         actions.push(json!({"index":i,"name":a.name,"singleCell":single_cell&&explicit!=Some(&ink_core::protocol::Execution::Transactional),"directKeep":direct_keep,"freshResult":fresh_result,"roots":roots,"precondition":p.contracts.precondition_checks.get(&a.name),"change":a.kind==ActionKind::Change,"fallible":matches!(a.result,Type::Result(..)),"flatFailure":sums.selected(&descriptor(&a.result,p,&mut BTreeSet::new())?),"params":a.params.iter().map(|(n,t)|Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?}))).collect::<LangResult<Vec<_>>>()?,"result":descriptor(&a.result,p,&mut BTreeSet::new())?}));
     }
-    for (root,state) in p.states.iter().enumerate(){
-        let fallback=format!("__storeDirect(rt,{root},key,prior,next,slot);");
-        let prefix=protocol.and_then(|p|p.plan().columns.iter().find(|c|c.table==state.name));
-        let body=if let Some(prefix)=prefix {
-            let fields=&p.records[&prefix.codec.record];
-            let mut writes=String::new();let mut clear_wide=String::new();
-            for (i,(name,ty)) in fields.iter().enumerate(){
-                let value=format!("next[{}]",quote(name));
-                if *ty==Type::U64&&prefix.exact_numbers {
-                    writes.push_str(&format!("{{const v={value};if(v<=9007199254740991n){{table.lanes[{i}][slot]=Number(v);table.wide[{i}].delete(slot);}}else{{table.lanes[{i}][slot]=0;table.wide[{i}].set(slot,v);}}}}"));
-                    clear_wide.push_str(&format!("table.wide[{i}].delete(slot);"));
-                }else{writes.push_str(&format!("table.lanes[{i}][slot]={};",if *ty==Type::Bool{format!("{value}?1:0")}else{value}));}
-            }
-            format!("if(slot===undefined||slot<0){{{fallback}return;}}const table=rt.tables[{root}];__invalidateSnapshotRow(rt,{root},key);if((prior!==undefined)!==(next!==undefined))__tableMembership(rt,{root},key,next!==undefined);if(rt.changeTracking)__recordChange(rt,{root},key,prior,next);if(next===undefined){{table.present[slot]=0;table.count--;{clear_wide}return;}}{writes}if(prior===undefined){{table.present[slot]=1;table.count++;}}")
-        }else{fallback};
-        code.push_str(&format!("function __stateStoreRoot{root}(rt,key,prior,next,slot){{{body}}}\n"));
-    }
     for (root,keeps) in keep_invalidations.iter().enumerate(){
         let updates=keeps.iter().map(|k|format!("{{const value=rt.viewByKeep[{k}]?rt.viewNext[{k}]:undefined;if(publish)rt.changedOutputs[{k}]=rt.keeps[{k}]!==value?rt.changedOutputEpoch:0;rt.keeps[{k}]=value;}}" )).collect::<String>();
-        code.push_str(&format!("function __stateCommitRoot{root}(rt,key,prior,next,slot){{__stateStoreRoot{root}(rt,key,prior,next,slot);const publish=rt.meta.outputPublication&&!rt.observers.directRoots[{root}]&&rt.observers.active;if(publish&&++rt.changedOutputEpoch===4294967296){{rt.changedOutputs.fill(0);rt.changedOutputEpoch=1;}}{updates}}}\n"));
+        code.push_str(&format!("function __stateCommitRoot{root}(rt,key,prior,next,slot){{__storeDirect(rt,{root},key,prior,next,slot);const publish=rt.meta.outputPublication&&!rt.observers.directRoots[{root}]&&rt.observers.active;if(publish&&++rt.changedOutputEpoch===4294967296){{rt.changedOutputs.fill(0);rt.changedOutputEpoch=1;}}{updates}}}\n"));
     }
     code.push_str(&format!("const __stateDirectReadFactories=[{}];\n",direct_read_factories.join(",")));
     code.push_str(&emitter.equality.source());
@@ -667,24 +620,11 @@ pub(crate) fn emit_with_sums(
     if let Some(protocol)=protocol {
         for prefix in &protocol.plan().columns {
             let i=p.states.iter().position(|s|s.name==prefix.table).unwrap();
-            state["roots"][i]["columnPrefix"]=json!({"capacity":prefix.capacity,"exactNumbers":prefix.exact_numbers,"plainWords":protocol.plan().inline_maintenance&&!prefix.exact_numbers});
+            state["roots"][i]["columnPrefix"]=json!({"capacity":prefix.capacity,"exactNumbers":prefix.exact_numbers});
             if elisions.contains(&prefix.codec.record){return Err("column prefix cannot use an elided row carrier".into());}
         }
     }
     super::value_layout::snapshots(p,&mut state,elisions,sums)?;
-    let column_peeks=p.states.iter().map(|s|->LangResult<String>{
-        let Type::Table(_,row)=&s.ty else{return Ok("null".into())};
-        let Type::Named(record)=row.as_ref() else{return Ok("null".into())};
-        let Some(prefix)=protocol.and_then(|p|p.plan().columns.iter().find(|c|c.table==s.name))else{return Ok("null".into())};
-        let fields=&p.records[record];
-        let assignments=fields.iter().enumerate().map(|(i,(name,ty))|{
-            let lane=format!("table.lanes[{i}][slot]");
-            let value=if *ty==Type::Bool{format!("{lane}!==0")}else if *ty==Type::U64&&prefix.exact_numbers{format!("table.wide[{i}].get(slot)??BigInt({lane})")}else{lane};
-            format!("row[{}]={value};",quote(name))
-        }).collect::<String>();
-        Ok(format!("(table,slot)=>{{if(!table.present[slot])return undefined;const row=table.scratch;{assignments}return row;}}"))
-    }).collect::<LangResult<Vec<_>>>()?;
-    code.push_str(&format!("const __columnPeekFactories=[{}];\n",column_peeks.join(",")));
     code.push_str(&format!(
         "const __stateMetadata={state};const __actions=[{}];const __stateInputCaptures=[{}];\n",
         (0..p.actions.len())

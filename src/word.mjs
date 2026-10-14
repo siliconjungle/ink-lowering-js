@@ -18,3 +18,8 @@ function __word(op,a,b,bits) {
   r=bits<0?BigInt.asIntN(Number(width),r):BigInt.asUintN(Number(width),r);
   return bits===64?r:Number(r);
 }
+// Rotations evaluate each operand once. Counts wrap modulo the width.
+function __rotl32(a,k){k&=31;return (a<<k)|(a>>>((32-k)&31));}
+function __rotr32(a,k){k&=31;return (a>>>k)|(a<<((32-k)&31));}
+function __rotl64(a,k){const n=BigInt(k&63);return BigInt.asUintN(64,(a<<n)|(a>>((64n-n)&63n)));}
+function __rotr64(a,k){const n=BigInt(k&63);return BigInt.asUintN(64,(a>>n)|(a<<((64n-n)&63n)));}

@@ -74,17 +74,25 @@ for(const file of files){
  for(const module of [ordinary,flat]){
  const samples=['null','true','false','0','-0','1.2300e+1000','999999999999999999999999999999999999','"雪\\u0000😀"','[]','{}','[null,true,0,"x",[],{}]','{"__proto__":{"0":[1,-0,"雪"]},"unknown":false}'];
  const codec=module.compiledValues.json_identity.params[0],json=new module.JsonCodec(module.valueCodecs.json_identity.result);
+ const quoter=module.createJsonQuoter({maxEntries:8,maxBytes:256});
  assert.ok(Object.isFrozen(codec.descriptor));
  for(const text of samples){const h=json.parseCompiled(codec,text),expected=json.parse(text);assert.deepEqual(codec.materialize(h),expected);assert.deepEqual(codec.encode(h),json.values.encode(expected));assert.deepEqual(codec.encodeCompact(h),json.values.compact().encode(expected));const result=module.callCompiled('json_identity',[h]);assert.equal(json.stringify(codec.materialize(result)),json.stringify(expected));
   assert.equal(json.stringifyCompiled(codec,result),json.stringify(expected));
+  for(let reuse=0;reuse<3;reuse++)assert.equal(json.stringifyCompiled(codec,result,{quoter}),json.stringify(expected));
+  assert.ok(quoter.stats().entries<=8);assert.ok(quoter.stats().payload_bytes<=256);
   for(const limits of [{nodes:0},{nodes:1},{nodes:3},{nodes:8},{depth:0},{depth:3},{bytes:40},{bytes:100},{}]){
    const a=outcome(()=>json.parseCompiled(codec,text,limits)&&true),b=outcome(()=>codec.capture(json.parse(text,limits),limits)&&true);assert.equal('value' in a,'value' in b,text+JSON.stringify(limits));
    assert.equal('value' in outcome(()=>json.stringifyCompiled(codec,h,limits)),'value' in outcome(()=>json.stringify(codec.materialize(h,limits),limits)),text+JSON.stringify(limits));
+   assert.deepEqual(outcome(()=>json.stringifyCompiled(codec,h,{...limits,quoter})),outcome(()=>json.stringifyCompiled(codec,h,limits)),text+JSON.stringify(limits));
   }
  }
  for(const text of ['','nul','[1,]','{"x":1,"\\u0078":2}','"\\ud800"','{"x":}','1e','01','true false'])assert.throws(()=>json.parseCompiled(codec,text),text);
  assert.throws(()=>json.parseCompiled(module.compiledValues.identity.params[0],'{}'),/schema mismatch/);
  assert.throws(()=>json.stringifyCompiled(module.compiledValues.identity.params[0],module.compiledValues.identity.params[0].capture({Ok:1})),/schema mismatch/);
+ assert.throws(()=>json.stringifyCompiled(codec,json.parseCompiled(codec,'{}'),{quoter:{quote(){throw Error('untrusted callback');}}}),/owner mismatch/);
+ const duplicate=json.parse('{"x":1}');let object=duplicate.payload;for(let i=0;i<5;i++)object=object.Err;object.item0.push(object.item0[0]);
+ assert.throws(()=>json.stringifyCompiled(codec,codec.capture(duplicate),{quoter}),/duplicate/);
+ quoter.clear();assert.equal(quoter.stats().entries,0);assert.equal(quoter.stats().payload_bytes,0);
 
  }
  // The generic event visitor exposes only immutable wire scalars and source
