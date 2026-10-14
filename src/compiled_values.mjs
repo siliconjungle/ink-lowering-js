@@ -52,7 +52,7 @@ function __compiledReduction(factory,root,reduce,identity){
   return reduce(value,reducers,budget,0,context);
  });
 }
-function __compiledCodec(schema,capture,read,write,copy,constructorRoot,reductionRoot,reduce){
+function __compiledCodec(schema,capture,read,write,copy,constructorRoot,reductionRoot,reduce,portableFused=false,compactFused=false){
  const privateCodec=createCompiledValueCodec(schema,read),publicCodec=privateCodec;
  let fusedCodec;const fused=()=>fusedCodec??=createFusedValueCodec(schema,read);
  const identity=schema.identity;
@@ -63,8 +63,8 @@ function __compiledCodec(schema,capture,read,write,copy,constructorRoot,reductio
   capture(value,limits={}){
    return __compiledHandle(identity,capture(value,createValueCaptureBudget(limits),0));
   },
-  decode(bytes,limits={}){return __compiledHandle(identity,privateCodec.decode(bytes,limits));},
-  decodeCompact(bytes,limits={}){return __compiledHandle(identity,privateCodec.compact().decode(bytes,limits));},
+  decode(bytes,limits={}){return __compiledHandle(identity,(portableFused?fused():privateCodec).decode(bytes,limits));},
+  decodeCompact(bytes,limits={}){return __compiledHandle(identity,(compactFused?fused():privateCodec).compact().decode(bytes,limits));},
   decodeFused(bytes,limits={}){return __compiledHandle(identity,fused().decode(bytes,limits));},
   decodeCompactFused(bytes,limits={}){return __compiledHandle(identity,fused().compact().decode(bytes,limits));},
   encode(handle,limits={}){const value=__compiledUnwrap(handle,identity);return publicCodec.encodeWith(writer=>write(writer,value,false),limits);},
