@@ -116,6 +116,7 @@ pub(crate) fn maintained_support(module: &ink_core::core::CheckedModule, views:&
     let mut kernel_bodies=BTreeMap::<(usize,&str),String>::new();
     let mut root_views=vec![Vec::new();module.program().states.len()];
     for ((v,s),zero) in views.package().views.iter().zip(views.subjects()).zip(views.zeros()) {
+        if v.extremum.is_some(){return Err("JavaScript maintained extremum views are not implemented; select a Rust plan".into());}
         let root=module.program().states.iter().position(|r|r.name==s.table).unwrap();
         let keep=module.program().keeps.iter().position(|k|k.name==s.keep).unwrap();
         let Type::Table(key,row)=&module.program().states[root].ty else {unreachable!()};
