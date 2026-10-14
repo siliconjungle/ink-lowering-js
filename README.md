@@ -126,6 +126,14 @@ See the pinned ABI's README for the complete input and numeric contracts.
 
 ### Direct typed construction
 
+Opaque-value codecs expose explicit `decodeFused` and `decodeCompactFused`
+alternatives using the ABI's checked literal reader. It validates frames,
+typed scalar payloads, counted sequences and source resource bounds during owned
+construction. Selected record and sum layouts preserve their complete logical
+wire nodes. The independent generic decoder remains a conformance oracle. Baseline `decode` methods retain
+pre-validation until comparable lifecycle evidence selects an alternative; JSON
+format invariants still belong to the JSON adapter or checked source properties.
+
 Each `compiledValues` codec exposes a frozen `descriptor`, `resolve(type)` and
 `builder(limits)` for typed stream adapters. The builder accepts source-order
 `open(constructorIndex)`, `scalar(value)` and `close()` events. `finish()` returns

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';import fs from 'node:fs';
 import * as ordinary from './runtime-ordinary.mjs';
 const files=['runtime-flat.mjs',...fs.readdirSync(new URL('.',import.meta.url)).filter(n=>/^runtime-one-\d+\.mjs$/.test(n))];
 const outcome=fn=>{try{return {value:fn()};}catch(e){return {error:e.message};}};
+const admission=run=>{try{return {value:run()};}catch{return {rejected:true};}};
 const rebuild=codec=>codec.reducer(node=>{
  assert.ok(Object.isFrozen(node));assert.ok(Object.isFrozen(node.children));
  if(node.kind==='record')return (...values)=>Object.fromEntries(node.fields.map((name,i)=>[name,values[i]]));
@@ -19,6 +20,18 @@ for(const file of files){
   const built=construct(flat,binding.params[0],x);assert.deepEqual(binding.params[0].materialize(built),binding.params[0].materialize(handle));assert.deepEqual(binding.params[0].encode(built),binding.params[0].encode(handle));
   for(const limits of [{nodes:0},{nodes:1},{nodes:2},{nodes:4},{depth:0},{depth:1},{bytes:40},{bytes:50},{}])assert.deepEqual(outcome(()=>construct(flat,binding.params[0],x,limits)&&true),outcome(()=>binding.params[0].capture(x,limits)&&true));
   const ordinaryEntry=ordinary.compiledValues[name],ordinaryReply=ordinary.callCompiled(name,[ordinaryEntry.params[0].capture(x)]);
+  // The fused API must retain exact admission and owned results in every
+  // physical sum layout, including malformed source frames and tags.
+  for(const compact of [false,true]){
+   const encode=compact?'encodeCompact':'encode',decode=compact?'decodeCompact':'decode',fused=compact?'decodeCompactFused':'decodeFused';
+   const bytes=binding.result[encode](reply);
+   const compare=(input,limits={})=>assert.deepEqual(admission(()=>binding.result.materialize(binding.result[fused](input,limits))),admission(()=>ordinaryEntry.result.materialize(ordinaryEntry.result[decode](input,limits))));
+   compare(bytes);
+   for(const limits of [{nodes:0},{nodes:1},{nodes:4},{depth:0},{depth:2},{bytes:0},{bytes:bytes.length-1},{bytes:bytes.length}])compare(bytes,limits);
+   for(let i=0;i<bytes.length;i++){const corrupt=bytes.slice();corrupt[i]^=255;compare(corrupt);}
+   for(let end=0;end<bytes.length;end++)compare(bytes.subarray(0,end));
+   const retained=binding.result[fused](bytes);bytes.fill(0);assert.deepEqual(binding.result.materialize(retained),expected);
+  }
   for(const limits of [{nodes:0},{nodes:1},{nodes:2},{nodes:4},{depth:0},{depth:1},{depth:2},{bytes:4},{bytes:9},{bytes:50},{}]){
    assert.deepEqual(outcome(()=>binding.result.materialize(reply,limits)),outcome(()=>ordinaryEntry.result.materialize(ordinaryReply,limits)));
    for(const compact of [false,true]){const encoded=compact?'encodeCompact':'encode',decoded=compact?'decodeCompact':'decode';assert.deepEqual(outcome(()=>binding.result[encoded](reply,limits)),outcome(()=>ordinaryEntry.result[encoded](ordinaryReply,limits)));const bytes=ordinaryEntry.result[encoded](ordinaryReply);assert.deepEqual(outcome(()=>binding.result[decoded](bytes,limits)&&true),outcome(()=>ordinaryEntry.result[decoded](bytes,limits)&&true));}

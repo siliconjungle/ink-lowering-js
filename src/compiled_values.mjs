@@ -54,6 +54,7 @@ function __compiledReduction(factory,root,reduce,identity){
 }
 function __compiledCodec(schema,capture,read,write,copy,constructorRoot,reductionRoot,reduce){
  const privateCodec=createCompiledValueCodec(schema,read),publicCodec=privateCodec;
+ let fusedCodec;const fused=()=>fusedCodec??=createFusedValueCodec(schema,read);
  const identity=schema.identity;
  const codec=Object.freeze({
   identity,
@@ -64,6 +65,8 @@ function __compiledCodec(schema,capture,read,write,copy,constructorRoot,reductio
   },
   decode(bytes,limits={}){return __compiledHandle(identity,privateCodec.decode(bytes,limits));},
   decodeCompact(bytes,limits={}){return __compiledHandle(identity,privateCodec.compact().decode(bytes,limits));},
+  decodeFused(bytes,limits={}){return __compiledHandle(identity,fused().decode(bytes,limits));},
+  decodeCompactFused(bytes,limits={}){return __compiledHandle(identity,fused().compact().decode(bytes,limits));},
   encode(handle,limits={}){const value=__compiledUnwrap(handle,identity);return publicCodec.encodeWith(writer=>write(writer,value,false),limits);},
   encodeCompact(handle,limits={}){const value=__compiledUnwrap(handle,identity);return publicCodec.compact().encodeWith(writer=>write(writer,value,true),limits);},
   materialize(handle,limits={}){return copy(__compiledUnwrap(handle,identity),createValueCaptureBudget(limits),0);},
