@@ -22,6 +22,40 @@ mod value_capture;
 mod value_reduce;
 mod primitives;
 type Env = BTreeMap<String, (String, Type)>;
+/// Fixed word operations with JavaScript's own 32-bit operators. u32 values
+/// are Numbers in [0, 2^32) and i32 values Numbers in [-2^31, 2^31); the
+/// operators work on exactly those 32 bits, and shift counts are taken modulo
+/// 32 just as the source semantics require. u64 values are BigInts in
+/// [0, 2^64): and/or/xor stay in range and other results wrap explicitly.
+/// Operands may be evaluated only once, so rotations call shared helpers.
+pub(crate) fn word_expression(name: &str, a: &str, b: &str, t: &Type) -> String {
+    match t {
+        Type::U32 | Type::I32 => {
+            let signed = *t == Type::I32;
+            let fit = |e: String| if signed { format!("(({e})|0)") } else { format!("(({e})>>>0)") };
+            match name {
+                "word_not" => fit(format!("~({a})")),
+                "word_and" => fit(format!("({a})&({b})")),
+                "word_or" => fit(format!("({a})|({b})")),
+                "word_xor" => fit(format!("({a})^({b})")),
+                "wrapping_shl" => fit(format!("({a})<<({b})")),
+                "wrapping_shr" => if signed { format!("(({a})>>({b}))") } else { format!("(({a})>>>({b}))") },
+                "rotate_left" => fit(format!("__rotl32({a},{b})")),
+                _ => fit(format!("__rotr32({a},{b})")),
+            }
+        }
+        _ => match name {
+            "word_not" => format!("BigInt.asUintN(64,~({a}))"),
+            "word_and" => format!("(({a})&({b}))"),
+            "word_or" => format!("(({a})|({b}))"),
+            "word_xor" => format!("(({a})^({b}))"),
+            "wrapping_shl" => format!("BigInt.asUintN(64,({a})<<BigInt(({b})&63))"),
+            "wrapping_shr" => format!("(({a})>>BigInt(({b})&63))"),
+            "rotate_left" => format!("__rotl64({a},{b})"),
+            _ => format!("__rotr64({a},{b})"),
+        },
+    }
+}
 fn quote(s: &str) -> String {
     serde_json::to_string(s).unwrap()
 }
@@ -175,8 +209,74 @@ struct Emitter<'a> {
     /// Unique-ownership facts of the function being emitted (see
     /// `ink_core::in_place`). Empty for recursive functions.
     in_place: ink_core::in_place::InPlace,
+    /// Loop-carried internal records held as one local per field. Maps the
+    /// logical binding to its (field, local) components.
+    split: BTreeMap<String, Vec<(String, String)>>,
+}
+/// Fields of an emitted record literal whose values are all plain locals.
+fn record_literal_fields(value: &str, fields: &[String]) -> Option<Vec<String>> {
+    let inner = value.strip_prefix("({")?.strip_suffix("})")?;
+    let parts: Vec<&str> = if inner.is_empty() { vec![] } else { inner.split(',').collect() };
+    if parts.len() != fields.len() {
+        return None;
+    }
+    parts
+        .iter()
+        .zip(fields)
+        .map(|(part, field)| {
+            let local = part.strip_prefix(&format!("[{}]:", quote(field)))?;
+            (local.starts_with('v') && local[1..].bytes().all(|b| b.is_ascii_digit()) && local.len() > 1)
+                .then(|| local.to_owned())
+        })
+        .collect()
 }
 impl Emitter<'_> {
+    /// The internal loop-state record fields, when `t` can be held split.
+    fn split_fields(&self, t: &Type) -> Option<Vec<String>> {
+        let Type::Named(name) = t else { return None };
+        if !name.starts_with("__ink_loop") || self.equality.elisions.contains(name) {
+            return None;
+        }
+        Some(self.p.records.get(name)?.iter().map(|(f, _)| f.clone()).collect())
+    }
+    fn rebuild(&self, logical: &str) -> String {
+        let components = &self.split[logical];
+        format!(
+            "({{{}}})",
+            components.iter().map(|(f, c)| format!("[{}]:{c}", quote(f))).collect::<Vec<_>>().join(",")
+        )
+    }
+    /// Start a loop over a split state: one mutable local per field.
+    fn split_state(&mut self, initial: &str, fields: &[String]) -> String {
+        let init = self.bind(initial);
+        let components: Vec<(String, String)> = fields
+            .iter()
+            .map(|f| {
+                let c = self.fresh();
+                self.line(format!("let {c}={init}[{}];", quote(f)));
+                (f.clone(), c)
+            })
+            .collect();
+        let logical = self.fresh();
+        self.split.insert(logical.clone(), components);
+        logical
+    }
+    /// Assign the next state. Every component value is computed before any
+    /// assignment, so the update is simultaneous.
+    fn split_update(&mut self, logical: &str, value: &str) {
+        let components = self.split[logical].clone();
+        let fields: Vec<String> = components.iter().map(|(f, _)| f.clone()).collect();
+        let locals = match record_literal_fields(value, &fields) {
+            Some(locals) => locals,
+            None => {
+                let tmp = self.bind(value);
+                fields.iter().map(|f| format!("{tmp}[{}]", quote(f))).collect()
+            }
+        };
+        for ((_, c), local) in components.iter().zip(locals) {
+            self.line(format!("{c}={local};"));
+        }
+    }
     fn arithmetic(&self, op: &str, a: &str, b: &str, t: &Type) -> String {
         if self.native_f32 && *t == Type::F32 {
             format!("Math.fround(__nfNumber({a}) {op} __nfNumber({b}))")
@@ -691,7 +791,10 @@ impl Emitter<'_> {
                 format!("__try({})",self.equality.sums.view_type(self.p,&self.infer(a,env,None)?,&value)?)
             }
             Expr::Var(n) if n == "None" => "({None:null})".into(),
-            Expr::Var(n) => env.get(n).ok_or("unbound JavaScript variable")?.0.clone(),
+            Expr::Var(n) => {
+                let bound = &env.get(n).ok_or("unbound JavaScript variable")?.0;
+                if self.split.contains_key(bound) { self.rebuild(bound) } else { bound.clone() }
+            }
             Expr::Neg(a) => {
                 if t == Type::I32 {
                     if let Expr::Num(n) = a.as_ref() {
@@ -710,8 +813,18 @@ impl Emitter<'_> {
             }
             Expr::Let(n, annotation, a, b) => {
                 let at = self.infer(a, env, annotation.as_deref())?;
-                let value = self.expr(a, env, Some(&at))?;
-                let value = self.bind(&value);
+                // Renaming a split loop state keeps it split.
+                let aliased = match a.as_ref() {
+                    Expr::Var(m) => env.get(m).map(|(v, _)| v.clone()).filter(|v| self.split.contains_key(v)),
+                    _ => None,
+                };
+                let value = match aliased {
+                    Some(v) => v,
+                    None => {
+                        let value = self.expr(a, env, Some(&at))?;
+                        self.bind(&value)
+                    }
+                };
                 let mut local = env.clone();
                 local.insert(n.clone(), (value, at));
                 self.expr(b, &local, Some(&t))?
@@ -739,6 +852,11 @@ impl Emitter<'_> {
                     unreachable!()
                 };
                 quote(&format!("{root}.{n}"))
+            }
+            Expr::Field(a, n) if matches!(a.as_ref(), Expr::Var(m) if env.get(m).is_some_and(|(v, _)| self.split.contains_key(v))) => {
+                let Expr::Var(m) = a.as_ref() else { unreachable!() };
+                let logical = &env[m].0;
+                self.split[logical].iter().find(|(f, _)| f == n).ok_or("loop state field")?.1.clone()
             }
             Expr::Field(a, n) => {
                 let at = self.infer(a, env, None)?;
@@ -901,8 +1019,15 @@ impl Emitter<'_> {
                 let limit = self.expr(&args[0], env, Some(&Type::U32))?;
                 let limit = self.bind(&limit);
                 let initial = self.expr(&args[1], env, Some(&t))?;
-                let out = self.fresh();
-                self.line(format!("let {out}={initial};"));
+                let split = self.split_fields(&t);
+                let out = match &split {
+                    Some(fields) => self.split_state(&initial, fields),
+                    None => {
+                        let out = self.fresh();
+                        self.line(format!("let {out}={initial};"));
+                        out
+                    }
+                };
                 let index = self.fresh();
                 self.line(format!("for(let {index}=0;{index}<{limit};{index}++){{"));
                 let (stop, local) = Self::callback(&args[2], env, &[(out.clone(), t.clone())])?;
@@ -912,8 +1037,16 @@ impl Emitter<'_> {
                 let (body, local) =
                     Self::callback(&args[3], env, &[(idx, Type::U32), (out.clone(), t.clone())])?;
                 let value = self.expr(body, &local, Some(&t))?;
-                self.line(format!("{out}={value};}}"));
-                out
+                if split.is_some() {
+                    self.split_update(&out, &value);
+                    self.line("}");
+                    let result = self.rebuild(&out);
+                    self.split.remove(&out);
+                    result
+                } else {
+                    self.line(format!("{out}={value};}}"));
+                    out
+                }
             }
             Expr::Call(n, args) if n == "buffer" || n == "buffer_fill" => {
                 let Type::Buffer(inner) = &t else {
@@ -1106,16 +1239,31 @@ impl Emitter<'_> {
                     unreachable!()
                 };
                 let initial = self.expr(&args[1], env, Some(&t))?;
-                let out = self.fresh();
-                self.line(format!("let {out}={initial};"));
+                let split = self.split_fields(&t);
+                let out = match &split {
+                    Some(fields) => self.split_state(&initial, fields),
+                    None => {
+                        let out = self.fresh();
+                        self.line(format!("let {out}={initial};"));
+                        out
+                    }
+                };
                 let index = self.fresh();
                 self.line(format!("for(let {index}=0;{index}<{bound};{index}++){{"));
                 let idx = self.bind(&format!("({index}>>>0)"));
                 let (body, local) =
                     Self::callback(&args[2], env, &[(idx, Type::U32), (out.clone(), t.clone())])?;
                 let value = self.expr(body, &local, Some(&t))?;
-                self.line(format!("{out}={value};}}"));
-                out
+                if split.is_some() {
+                    self.split_update(&out, &value);
+                    self.line("}");
+                    let result = self.rebuild(&out);
+                    self.split.remove(&out);
+                    result
+                } else {
+                    self.line(format!("{out}={value};}}"));
+                    out
+                }
             }
             Expr::Call(n, args) if n == "foldr" || n == "foldl" || n == "fold_until" => {
                 let Type::List(inner) = self.infer(&args[0], env, None)? else {
@@ -1191,17 +1339,7 @@ impl Emitter<'_> {
                     let v = self.expr(a, env, Some(&t))?;
                     vals.push(self.bind(&v));
                 }
-                format!(
-                    "__word({},{},{},{})",
-                    quote(n),
-                    vals[0],
-                    vals.get(1).map(String::as_str).unwrap_or("0"),
-                    match t {
-                        Type::I32 => -32,
-                        Type::U32 => 32,
-                        _ => 64,
-                    }
-                )
+                word_expression(n, &vals[0], vals.get(1).map(String::as_str).unwrap_or("0"), &t)
             }
             Expr::Call(n, args) if ["Some", "Ok", "Err"].contains(&n.as_str()) => {
                 let inner = match (&t, n.as_str()) {
@@ -1399,6 +1537,7 @@ fn lower_with_layout(
         equality,
         native_f32,
         in_place: Default::default(),
+        split: BTreeMap::new(),
     };
     let mut javascript = String::new();
     let mut functions = vec![];
@@ -1586,7 +1725,7 @@ fn lower_with_layout(
             .1;
         helpers.push_str(pure);
     }
-    if has_state || javascript.contains("__word(") {
+    if has_state || javascript.contains("__word(") || javascript.contains("__rot") {
         helpers.push_str(include_str!("word.mjs"));
     }
     javascript = emitter.equality.sums.source()+&format!("const __recordElisions=new Set({});\nconst __nativeF32={native_f32};\n",serde_json::to_string(elisions).map_err(|e|e.to_string())?) + &helpers + &javascript;
