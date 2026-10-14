@@ -110,14 +110,20 @@ function __prepareDirect(rt,index,key,prior,next){
  if(prepare)prepare(rt,key,prior,next);
  else for(const view of rt.viewsByRoot[index])rt.viewNext[view.keep]=__viewValue(view,rt.keeps[view.keep],key,prior,next);
 }
-function __storeDirect(rt,index,key,prior,next){
+function __storeDirect(rt,index,key,prior,next,slot){
  const table=rt.tables[index];__invalidateSnapshotRow(rt,index,key);
  if((prior!==undefined)!==(next!==undefined))__tableMembership(rt,index,key,next!==undefined);
  if(rt.changeTracking)__recordChange(rt,index,key,prior,next);
- if(next===undefined)table.delete(key);else table.set(key,next);
+ if(slot===undefined){if(next===undefined)table.delete(key);else table.set(key,next);}
+ else{
+  // The checked preflight lookup retains the dense slot until this commit.
+  // No callback or source write can intervene; sparse keys retain exact identity.
+  if(slot<0){if(next===undefined)table.sparse.delete(key);else table.sparse.set(key,next);}else table.dense[slot]=next;
+  if(prior===undefined&&next!==undefined)table.members.add(key);else if(prior!==undefined&&next===undefined)table.members.delete(key);
+ }
 }
-function __commitDirect(rt,index,key,prior,next){
- __storeDirect(rt,index,key,prior,next);
+function __commitDirect(rt,index,key,prior,next,slot){
+ __storeDirect(rt,index,key,prior,next,slot);
  const publishOutputs=rt.meta.outputPublication&&rt.observers.active&&!rt.observers.directRoots[index];
  if(publishOutputs&&++rt.changedOutputEpoch===4294967296){rt.changedOutputs.fill(0);rt.changedOutputEpoch=1;}
 
@@ -212,7 +218,7 @@ function __table(rt,index,method,args){
 function __rollback(rt,mark){for(let i=rt.undo.length-1;i>=mark;i--){const [index,key,present,value]=rt.undo[i];const table=rt.tables[index];__invalidateSnapshotRow(rt,index,key);if(table.has(key)!==present)__tableMembership(rt,index,key,present);if(present)table.set(key,value);else table.delete(key);}rt.undo.length=mark;}
 function __recordChange(rt,index,key,prior,next){rt.changeLog.push([index,key,prior,next]);}
 function __createState(meta,implementations,captures=null,views=[],prefixes=[]){
- const rt={meta,tables:__newTables(meta,prefixes),version:0n,outbox:[],staged:[],busy:false,undo:[],seen:meta.roots.map(()=>new Set()),host:null,keeps:new Array(meta.keeps.length),keepDirty:meta.keeps.length?new Uint8Array(meta.keeps.length):null,keepUndoIndices:meta.keeps.length?new Uint32Array(meta.keeps.length):null,keepUndoCount:0};
+ const rt={meta,tables:__newTables(meta,prefixes),version:meta.compactCommits?0:0n,outbox:__eventLog(meta),staged:[],busy:false,undo:[],seen:meta.roots.map(()=>new Set()),host:null,keeps:new Array(meta.keeps.length),keepDirty:meta.keeps.length?new Uint8Array(meta.keeps.length):null,keepUndoIndices:meta.keeps.length?new Uint32Array(meta.keeps.length):null,keepUndoCount:0};
  rt.views=views;rt.viewsByRoot=meta.roots.map((_,root)=>views.filter(v=>v.root===root));__rebuildViews(rt);
  rt.viewByKeep=new Array(meta.keeps.length);for(const view of views)rt.viewByKeep[view.keep]=view;
  rt.pendingIndices=[];rt.pendingValues=new Array(meta.keeps.length);
@@ -236,14 +242,15 @@ function __createState(meta,implementations,captures=null,views=[],prefixes=[]){
  function invoke(name,args){const a=actionMap.get(name);if(!a)throw Error(`unknown action ${name}`);return run(a,args);}
  function readZero(a,resultOnly){
   const implementation=implementations[a.index],output=a.output,fresh=a.freshResult;
+  if(resultOnly&&fresh&&__stateDirectReadFactories[a.index])return __stateDirectReadFactories[a.index](rt);
   if(a.directKeep!==null&&a.directKeep!==undefined)return ()=>{
    if(rt.busy)throw Error('state operation already in progress');
    const value=rt.keeps[a.directKeep],result=fresh?value:output(value);
-   return resultOnly?result:{result,committed:false,version:rt.version,events:[]};
+   return resultOnly?result:{result,committed:false,version:__versionWord(rt.version),events:[]};
   };
   return ()=>{
    if(rt.busy)throw Error('state operation already in progress');rt.busy=true;rt.ctx.fuel=100000000;
-   try{const value=implementation(rt.ctx,rt),result=fresh?value:output(value);return resultOnly?result:{result,committed:false,version:rt.version,events:[]};}
+   try{const value=implementation(rt.ctx,rt),result=fresh?value:output(value);return resultOnly?result:{result,committed:false,version:__versionWord(rt.version),events:[]};}
    finally{rt.busy=false;}
   };
  }
@@ -253,7 +260,7 @@ function __createState(meta,implementations,captures=null,views=[],prefixes=[]){
   const ctx=rt.ctx;ctx.fuel=100000000;
   if(a.precondition && implementations[actionMap.get(a.precondition).index](ctx,rt,...captured)!==true)throw Error('contract precondition failed');
   rt.busy=true;
-  try{const value=implementations[a.index](ctx,rt,...captured),result=a.freshResult?value:(output||a.output)(value);return resultOnly?result:{result,committed:false,version:rt.version,events:[]};}
+  try{const value=implementations[a.index](ctx,rt,...captured),result=a.freshResult?value:(output||a.output)(value);return resultOnly?result:{result,committed:false,version:__versionWord(rt.version),events:[]};}
   finally{rt.busy=false;}
  }
  function begin(a){
@@ -265,23 +272,24 @@ function __createState(meta,implementations,captures=null,views=[],prefixes=[]){
  function complete(a,value,output,resultOnly){
   const result=a.freshResult?value:(output||a.output)(value);
   const version=rt.actionVersion;
-  if(a.fallible && (a.flatFailure?value.tag!==0:Object.hasOwn(value,'Err'))){rt.changeLog.length=rt.actionChangeMark;__rollback(rt,rt.actionMark);__restoreKeeps(rt);if(rt.host?.strict)rt.host.failure=Object.assign(Error('transaction action failed'),{action:a.name,result});return resultOnly?result:{result,committed:false,version,events:[]};}
+  if(a.fallible && (a.flatFailure?value.tag!==0:Object.hasOwn(value,'Err'))){rt.changeLog.length=rt.actionChangeMark;__rollback(rt,rt.actionMark);__restoreKeeps(rt);if(rt.host?.strict)rt.host.failure=Object.assign(Error('transaction action failed'),{action:a.name,result});return resultOnly?result:{result,committed:false,version:__versionWord(version),events:[]};}
   if(version===18446744073709551615n)throw Error('commit sequence exhausted');
-  const next=version+1n;
+  const next=rt.meta.compactCommits?__nextCommit(version):version+1n;
+  const publicNext=resultOnly?null:__versionWord(next);
   __prepareCell(rt);
   const events=resultOnly?null:new Array(rt.eventCount);
   if(rt.eventCount){
    const channel=rt.eventChannel,value=rt.eventValue;
    rt.outbox.push({commit:next,position:0n,channel,value});
-   if(events)events[0]={commit:next,position:0n,channel,value:eventOutput.get(channel)(value)};
+   if(events)events[0]={commit:publicNext,position:0n,channel,value:eventOutput.get(channel)(value)};
    for(let i=0;i<rt.staged.length;i++){
     const [channel,value]=rt.staged[i],position=BigInt(i+1);
     rt.outbox.push({commit:next,position,channel,value});
-    if(events)events[i+1]={commit:next,position,channel,value:eventOutput.get(channel)(value)};
+    if(events)events[i+1]={commit:publicNext,position,channel,value:eventOutput.get(channel)(value)};
    }
   }
   __commitCell(rt);rt.version=next;rt.actionSuccessful=true;
-  return resultOnly?result:{result,committed:true,version:next,events};
+  return resultOnly?result:{result,committed:true,version:publicNext,events};
  }
  function abort(e){
   rt.changeLog.length=rt.actionChangeMark;__rollback(rt,rt.actionMark);__restoreKeeps(rt);rt.version=rt.actionVersion;rt.outbox=rt.actionOutbox;rt.outbox.length=rt.actionOutboxLength;if(rt.host?.strict)rt.host.failure=e;throw e;
@@ -340,7 +348,7 @@ function __createState(meta,implementations,captures=null,views=[],prefixes=[]){
   rollbackTransaction(){if(rt.busy||!rt.host)throw Error('no state transaction');__rollback(rt,0);rt.version=rt.host.version;rt.outbox=rt.host.outbox;rt.outbox.length=rt.host.length;rt.keeps=rt.host.keeps;rt.changeLog.length=rt.host.changeMark;rt.changeEpoch++;const mark=rt.host.notificationMark;rt.host=null;observers.rollback(mark);},
   changeToken(){
    if(rt.busy||rt.host)throw Error('change token requires transaction boundary');
-   const token=Object.freeze({});rt.changeTracking=true;rt.changeTokens.set(token,{epoch:rt.changeEpoch,index:rt.changeLog.length,version:rt.version});return token;
+   const token=Object.freeze({});rt.changeTracking=true;rt.changeTokens.set(token,{epoch:rt.changeEpoch,index:rt.changeLog.length,version:__versionWord(rt.version)});return token;
   },
   releaseChangeToken(token){rt.changeTokens.delete(token);if(!rt.changeTokens.size){rt.changeTracking=false;rt.changeLog.length=0;}},
   changesSince(token){
@@ -358,17 +366,17 @@ function __createState(meta,implementations,captures=null,views=[],prefixes=[]){
      changes.push({table:schema.name,key:keyOut(key),before:before===undefined?{None:null}:{Some:rowOut(before)},after:after===undefined?{None:null}:{Some:rowOut(after)}});
     }
    }
-   return {from:mark.version,to:rt.version,changes};
+   return {from:mark.version,to:__versionWord(rt.version),changes};
   },
-  get version(){return rt.version;},
-  get outbox(){return rt.outbox.map(e=>({...e,value:eventOutput.get(e.channel)(e.value)}));},
-  acknowledgeThrough(commit,position){if(rt.busy)throw Error('state operation already in progress');commit=__stateWord(commit);position=__stateWord(position);const last=rt.outbox.at(-1);if(!last)return;if(last.commit<commit||(last.commit===commit&&last.position<=position)){if(rt.host)rt.outbox=[];else rt.outbox.length=0;return;}rt.outbox=rt.outbox.filter(e=>e.commit>commit||(e.commit===commit&&e.position>position));},
+  get version(){return __versionWord(rt.version);},
+  get outbox(){return rt.outbox.map(e=>({...e,commit:__versionWord(e.commit),value:eventOutput.get(e.channel)(e.value)}));},
+  acknowledgeThrough(commit,position){if(rt.busy)throw Error('state operation already in progress');commit=__stateWord(commit);position=__stateWord(position);const last=rt.outbox.at(-1);if(!last)return;const lastCommit=__versionWord(last.commit);if(lastCommit<commit||(lastCommit===commit&&last.position<=position)){if(rt.host)rt.outbox=__eventLog(meta);else rt.outbox.length=0;return;}rt.outbox=rt.outbox.filter(e=>{const c=__versionWord(e.commit);return c>commit||(c===commit&&e.position>position);});},
   async invokeAsync(name,args){
    if(typeof __parallelInvokeAsync!=='function')return invoke(name,args);
    if(rt.busy||rt.host)throw Error('parallel state call requires transaction boundary');const captured=structuredClone(args);rt.busy=true;observers.hold();let completed=false;
-   try{const snapshot=await __snapshotEncode(meta,rt);const reply=await __parallelInvokeAsync(name,captured,snapshot);const s=await __snapshotDecode(meta,reply.snapshot);const candidate={...rt,tables:__newTables(meta,prefixes,s.tables),keeps:rt.keeps.map(()=>undefined)};__rebuildViews(candidate);rt.tables=candidate.tables;rt.version=s.version;rt.outbox=s.outbox;rt.keeps=candidate.keeps;if(rt.snapshotRows)rt.snapshotRows=meta.roots.map(()=>new Map());rt.changeEpoch++;rt.changeLog.length=0;completed=true;return reply.value;}finally{rt.busy=false;if(completed)observers.commit(meta.roots.map((_,i)=>i));observers.release();}
+   try{const snapshot=await __snapshotEncode(meta,rt);const reply=await __parallelInvokeAsync(name,captured,snapshot);const s=await __snapshotDecode(meta,reply.snapshot);const candidate={...rt,tables:__newTables(meta,prefixes,s.tables),keeps:rt.keeps.map(()=>undefined)};__rebuildViews(candidate);rt.tables=candidate.tables;rt.version=__storedCommit(meta,s.version);rt.outbox=__eventLog(meta,s.outbox);rt.keeps=candidate.keeps;if(rt.snapshotRows)rt.snapshotRows=meta.roots.map(()=>new Map());rt.changeEpoch++;rt.changeLog.length=0;completed=true;return reply.value;}finally{rt.busy=false;if(completed)observers.commit(meta.roots.map((_,i)=>i));observers.release();}
   },
   checkpoint(limits){if(rt.busy)throw Error('checkpoint requires transaction boundary');return __snapshotEncode(meta,rt,limits);},
-  async restore(bytes,limits){if(rt.host)throw Error('restore during transaction');if(rt.busy)throw Error('restore requires transaction boundary');rt.busy=true;rt.ctx.fuel=100000000;observers.hold();let restored=false;try{const s=await __snapshotDecode(meta,bytes,limits);const candidate={...rt,tables:__newTables(meta,prefixes,s.tables),version:s.version,outbox:s.outbox,keeps:rt.keeps.map(()=>undefined)};__rebuildViews(candidate);for(const name of meta.invariantChecks||[]){const a=actionMap.get(name);if(implementations[a.index](rt.ctx,candidate)!==true)throw Error('snapshot violates state invariant');}rt.tables=candidate.tables;rt.version=s.version;rt.outbox=s.outbox;rt.keeps=candidate.keeps;if(rt.snapshotRows)rt.snapshotRows=meta.roots.map(()=>new Map());rt.changeEpoch++;rt.changeLog.length=0;restored=true;}finally{rt.busy=false;if(restored)observers.commit(meta.roots.map((_,i)=>i));observers.release();}},
+  async restore(bytes,limits){if(rt.host)throw Error('restore during transaction');if(rt.busy)throw Error('restore requires transaction boundary');rt.busy=true;rt.ctx.fuel=100000000;observers.hold();let restored=false;try{const s=await __snapshotDecode(meta,bytes,limits);const candidate={...rt,tables:__newTables(meta,prefixes,s.tables),version:__storedCommit(meta,s.version),outbox:s.outbox,keeps:rt.keeps.map(()=>undefined)};__rebuildViews(candidate);for(const name of meta.invariantChecks||[]){const a=actionMap.get(name);if(implementations[a.index](rt.ctx,candidate)!==true)throw Error('snapshot violates state invariant');}rt.tables=candidate.tables;rt.version=__storedCommit(meta,s.version);rt.outbox=__eventLog(meta,s.outbox);rt.keeps=candidate.keeps;if(rt.snapshotRows)rt.snapshotRows=meta.roots.map(()=>new Map());rt.changeEpoch++;rt.changeLog.length=0;restored=true;}finally{rt.busy=false;if(restored)observers.commit(meta.roots.map((_,i)=>i));observers.release();}},
  });
 }

@@ -1385,7 +1385,7 @@ pub fn lower_planned(plan: &ink_core::planning::CheckedPlan) -> LangResult<Emiss
         }
     }
     if let Some(views)=plan.maintained(){
-        let support=representation_program::maintained_support(plan.module(),views,&elisions,&sum_layout::Sums::new(plan.module().program(),&sums)?)?;
+        let support=representation_program::maintained_support(plan.module(),views,&elisions,&sum_layout::Sums::new(plan.module().program(),&sums)?,plan.protocol().is_some_and(|p|p.plan().inline_maintenance))?;
         emission.javascript=format!("{support}{}",emission.javascript);
         emission.javascript=emission.javascript.replace("__createState(__stateMetadata,__actions,__stateInputCaptures)","__createState(__stateMetadata,__actions,__stateInputCaptures,__compiledMaintained)");
         emission.javascript=emission.javascript.replace("__createState(__stateMetadata,__actions,__stateInputCaptures,[],__densePrefixes)","__createState(__stateMetadata,__actions,__stateInputCaptures,__compiledMaintained,__densePrefixes)");
