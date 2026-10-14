@@ -43,7 +43,7 @@ function __orderedKeys(rt,index){
  const cell=rt.cell;
  if(cell&&cell.index===index&&table.has(cell.key)!==(cell.next!==undefined)){
   if(cell.next===undefined)return keys.filter(k=>k!==cell.key);
-  return [...keys,cell.key].sort((a,b)=>__keyCompare(a,b,rt.meta.roots[index].key));
+  const at=__keyPosition(keys,cell.key,type);return [...keys.slice(0,at),cell.key,...keys.slice(at)];
  }
  return keys;
 }
@@ -208,7 +208,10 @@ function __table(rt,index,method,args){
  const table=rt.tables[index];
  if(method==='values'||method==='keys'){const keys=__orderedKeys(rt,index);return method==='keys'?keys.slice():keys.map(k=>__cellGet(rt,index,k));}
  if(method==='intersect_table'){const current=__readTable(rt,index),other=__readTable(rt,args[0]),small=current.size<=other.size?current:other,large=small===current?other:current;const result=[];for(const k of small.keys())if(large.has(k))result.push(k);return result.sort((a,b)=>__keyCompare(a,b,rt.meta.roots[index].key));}
- if(method==='intersect_keys'){const selected=new Set(args[0]);return __orderedKeys(rt,index).filter(k=>selected.has(k));}
+ if(method==='intersect_keys'){const requested=args[0],size=rt.tables[index].size;
+  // Fewer requested keys than rows: look each one up instead of scanning.
+  if(requested.length<size){const type=rt.meta.roots[index].key;return [...new Set(requested)].filter(k=>__cellGet(rt,index,k)!==undefined).sort((a,b)=>__keyCompare(a,b,type));}
+  const selected=new Set(requested);return __orderedKeys(rt,index).filter(k=>selected.has(k));}
  if(method==='put_many'){const keys=args[0],values=args[1];if(keys.length!==values.length)return {Err:'table bulk length mismatch'};for(let i=0;i<keys.length;i++)__table(rt,index,'put',[keys[i],values[i]]);return {Ok:null};}
  if(method==='remove_many'){for(const k of args[0])__table(rt,index,'remove',[k]);return null;}
  if(method==='remove')return __tableRemove(rt,index,key);
