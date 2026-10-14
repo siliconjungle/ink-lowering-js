@@ -606,7 +606,7 @@ pub(crate) fn emit_with_sums(
         .iter()
         .map(|(n, t)| Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?,"snapshotType":ink_core::snapshot_wire::descriptor(&layout.events.iter().find(|(name,_)|name==n).unwrap().1)})))
         .collect::<LangResult<Vec<_>>>()?;
-    let mut state = json!({"actions":actions,"roots":roots,"events":events,"keeps":keeps,"keepInvalidations":keep_invalidations,"invariantChecks":p.contracts.invariant_checks,"outputPublication":protocol.is_some_and(|p|p.plan().output_publication),"snapshotRows":protocol.is_some_and(|p|p.plan().snapshot_rows),"eventColumns":protocol.is_some_and(|p|p.plan().event_columns),"eventRuns":protocol.is_some_and(|p|p.plan().event_runs),"compactCommits":protocol.is_some_and(|p|p.plan().compact_commits.is_some()),"snapshot":{"program":layout.program,"schema":layout.schema}});
+    let mut state = json!({"actions":actions,"roots":roots,"events":events,"keeps":keeps,"keepInvalidations":keep_invalidations,"lazyMaintenance":protocol.is_none(),"invariantChecks":p.contracts.invariant_checks,"outputPublication":protocol.is_some_and(|p|p.plan().output_publication),"snapshotRows":protocol.is_some_and(|p|p.plan().snapshot_rows),"eventColumns":protocol.is_some_and(|p|p.plan().event_columns),"eventRuns":protocol.is_some_and(|p|p.plan().event_runs),"compactCommits":protocol.is_some_and(|p|p.plan().compact_commits.is_some()),"snapshot":{"program":layout.program,"schema":layout.schema}});
     if let Some(protocol)=protocol {
         for prefix in &protocol.plan().columns {
             let i=p.states.iter().position(|s|s.name==prefix.table).unwrap();

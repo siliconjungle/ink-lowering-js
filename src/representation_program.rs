@@ -167,7 +167,7 @@ pub(crate) fn maintained_support(module: &ink_core::core::CheckedModule, views:&
     let mut preparers=Vec::new();
     for (root,ids) in root_views.iter().enumerate(){
         if !native_roots[root]||ids.is_empty(){preparers.push("null".into());continue;}
-        let branch=|method:&str,args:&str|ids.iter().map(|(i,k)|format!("if(rt.pendingValues[{k}]===undefined){{rt.pendingValues[{k}]=__views[{i}].{method}(rt.keeps[{k}],key,{args});rt.pendingIndices.push({k});}}")).collect::<String>();
+        let branch=|method:&str,args:&str|ids.iter().map(|(i,k)|format!("if(rt.keeps[{k}]!==undefined&&rt.pendingValues[{k}]===undefined){{rt.pendingValues[{k}]=__views[{i}].{method}(rt.keeps[{k}],key,{args});rt.pendingIndices.push({k});}}")).collect::<String>();
         preparers.push(format!("(rt,cell)=>{{const {{key,prior,next}}=cell;if(prior===undefined){{{}}}else if(next===undefined){{{}}}else{{{}}}}}",branch("insert","next"),branch("remove","prior"),branch("replace","prior,next")));
     }
     let directs=root_views.iter().enumerate().map(|(root,ids)|{
