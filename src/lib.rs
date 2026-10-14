@@ -634,9 +634,9 @@ impl Emitter<'_> {
                 // The fixed sort primitive orders integers numerically. Keep
                 // its temporary private and return an ordinary owned List so
                 // subsequent literal concatenation can still grow it.
-                Type::U32 => format!("Array.from(Uint32Array.from({xs}).sort())"),
-                Type::I32 => format!("Array.from(Int32Array.from({xs}).sort())"),
-                Type::U64 => format!("Array.from(BigUint64Array.from({xs}).sort())"),
+                Type::U32 => format!("__wordSort({xs},Uint32Array)"),
+                Type::I32 => format!("__wordSort({xs},Int32Array)"),
+                Type::U64 => format!("__wordSort({xs},BigUint64Array)"),
                 _ => format!("__sort({xs})"),
             },
             "concat" => {
