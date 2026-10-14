@@ -305,8 +305,8 @@ function __createState(meta,implementations,captures=null,views=[],prefixes=[]){
  }
 
  for(const a of actionMap.values())if(__statePreflightFactories[a.index]){
-  const inputs=a.params.map(()=>__identity);
-  a.kernels=[false,true].map(only=>__statePreflightFactories[a.index](run,a,inputs,a.output,only,rt,begin,complete,abort,end));
+  // run() supplies module-owned captured values; bound native entries still capture composites.
+  a.kernels=[false,true].map(only=>__statePreflightFactories[a.index](run,a,a.inputs,a.output,only,rt,begin,complete,abort,end,true));
  }
  return Object.freeze({
   subscribeValues(queries,callback,options){if(rt.busy||rt.host)throw Error('subscription requires transaction boundary');return observers.subscribeValues(queries,callback,options);},
