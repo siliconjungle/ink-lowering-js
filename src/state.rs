@@ -453,7 +453,7 @@ pub(crate) fn emit_with_sums(
     kernels:&[Option<String>],
 ) -> LangResult<(String, Value)> {
     let p = module.program();
-    let checked_actions = ink_core::action_ir::CheckedActions::elaborate(module)?;
+    let checked_actions = ink_core::action_ir::CheckedActions::elaborate_with_frozen_roots(module)?;
     let effects = ink_core::effects::CheckedEffects::derive(&checked_actions)?;
     let execution = checked_actions.execution()?;
     let mut emitter = StateEmitter {
@@ -605,7 +605,32 @@ pub(crate) fn emit_with_sums(
     }
     code.push_str(&format!("const __stateDirectReadFactories=[{}];\n",direct_read_factories.join(",")));
     code.push_str(&emitter.equality.source());
+    // Embedded data uses the public capture boundary. Encode u64s as decimal
+    // strings before JSON.parse so JavaScript never rounds a large word literal.
+    fn fixed_input(v:&ink_core::stateful::Value)->serde_json::Value {
+        use ink_core::stateful::Value as V;
+        match v {
+            V::U64(n)=>json!(n.to_string()),
+            V::List(xs)|V::Vector(xs)=>xs.iter().map(fixed_input).collect(),
+            V::Record(_,fields)=>fields.iter().map(|(n,v)|(n.clone(),fixed_input(v))).collect(),
+            V::Option(Some(v))=>json!({"Some":fixed_input(v)}),
+            V::Result(ok,v)=>if *ok{json!({"Ok":fixed_input(v)})}else{json!({"Err":fixed_input(v)})},
+            _=>v.json(),
+        }
+    }
+    let fixed=ink_core::frozen::tables(p)?;
+    let mut frozen_factories=vec![];
+    for root in p.states.iter().filter(|_|!p.frozen.is_empty()) {
+        if let Some(rows)=fixed.get(&root.name) {
+            let Type::Table(k,v)=&root.ty else{return Err("frozen JavaScript root".into())};
+            let key=captures.for_type(k)?;let value=captures.for_type(v)?;
+            let rows=rows.iter().map(|(k,v)|json!([fixed_input(k),fixed_input(v)])).collect::<Vec<_>>();
+            let data=quote(&serde_json::to_string(&rows).map_err(|e|e.to_string())?);
+            frozen_factories.push(format!("()=>new Map(JSON.parse({data}).map(([k,v])=>[{key}(k,{{cells:1000000}},0,128),{value}(v,{{cells:1000000}},0,128)]))"));
+        }else{frozen_factories.push("null".into());}
+    }
     code.push_str(&captures.source());
+    code.push_str(&format!("const __stateFrozenFactories=[{}];\n",frozen_factories.join(",")));
     code.push_str(&format!("const __stateQueryEquals=[{}];\n",equal_results.join(",")));
     code.push_str(&format!("const __stateRootEquals=[{}];\n",equal_roots.join(",")));
     code.push_str(&format!("const __stateBoundFactories=[{}];const __statePreflightFactories=[{}];\n",bound_factories.join(","),preflight_factories.join(",")));

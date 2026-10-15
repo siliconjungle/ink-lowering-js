@@ -28,7 +28,7 @@ impl<'a> Captures<'a> {
         };
         // Argument property access precedes entering the child capture, just as
         // it does for a normal function call (including exhausted budgets).
-        Some(format!("let {output}={input};if({depth}>64||--budget.cells<0)throw Error('state input resource limit');{check}"))
+        Some(format!("let {output}={input};if({depth}>maxDepth||--budget.cells<0)throw Error('state input resource limit');{check}"))
     }
     pub fn new(program: &'a Program) -> Self {
         Self { program, elisions:BTreeSet::new(), sums:Default::default(), functions: BTreeMap::new() }
@@ -50,13 +50,13 @@ impl<'a> Captures<'a> {
         let name = format!("__ownedInput{}", self.functions.len());
         self.functions.insert(key.clone(), (name.clone(), String::new()));
         let kind = ty["kind"].as_str().ok_or("state input schema kind")?;
-        let limit = "if(depth>64||--budget.cells<0)throw Error('state input resource limit');";
+        let limit = "if(depth>maxDepth||--budget.cells<0)throw Error('state input resource limit');";
         let mut prefix = limit.to_string();
         let body = match kind {
             "ref" => {
                 let target = ty["name"].as_str().ok_or("state input reference name")?;
                 let next = self.for_type(&Type::Named(target.into()))?;
-                format!("return {next}(value,budget,depth+1);")
+                format!("return {next}(value,budget,depth+1,maxDepth);")
             }
             "u32" | "i32" | "u64" | "bool" | "unit" | "string" => {
                 prefix.clear();
@@ -74,7 +74,7 @@ impl<'a> Captures<'a> {
                         capture.push_str(&code);
                     } else {
                         let next = self.compile(&field["type"])?;
-                        capture.push_str(&format!("const {result}={next}(value[{label}],budget,depth+1);"));
+                        capture.push_str(&format!("const {result}={next}(value[{label}],budget,depth+1,maxDepth);"));
                     }
                     // Computed properties preserve an ordinary own __proto__ field.
                     owned.push(format!("[{label}]:{result}"));
@@ -86,15 +86,15 @@ impl<'a> Captures<'a> {
             "list" | "vector" => {
                 let next = self.compile(&ty["element"])?;
                 let size = if kind == "vector" { format!("if(value.length!=={})throw Error('invalid vector length');", ty["size"]) } else { String::new() };
-                format!("if(!Array.isArray(value)&&!(ArrayBuffer.isView(value)&&!(value instanceof DataView)))throw Error('invalid list');{size}const out=new Array(value.length);for(let i=0;i<out.length;i++)out[i]={next}(value[i],budget,depth+1);return out;")
+                format!("if(!Array.isArray(value)&&!(ArrayBuffer.isView(value)&&!(value instanceof DataView)))throw Error('invalid list');{size}const out=new Array(value.length);for(let i=0;i<out.length;i++)out[i]={next}(value[i],budget,depth+1,maxDepth);return out;")
             }
             "result" if self.sums.selected(ty)=>{
                 let leaves=super::sum_layout::Sums::leaves(ty);let count=leaves.len()-1;let mut body="let cursor=value;".to_string();
                 for i in 0..count {
-                    if i>0 {body.push_str(&format!("if(depth+{i}>64||--budget.cells<0)throw Error('state input resource limit');"));}
+                    if i>0 {body.push_str(&format!("if(depth+{i}>maxDepth||--budget.cells<0)throw Error('state input resource limit');"));}
                     let next=self.compile(&leaves[i])?;
-                    body.push_str(&format!("if(!cursor||typeof cursor!=='object'||Array.isArray(cursor))throw Error('invalid Result');const keys{i}=Object.keys(cursor);if(keys{i}.length!==1)throw Error('invalid Result');const tag{i}=keys{i}[0];if(tag{i}==='Ok')return {{tag:{i},payload:{next}(cursor.Ok,budget,depth+{})}};if(tag{i}!=='Err')throw Error('invalid Result');",i+1));
-                    if i+1==count {let next=self.compile(&leaves[count])?;body.push_str(&format!("return {{tag:{count},payload:{next}(cursor.Err,budget,depth+{count})}};"));}else{body.push_str("cursor=cursor.Err;");}
+                    body.push_str(&format!("if(!cursor||typeof cursor!=='object'||Array.isArray(cursor))throw Error('invalid Result');const keys{i}=Object.keys(cursor);if(keys{i}.length!==1)throw Error('invalid Result');const tag{i}=keys{i}[0];if(tag{i}==='Ok')return {{tag:{i},payload:{next}(cursor.Ok,budget,depth+{},maxDepth)}};if(tag{i}!=='Err')throw Error('invalid Result');",i+1));
+                    if i+1==count {let next=self.compile(&leaves[count])?;body.push_str(&format!("return {{tag:{count},payload:{next}(cursor.Err,budget,depth+{count},maxDepth)}};"));}else{body.push_str("cursor=cursor.Err;");}
                 }
                 body
             }
@@ -103,19 +103,19 @@ impl<'a> Captures<'a> {
                     ("Some", "None", self.compile(&ty["element"])?, None)
                 } else { ("Ok", "Err", self.compile(&ty["ok"])?, Some(self.compile(&ty["error"])?)) };
                 let err = if kind == "option" { "Option" } else { "Result" };
-                let yes_value=self.sums.make(ty,yes,&format!("{a}(value.{yes},budget,depth+1)"));
-                let otherwise=b.map(|next|{let value=self.sums.make(ty,no,&format!("{next}(value.{no},budget,depth+1)"));format!("if(tag==='{no}')return {value};")}).unwrap_or_else(||format!("if(tag==='{no}'&&value.{no}===null)return {{{no}:null}};"));
+                let yes_value=self.sums.make(ty,yes,&format!("{a}(value.{yes},budget,depth+1,maxDepth)"));
+                let otherwise=b.map(|next|{let value=self.sums.make(ty,no,&format!("{next}(value.{no},budget,depth+1,maxDepth)"));format!("if(tag==='{no}')return {value};")}).unwrap_or_else(||format!("if(tag==='{no}'&&value.{no}===null)return {{{no}:null}};"));
                 format!("if(!value||typeof value!=='object'||Array.isArray(value))throw Error('invalid {err}');const keys=Object.keys(value);if(keys.length!==1)throw Error('invalid {err}');const tag=keys[0];if(tag==='{yes}')return {yes_value};{otherwise}throw Error('invalid {err}');")
             }
             _ => {
                 // Exact Int, wide words and raw float conversion share the fixed
                 // scalar implementation, including its one node budget charge.
-                prefix = format!("return __stateInput(value,__ownedType{},budget,depth);", name.trim_start_matches("__ownedInput"));
+                prefix = format!("return __stateInput(value,__ownedType{},budget,depth,maxDepth);", name.trim_start_matches("__ownedInput"));
                 String::new()
             }
         };
         let constant = if body.is_empty() { format!("const __ownedType{}={ty};\n", name.trim_start_matches("__ownedInput")) } else { String::new() };
-        let code = format!("{constant}function {name}(value,budget={{cells:1000000}},depth=0){{{prefix}{body}}}\n");
+        let code = format!("{constant}function {name}(value,budget={{cells:1000000}},depth=0,maxDepth=64){{{prefix}{body}}}\n");
         self.functions.insert(key, (name.clone(), code));
         Ok(name)
     }
