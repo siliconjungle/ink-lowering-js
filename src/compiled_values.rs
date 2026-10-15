@@ -246,18 +246,50 @@ pub(super) fn emit(
     );
     source += r#"
 export const compiledValues=Object.freeze(Object.fromEntries([...__compiledEntries].map(([name,entry])=>[name,Object.freeze({get params(){return Object.freeze(entry.params.map(codec=>codec()));},get result(){return entry.result();}})])));
-export function callCompiled(name,args){
- const entry=__compiledEntries.get(name);
- if(!entry||!Array.isArray(args)||args.length!==entry.params.length)throw Error('unsupported compiled call');
- const owned=entry.params.map((codec,i)=>__compiledEntry(args[i],codec().identity)),values=owned.map(v=>v.value);
+function __compiledValidate(entry,owned){
+ const values=owned.map(v=>v.value);
  const established=entry.onlyTypeGuards&&entry.needsInvariants.every((needed,i)=>!needed||owned[i].guaranteed);
  if(entry.precondition!==null&&!established){
   if(__implementations[entry.precondition](...values)!==true)throw Error('contract precondition failed');
   for(let i=0;i<owned.length;i++)if(entry.needsInvariants[i])owned[i].guaranteed=true;
  }
+ return values;
+}
+export function callCompiled(name,args){
+ const entry=__compiledEntries.get(name);
+ if(!entry||!Array.isArray(args)||args.length!==entry.params.length)throw Error('unsupported compiled call');
+ const owned=entry.params.map((codec,i)=>__compiledEntry(args[i],codec().identity)),values=__compiledValidate(entry,owned);
  // Checked source outputs satisfy their declared value interfaces. Private
  // handles expose only detached copies and never retain mutable host inputs.
  return __compiledHandle(entry.result().identity,__implementations[entry.index](...values),true);
+}
+
+// Explicit sealed-value partial application. Each token owns a bounded set of
+// lexical caches; no mutable host object, global memo table or error is retained.
+const __preparedCompiled=new WeakMap();
+export function prepareCompiled(name,bindings){
+ const entry=__compiledEntries.get(name);
+ if(!entry||!Array.isArray(bindings)||bindings.length>entry.params.length)throw Error('unsupported prepared compiled call');
+ const captured=new Array(entry.params.length),fixed=new Array(entry.params.length).fill(false);
+ for(const binding of bindings){
+  if(!Array.isArray(binding)||binding.length!==2)throw Error('prepared compiled binding');
+  const [index,handle]=binding;
+  if(!Number.isInteger(index)||index<0||index>=fixed.length||fixed[index])throw Error('prepared compiled parameter');
+  captured[index]=__compiledEntry(handle,entry.params[index]().identity);fixed[index]=true;
+ }
+ const remaining=fixed.flatMap((yes,i)=>yes?[]:[i]);
+ const factory=__preparedFactories.get(entry.index);
+ const run=factory?factory(fixed):__implementations[entry.index];
+ const token=Object.freeze(Object.create(null));
+ __preparedCompiled.set(token,{entry,captured,remaining,run});return token;
+}
+export function callPreparedCompiled(token,args){
+ const prepared=__preparedCompiled.get(token);
+ if(!prepared||!Array.isArray(args)||args.length!==prepared.remaining.length)throw Error('invalid prepared compiled call');
+ const {entry,captured,remaining,run}=prepared,owned=captured.slice();
+ for(let i=0;i<remaining.length;i++){const at=remaining[i];owned[at]=__compiledEntry(args[i],entry.params[at]().identity);}
+ const values=__compiledValidate(entry,owned);
+ return __compiledHandle(entry.result().identity,run(...values),true);
 }
 "#;
     Ok(source)

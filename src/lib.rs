@@ -22,6 +22,7 @@ mod value_capture;
 mod value_reduce;
 mod primitives;
 mod count_carrier;
+mod prepared;
 type Env = BTreeMap<String, (String, Type)>;
 /// Fixed word operations with JavaScript's own 32-bit operators. u32 values
 /// are Numbers in [0, 2^32) and i32 values Numbers in [-2^31, 2^31); the
@@ -125,6 +126,7 @@ fn needs_parallel(e: &Expr, p: &Program, seen: &mut std::collections::BTreeSet<S
     });
     found
 }
+#[derive(Clone)]
 struct TypedEquality<'a> {
     p: &'a Program,
     prefix: &'static str,
@@ -1718,8 +1720,11 @@ fn lower_with_layout(
             emitter.lines
         ));
     }
+    let (prepared_source, prepared_metadata) = prepared::emit(&mut emitter);
+    javascript.push_str(&prepared_source);
     javascript.push_str(&emitter.equality.source());
     let mut interface = json!({"schema":1,"backend":"javascript","abi":"ink-javascript-trusted-values-v2","destination_abi":{"name":"ink-javascript-into-v1","count_unit":"elements","ownership":"caller-owned","capacity":"trusted","aliasing":"destination-disjoint-from-all-reachable-inputs","tail":"unwritten"},"core_semantics":module.semantics(),"core_sha256":module.identity()?,"functions":functions});
+    interface["prepared_compiled"] = json!({"semantics":"sealed-value-residual-v1","functions":prepared_metadata,"lifetime":"prepared token","evaluation":"lazy source-order; successful bindings only"});
     // Emit only helpers referenced by the compiled expressions. Descriptor
     // conversion is needed solely for signatures containing binary32 values.
     let needs_conversion = !elisions.is_empty() || !sum_types.is_empty() || interface.to_string().contains("\"kind\":\"f32\"")
