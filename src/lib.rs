@@ -243,6 +243,9 @@ struct Emitter<'a> {
     /// Immutable emitted locals known to hold rounded native Numbers, rather
     /// than the tagged F32 carrier. Never applied to mutable loop/call slots.
     f32_numbers: BTreeSet<String>,
+    /// Fresh const bindings can be renamed without copying. Mutable loop,
+    /// branch and recursive-call slots must still be snapshotted by bind().
+    immutable_locals: BTreeSet<String>,
 }
 /// Fields of an emitted record literal whose values are all plain locals.
 fn record_literal_fields(value: &str, fields: &[String]) -> Option<Vec<String>> {
@@ -345,8 +348,10 @@ impl Emitter<'_> {
         self.lines.push('\n');
     }
     fn bind(&mut self, value: &str) -> String {
+        if self.immutable_locals.contains(value) { return value.to_owned(); }
         let name = self.fresh();
         self.line(format!("const {name}={value};"));
+        self.immutable_locals.insert(name.clone());
         if self.f32_numbers.contains(value) { self.f32_numbers.insert(name.clone()); }
         name
     }
@@ -1660,6 +1665,7 @@ fn lower_with_layout(
         in_place: Default::default(),
         split: BTreeMap::new(),
         f32_numbers: BTreeSet::new(),
+        immutable_locals: BTreeSet::new(),
     };
     let mut javascript = String::new();
     let mut functions = vec![];
@@ -1698,6 +1704,7 @@ fn lower_with_layout(
         let mut vars = vec![];
         for (n, t) in &f.params {
             let v = emitter.fresh();
+            if !ink_core::recursion::recursive(f) { emitter.immutable_locals.insert(v.clone()); }
             env.insert(n.clone(), (v.clone(), t.clone()));
             vars.push(v);
         }
@@ -1742,6 +1749,7 @@ fn lower_with_layout(
         let mut vars = Vec::new();
         for (n, t) in &f.params {
             let v = emitter.fresh();
+            if !ink_core::recursion::recursive(f) { emitter.immutable_locals.insert(v.clone()); }
             env.insert(n.clone(), (v.clone(), t.clone()));
             vars.push(v);
         }

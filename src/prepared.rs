@@ -236,6 +236,7 @@ fn factory(emitter: &mut Emitter<'_>, f: &Function, index: usize) -> LangResult<
     let mut vars = Vec::new();
     for (i, (name, ty)) in f.params.iter().enumerate() {
         let var = emitter.fresh(); vars.push(var.clone());
+        emitter.immutable_locals.insert(var.clone());
         env.insert(name.clone(), (var, ty.clone()));
         dependencies.insert(name.clone(), Some([i].into_iter().collect()));
     }
