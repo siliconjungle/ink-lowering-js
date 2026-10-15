@@ -249,6 +249,12 @@ the captured inputs while running preconditions, transactions and reply
 detachment on every invocation. Preparation cost is separate from invocation
 cost. Host transaction rollback also restores acknowledged outbox entries.
 
+UTF-8 byte length and search retain byte coordinates while using the host's
+UTF-16 strings. Length counts scalar widths without allocating encoded bytes;
+search validates the requested byte boundary, uses native substring search and
+converts the result back to bytes. Empty needles, BOMs and supplementary Unicode
+characters retain the fixed primitive semantics. No text cache crosses calls.
+
 ## License
 
 Project code and documentation are [MIT licensed](LICENSE). Third-party dependencies,

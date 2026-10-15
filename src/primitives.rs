@@ -34,7 +34,7 @@ pub fn expression(n: &str, a: &[String], first: Option<&Type>, native: bool) -> 
             n,
             if first == Some(&Type::U64) { 64 } else { 32 }
         ),
-        "string_byte_len" => format!("__ink_bytes({x}).length"),
+        "string_byte_len" => format!("__ink_byte_len({x})"),
         "string_byte_at" => format!("__ink_byte_at({x},{})", a[1]),
         "string_slice" => format!("__ink_slice({x},{},{})", a[1], a[2]),
         "string_concat" => format!("__ink_concat({x},{})", a[1]),
