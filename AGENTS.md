@@ -29,3 +29,15 @@ Retained owners must satisfy the core readonly-loan analysis, and no cached/inpu
 value gains unique storage. Changing model weights/context must run fresh primals;
 opacity never authenticates a prepared graph at an ABI boundary. This is literal
 execution support, not rewrite or profitability authority.
+
+Sequential value-loop preparation carries lexical stability into callbacks;
+iteration indices, elements and carried state always have dynamic provenance.
+Preserve shadowing, zero-iteration laziness, argument order and simultaneous
+updates. `fold_until` executes its triggering step before stopping;
+`repeat_until` tests before its step. Strict operand traversal must not lift
+short-circuit operands or sum callbacks out of their branches. Retain ordinary
+execution for owned loop state/captures, unsupported forms and bounded analysis
+failure. The opportunity scan (512 visits, depth 32) only avoids useless wrappers;
+it supplies neither semantic facts nor a profitable-selection claim. Instrument
+ordinary and residual invocation bodies when measuring source validation; a
+factory's construction is not a validation execution.
