@@ -51,7 +51,8 @@ function __cellGet(rt,index,key){const cell=rt.cell;return cell&&cell.index===in
 function __readTable(rt,index){const cell=rt.cell;if(!cell||cell.index!==index)return rt.tables[index];const table=new Map(rt.tables[index]);if(cell.next===undefined)table.delete(cell.key);else table.set(cell.key,cell.next);return table;}
 // The first before-image of each cell suffices for whole-transaction rollback.
 function __remember(rt,index,key,present,value){if(rt.cellMode)return;if(!rt.seen[index].has(key)){rt.seen[index].add(key);rt.undo.push([index,key,present,value]);}}
-// Only scalar keeps are retained. Reverse edges come from checked source effects.
+// Immutable keeps retain private values. Public results remain owned copies.
+// Reverse edges come from checked source effects.
 // Before-images preserve cached values across failed actions; host rollback and
 // restore discard caches rather than serializing them into logical snapshots.
 function __invalidateKeeps(rt,index){

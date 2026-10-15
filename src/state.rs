@@ -479,11 +479,10 @@ pub(crate) fn emit_with_sums(
     let mut keep_invalidations = vec![Vec::<usize>::new(); p.states.len()];
     for (i, k) in execution.keeps().iter().enumerate() {
         let e = emitter.expr(&k.value, &Env::new(), Some(&k.ty))?;
-        // Retained values cannot carry mutable host aliases. Composite values
-        // keep their existing ownership/observation path; scalar Int/F32 values
-        // retain their internal exact carrier and convert at the public boundary.
-        let cached = matches!(k.ty, Type::U32 | Type::U64 | Type::I32 | Type::F32 | Type::Int | Type::Bool | Type::String | Type::Unit)
-            || matches!(&k.ty, Type::Named(n) if p.ids.contains(n) || p.enums.contains_key(n));
+        // Checked immutable values have no owned Buffer/Map descendants. They
+        // may share private storage; public results still use owned conversion.
+        // Pure callees never acquire unique ownership of their parameters.
+        let cached = !ink_core::local_collections::owned(&k.ty, p);
         let reads = &effects.keep(&k.name).ok_or("missing checked keep effects")?.access.reads;
         if cached {
             for (root, state) in p.states.iter().enumerate() {
