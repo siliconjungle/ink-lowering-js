@@ -36,8 +36,12 @@ impl StateEmitter<'_> {
             .ok_or_else(|| format!("missing checked action type: {e:?}"))
     }
     fn expr(&mut self, e: &Expr, env: &Env, want: Option<&Type>) -> LangResult<String> {
+        self.expr_carrier(e, env, want, false)
+    }
+    fn expr_carrier(&mut self, e: &Expr, env: &Env, want: Option<&Type>, count_number: bool) -> LangResult<String> {
         let t = self.infer(e, env, want)?;
         Ok(match e {
+            Expr::Num(n) if count_number => n.to_string(),
             Expr::Num(n) => {
                 if t == Type::F32 {
                     return Ok((*n as f32).to_bits().to_string());
@@ -126,6 +130,11 @@ impl StateEmitter<'_> {
                     if matches!(bt, Type::U32 | Type::Int | Type::I32 | Type::F32) {
                         at = bt
                     }
+                }
+                if super::count_carrier::comparison(op, &at, a, b) {
+                    let a = self.expr_carrier(a, env, Some(&at), true)?;
+                    let b = self.expr_carrier(b, env, Some(&at), true)?;
+                    return Ok(super::count_carrier::emit(op, &a, &b));
                 }
                 let a = self.expr(a, env, Some(&at))?;
                 let b = self.expr(b, env, Some(&at))?;
@@ -232,7 +241,7 @@ impl StateEmitter<'_> {
                 "sum" | "count" => {
                     let xs = self.expr(&args[0], env, None)?;
                     if n == "count" {
-                        format!("BigInt(({xs}).length)")
+                        if count_number { format!("({xs}).length") } else { format!("BigInt(({xs}).length)") }
                     } else {
                         let add = if t == Type::Int {
                             "a+b".into()

@@ -21,6 +21,7 @@ mod constructors;
 mod value_capture;
 mod value_reduce;
 mod primitives;
+mod count_carrier;
 type Env = BTreeMap<String, (String, Type)>;
 /// Fixed word operations with JavaScript's own 32-bit operators. u32 values
 /// are Numbers in [0, 2^32) and i32 values Numbers in [-2^31, 2^31); the
@@ -773,13 +774,16 @@ impl Emitter<'_> {
         Ok(())
     }
     fn expr(&mut self, e: &Expr, env: &Env, want: Option<&Type>) -> LangResult<String> {
+        self.expr_carrier(e, env, want, false)
+    }
+    fn expr_carrier(&mut self, e: &Expr, env: &Env, want: Option<&Type>, count_number: bool) -> LangResult<String> {
         // Target resource bound, matching C's scalar emission guard. A known
         // expression nesting cannot exceed the bounded emitter stack.
         if self.depth >= 48 {
             return Err("JavaScript expression emission depth budget exceeded".into());
         }
         self.depth += 1;
-        let result = self.expr_inner(e, env, want).and_then(|value| {
+        let result = self.expr_inner(e, env, want, count_number).and_then(|value| {
             // Borrow trusted host containers. Normalize scalar reads at demand,
             // including callbacks and at_or, instead of copying their ancestors.
             // Every other F32 constructor/arithmetic/call already produces the
@@ -791,13 +795,14 @@ impl Emitter<'_> {
         self.depth -= 1;
         result
     }
-    fn expr_inner(&mut self, e: &Expr, env: &Env, want: Option<&Type>) -> LangResult<String> {
+    fn expr_inner(&mut self, e: &Expr, env: &Env, want: Option<&Type>, count_number: bool) -> LangResult<String> {
         if self.budget == 0 {
             return Err("JavaScript emission budget exceeded".into());
         }
         self.budget -= 1;
         let t = self.infer(e, env, want)?;
         Ok(match e {
+            Expr::Num(n) if count_number => n.to_string(),
             Expr::Num(n) => match t {
                 Type::U64 | Type::Int => format!("{n}n"),
                 Type::F32 if self.native_f32 => format!("__nfFromBits({})", (*n as f32).to_bits()),
@@ -905,6 +910,16 @@ impl Emitter<'_> {
                     check::hint(a, &ts, self.p).or_else(|| check::hint(b, &ts, self.p))
                 };
                 let at = self.infer(a, env, context.as_ref())?;
+                if count_carrier::comparison(op, &at, a, b) {
+                    // Both operands have exact finite Number carriers. Use the
+                    // ordinary emitter entry to retain node/depth accounting and
+                    // evaluate each collection, left then right, exactly once.
+                    let av = self.expr_carrier(a, env, Some(&at), true)?;
+                    let av = self.bind(&av);
+                    let bv = self.expr_carrier(b, env, Some(&at), true)?;
+                    let bv = self.bind(&bv);
+                    return Ok(count_carrier::emit(op, &av, &bv));
+                }
                 // Literal record equality evaluates every field in source order,
                 // then compares stored values without allocating either wrapper.
                 if op == "==" || op == "!=" {
@@ -1360,7 +1375,7 @@ impl Emitter<'_> {
                 let xs = self.expr(&args[0], env, context.as_ref())?;
                 let xs = self.bind(&xs);
                 if n == "count" {
-                    format!("BigInt({xs}.length)")
+                    if count_number { format!("{xs}.length") } else { format!("BigInt({xs}.length)") }
                 } else {
                     let out = self.fresh();
                     let index = self.fresh();
