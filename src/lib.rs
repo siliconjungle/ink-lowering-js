@@ -65,6 +65,14 @@ pub(crate) fn word_expression(name: &str, a: &str, b: &str, t: &Type) -> String 
 fn quote(s: &str) -> String {
     serde_json::to_string(s).unwrap()
 }
+// Decimal literals round-trip finite binary64 values, including signed zero.
+// NaN payloads still need the immutable raw-bit carrier; a JS NaN cannot retain
+// every signaling/quiet payload through the host representation.
+pub(crate) fn double_literal(bits: u64) -> String {
+    let value = f64::from_bits(bits);
+    if value.is_finite() { format!("{value:?}") }
+    else { format!("__dfFromBits({bits}n)") }
+}
 fn descriptor(t: &Type, p: &Program, _seen: &mut BTreeSet<String>) -> LangResult<Value> {
     ink_abi::describe(t, &p.records, &p.enums, &p.ids)
 }
@@ -845,12 +853,12 @@ impl Emitter<'_> {
                 Type::U64 | Type::Int => format!("{n}n"),
                 Type::F32 if self.native_f32 => format!("__nfFromBits({})", (*n as f32).to_bits()),
                 Type::F32 => format!("{}", (*n as f32).to_bits()),
-                Type::F64 => format!("__dfFromBits({}n)", (*n as f64).to_bits()),
+                Type::F64 => double_literal((*n as f64).to_bits()),
                 _ => n.to_string(),
             },
             Expr::Float(b) if self.native_f32 => format!("__nfFromBits({b})"),
             Expr::Float(b) => b.to_string(),
-            Expr::Double(b) => format!("__dfFromBits({b}n)"),
+            Expr::Double(b) => double_literal(*b),
             Expr::Bool(b) => b.to_string(),
             Expr::String(s) => quote(s),
             Expr::Unit => "null".into(),

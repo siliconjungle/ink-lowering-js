@@ -54,7 +54,7 @@ impl StateEmitter<'_> {
             }
             Expr::Bool(b) => b.to_string(),
             Expr::Float(bits) => bits.to_string(),
-            Expr::Double(bits) => format!("__dfFromBits({bits}n)"),
+            Expr::Double(bits) => super::double_literal(*bits),
             Expr::Neg(value) => {
                 if t == Type::I32 && matches!(value.as_ref(), Expr::Num(2147483648)) {
                     return Ok("-2147483648".into());
