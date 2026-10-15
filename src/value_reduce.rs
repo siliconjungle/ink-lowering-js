@@ -56,6 +56,7 @@ impl<'a> Reductions<'a> {
             "unit" => (4, format!("return r[{index}](null,c);")),
             "bool" | "u32" | "i32" | "u64" => (if kind == "bool" {5} else if kind == "u64" {12} else {8}, format!("return r[{index}](value,c);")),
             "f32" => (8, format!("return r[{index}]({{F32Bits:{}}},c);", if self.native_f32 {"__nfBits(value)"} else {"value"})),
+            "f64" => (12,format!("return r[{index}]({{F64Bits:__dfBits(value).toString()}},c);")),
             "int" => (4, format!("const text=typeof value==='bigint'?value.toString():value.Int;b.text(text);return r[{index}]({{Int:text}},c);")),
             "string" | "id" | "enum" => (4, format!("b.text(value);return r[{index}](value,c);")),
             "record" => {

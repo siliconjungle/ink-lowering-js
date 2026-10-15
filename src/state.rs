@@ -54,6 +54,7 @@ impl StateEmitter<'_> {
             }
             Expr::Bool(b) => b.to_string(),
             Expr::Float(bits) => bits.to_string(),
+            Expr::Double(bits) => format!("__dfFromBits({bits}n)"),
             Expr::Neg(value) => {
                 if t == Type::I32 && matches!(value.as_ref(), Expr::Num(2147483648)) {
                     return Ok("-2147483648".into());
@@ -61,6 +62,7 @@ impl StateEmitter<'_> {
                 let v = self.expr(value, env, Some(&t))?;
                 match t {
                     Type::F32 => format!("(({v})^0x80000000)>>>0"),
+                    Type::F64 => format!("__dfNeg({v})"),
                     Type::I32 => format!("(-({v}))|0"),
                     Type::U32 => format!("(-({v}))>>>0"),
                     Type::U64 => format!("__u64(-({v}))"),
@@ -119,7 +121,7 @@ impl StateEmitter<'_> {
                 let mut at = self.infer(
                     a,
                     env,
-                    if matches!(t, Type::U32 | Type::U64 | Type::Int | Type::I32 | Type::F32) {
+                    if matches!(t, Type::U32 | Type::U64 | Type::Int | Type::I32 | Type::F32 | Type::F64) {
                         Some(&t)
                     } else {
                         None
@@ -127,7 +129,7 @@ impl StateEmitter<'_> {
                 )?;
                 if matches!(a.as_ref(), Expr::Num(_)) {
                     let bt = self.infer(b, env, None)?;
-                    if matches!(bt, Type::U32 | Type::Int | Type::I32 | Type::F32) {
+                    if matches!(bt, Type::U32 | Type::Int | Type::I32 | Type::F32 | Type::F64) {
                         at = bt
                     }
                 }
@@ -144,13 +146,14 @@ impl StateEmitter<'_> {
                     } else {
                         arithmetic(op, &a, &b, &at)
                     }
-                } else if at == Type::F32 {
+                } else if matches!(at,Type::F32|Type::F64) {
                     let op = match op.as_str() {
                         "==" => "===",
                         "!=" => "!==",
                         _ => op,
                     };
-                    format!("(__float({a}) {op} __float({b}))")
+                    let number=if at==Type::F64{"__dfNumber"}else{"__float"};
+                    format!("({number}({a}) {op} {number}({b}))")
                 } else if op == "==" || op == "!=" {
                     format!("{}({})", if op == "!=" { "!" } else { "" }, self.equality.expr(&at, &a, &b)?)
                 } else {

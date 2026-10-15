@@ -53,6 +53,7 @@ impl<'a> Captures<'a> {
                 format!("if(typeof value!=='number'||!Number.isInteger(value)||value<{min}||value>{max}){{{bad}}}budget.add(4);return value===0?0:value;")
             }
             "u64"=>format!("const kind=typeof value;if(kind==='number'&&!Number.isSafeInteger(value)||kind!=='bigint'&&kind!=='number'&&kind!=='string'||kind==='string'&&!/^(0|[1-9][0-9]*)$/.test(value)){{{bad}}}const n=BigInt(value);if(n<0n||n>18446744073709551615n){{{bad}}}budget.add(8);return n;"),
+            "f64"=>"const result=__dfCapture(value);budget.add(8);return result;".into(),
             "f32"=>{
                 let result=if self.native_f32 {"__nfFromBits(bits)"}else{"bits===0?0:bits"};
                 format!("let bits;if(typeof value==='number'&&Number.isFinite(value)){{bits=__bits(value);if(!Number.isFinite(__float(bits))){{{bad}}}}}else{{if(!({})){{{bad}}}bits=value.F32Bits;if(!Number.isInteger(bits)||bits<0||bits>4294967295){{{bad}}}}}budget.add(4);return {result};",tagged("F32Bits"))

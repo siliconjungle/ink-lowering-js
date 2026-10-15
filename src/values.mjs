@@ -3,6 +3,23 @@
 const __view = new DataView(new ArrayBuffer(4));
 const __float = bits => { __view.setUint32(0, bits, true); return __view.getFloat32(0, true); };
 const __bits = number => { if(Number.isNaN(number))return 0x7fc00000; __view.setFloat32(0, number, true); return __view.getUint32(0, true); };
+// Binary64 uses native Numbers for finite arithmetic and immutable private
+// tags only where a NaN's exact payload must survive non-arithmetic operations.
+const __doubleView=new DataView(new ArrayBuffer(8));
+const __double=bits=>{__doubleView.setBigUint64(0,bits,true);return __doubleView.getFloat64(0,true);};
+const __doubleBits=number=>{if(Number.isNaN(number))return 0x7ff8000000000000n;__doubleView.setFloat64(0,number,true);return __doubleView.getBigUint64(0,true);};
+const __dfNumber=value=>typeof value==='number'?value:__double(BigInt(value.F64Bits));
+const __dfBits=value=>typeof value==='number'?__doubleBits(value):BigInt(value.F64Bits);
+const __dfFromBits=bits=>(bits&0x7fffffffffffffffn)>0x7ff0000000000000n?Object.freeze({F64Bits:bits.toString()}):__double(bits);
+const __dfInput=value=>typeof value==='number'?value:__dfFromBits(BigInt(value.F64Bits));
+const __dfNeg=value=>typeof value==='number'&&!Number.isNaN(value)?-value:__dfFromBits(__dfBits(value)^0x8000000000000000n);
+const __dfOutput=value=>{const n=__dfNumber(value);return Number.isFinite(n)?n:{F64Bits:__dfBits(value).toString()};};
+const __dfCapture=value=>{
+ if(typeof value==='number'&&Number.isFinite(value))return value;
+ if(!value||typeof value!=='object'||Object.keys(value).length!==1||!Object.hasOwn(value,'F64Bits'))throw Error('invalid f64');const text=value.F64Bits;
+ if(typeof text!=='string'||text.length>20||!/^(0|[1-9][0-9]*)$/.test(text))throw Error('invalid f64');
+ const bits=BigInt(text);if(bits>18446744073709551615n)throw Error('invalid F64Bits');return __dfFromBits(bits);
+};
 // Native binary32 lane for pure modules. Explicit NaN payloads remain tagged;
 // arithmetic canonicalizes NaNs just as __bits does in the exact-bit lane.
 const __nfValue = value => typeof value === 'number' ? Math.fround(value) : value;
@@ -51,6 +68,7 @@ function __representationRaw(type, output, capture) {
       if(flat)return output?(value,context)=>{const v=__sumView(key,value);return Object.hasOwn(v,'Ok')?{Ok:ok(v.Ok,context)}:{Err:err(v.Err,context)};}:(v,context)=>Object.hasOwn(v,'Ok')?__sumMake(key,true,ok(v.Ok,context)):__sumMake(key,false,err(v.Err,context));
       return ok===__identity&&err===__identity?__identity:(value,context)=>Object.hasOwn(value,'Ok')?{Ok:ok(value.Ok,context)}:{Err:err(value.Err,context)};
     }
+    case 'f64':return output?__dfOutput:__dfInput;
     case 'f32': if(typeof __nativeF32!=='undefined'&&__nativeF32)return output?__nfOutput:capture?__nfValue:__identity;
       return output ? value => {
       const number = __float(value);
@@ -114,6 +132,7 @@ function __compileStateCapture(type){
    return limited(value=>{if(typeof value!=='number'||!Number.isInteger(value)||value<min||value>max)throw Error('invalid '+type.kind);return value===0?0:value;});
   }
   case 'u64':return limited(__stateWord);
+  case 'f64':return limited(__dfCapture);
   case 'bool':return limited(value=>{if(typeof value!=='boolean')throw Error('invalid Bool');return value;});
   case 'unit':return limited(value=>{if(value!==null)throw Error('invalid Unit');return null;});
   case 'string':return limited(value=>{if(typeof value!=='string'||!value.isWellFormed())throw Error('invalid String');return value;});
@@ -160,6 +179,7 @@ function __stateInput(value,type,budget={cells:1000000},depth=0,maxDepth=64){
       if(typeof value==='bigint')return value;
       if(!tagged('Int')||typeof value.Int!=='string'||!/^(-?[0-9]+)$/.test(value.Int))throw Error('invalid Int');return BigInt(value.Int);
     }
+    case 'f64':return __dfCapture(value);
     case 'f32':{
       if(typeof value==='number'&&Number.isFinite(value)){const bits=__bits(value);if((bits&0x7fffffff)===0x7f800000)throw Error('f32 overflow requires F32Bits');return bits;}
       if(!tagged('F32Bits')||!Number.isInteger(value.F32Bits)||value.F32Bits<0||value.F32Bits>4294967295)throw Error('invalid f32');return value.F32Bits;

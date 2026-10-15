@@ -140,7 +140,7 @@ impl<'a> Constructors<'a> {
                     )
                 )
             }
-            "unit" | "bool" | "u32" | "i32" | "u64" | "f32" | "int" | "string" | "id" | "enum" => {
+            "unit" | "bool" | "u32" | "i32" | "u64" | "f32" | "f64" | "int" | "string" | "id" | "enum" => {
                 let capture = captures.compile(ty, named)?;
                 format!(
                     "{{kind:{},scalar:{capture}}}",

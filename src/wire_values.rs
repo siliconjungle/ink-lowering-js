@@ -85,6 +85,7 @@ impl WireValues {
             "u32" => "const value=reader.word();".into(),
             "i32" => "const value=reader.signed();".into(),
             "u64" => "const value=reader.wide();".into(),
+            "f64" => if self.private{"const value=__dfFromBits(reader.wide());".into()}else{"const value={F64Bits:reader.wide().toString()};".into()},
             "f32" => {
                 if self.private {
                     if self.native_f32 {

@@ -44,6 +44,7 @@ impl<'a> OwnedValues<'a> {
             "i32" => (8, "return value|0;".into()),
             "u64" => (12, "return BigInt(value);".into()),
             "f32" => (8, if !self.native_f32 {"return {F32Bits:value===0?0:value};".into()} else {"const bits=typeof value==='number'?__bits(value):value.F32Bits;return {F32Bits:bits===0?0:bits};".into()}),
+            "f64" => (12,"return {F64Bits:__dfBits(value).toString()};".into()),
             "int" => (4, "const text=typeof value==='bigint'?value.toString():value.Int;budget.text(text);return {Int:text};".into()),
             "string" | "id" | "enum" => (4, "budget.text(value);return value;".into()),
             "record" => {

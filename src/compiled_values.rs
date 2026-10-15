@@ -38,6 +38,7 @@ impl Writers<'_> {
             "u32" => "writer.word(value);".into(),
             "i32" => "writer.word(value>>>0);".into(),
             "u64" => "writer.wide(value);".into(),
+            "f64" => "writer.wide(__dfBits(value));".into(),
             "f32" => {
                 if self.native_f32 {
                     "writer.word(__nfBits(value));".into()

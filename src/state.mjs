@@ -366,7 +366,7 @@ function __createState(meta,implementations,captures=null,views=[],prefixes=[]){
   // Composite arguments still capture owned input; events remain in the outbox.
   bind(name,{resultOnly=false}={}){
    const a=actionMap.get(name);if(!a)throw Error(`unknown action ${name}`);
-   const inputs=a.params.map((p,i)=>['u32','i32','u64','bool','unit','string','f32','id','enum','int'].includes(p.type.kind)?__representation(p.type,false):a.inputs[i]);
+   const inputs=a.params.map((p,i)=>['u32','i32','u64','bool','unit','string','f32','f64','id','enum','int'].includes(p.type.kind)?__representation(p.type,false):a.inputs[i]);
    if(!a.change&&!a.precondition&&inputs.length===0)return readZero(a,resultOnly);
    return (__statePreflightFactories[a.index]||__stateBoundFactories[a.index])(run,a,inputs,a.output,resultOnly,rt,begin,complete,abort,end);
   },

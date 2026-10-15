@@ -87,6 +87,7 @@ fn arithmetic(op: &str, a: &str, b: &str, t: &Type) -> String {
             }
         }
         Type::F32 => format!("__bits(__float({a}) {op} __float({b}))"),
+        Type::F64 => format!("(__dfNumber({a}) {op} __dfNumber({b}))"),
         _ => unreachable!("checked arithmetic type"),
     }
 }
@@ -145,6 +146,7 @@ impl<'a> TypedEquality<'a> {
     // Fixed structural equality compares contained F32 bits in either carrier;
     // top-level scalar F32 equality alone uses IEEE comparison.
     fn expr(&mut self, t: &Type, a: &str, b: &str) -> LangResult<String> {
+        if *t==Type::F64{return Ok(format!("(__dfBits({a})===__dfBits({b}))"));}
         if self.native_f32 && *t == Type::F32 {
             return Ok(format!("(__nfBits({a})===__nfBits({b}))"));
         }
@@ -843,10 +845,12 @@ impl Emitter<'_> {
                 Type::U64 | Type::Int => format!("{n}n"),
                 Type::F32 if self.native_f32 => format!("__nfFromBits({})", (*n as f32).to_bits()),
                 Type::F32 => format!("{}", (*n as f32).to_bits()),
+                Type::F64 => format!("__dfFromBits({}n)", (*n as f64).to_bits()),
                 _ => n.to_string(),
             },
             Expr::Float(b) if self.native_f32 => format!("__nfFromBits({b})"),
             Expr::Float(b) => b.to_string(),
+            Expr::Double(b) => format!("__dfFromBits({b}n)"),
             Expr::Bool(b) => b.to_string(),
             Expr::String(s) => quote(s),
             Expr::Unit => "null".into(),
@@ -871,6 +875,8 @@ impl Emitter<'_> {
                     format!("__nfNeg({value})")
                 } else if t == Type::F32 {
                     format!("(({value} ^ 2147483648) >>> 0)")
+                } else if t == Type::F64 {
+                    format!("__dfNeg({value})")
                 } else {
                     self.arithmetic("-", zero(&t), &value, &t)
                 }
@@ -1030,7 +1036,7 @@ impl Emitter<'_> {
                 let bv = self.bind(&bv);
                 if ["+", "-", "*"].contains(&op.as_str()) {
                     self.arithmetic(op, &av, &bv, &at)
-                } else if (op == "==" || op == "!=") && at != Type::F32 {
+                } else if (op == "==" || op == "!=") && !matches!(at,Type::F32|Type::F64) {
                     format!(
                         "{}{}",
                         if op == "!=" { "!" } else { "" },
@@ -1039,6 +1045,8 @@ impl Emitter<'_> {
                 } else {
                     let (av, bv) = if at == Type::F32 {
                         (format!("{}({av})",if self.native_f32 {"__nfNumber"}else{"__float"}), format!("{}({bv})",if self.native_f32 {"__nfNumber"}else{"__float"}))
+                    } else if at==Type::F64 {
+                        (format!("__dfNumber({av})"),format!("__dfNumber({bv})"))
                     } else {
                         (av, bv)
                     };
@@ -1051,7 +1059,7 @@ impl Emitter<'_> {
                 }
             }
             Expr::Call(n,args) if ink_core::primitives::primitive(n) => {
-                let first=if ink_core::primitives::bit_count(n){args.first().map(|a|self.infer(a,env,None)).transpose()?}else{None};
+                let first=ink_core::primitives::input_type(n,args.first(),|a|self.infer(a,env,None))?;
                 let (params,_)=ink_core::primitives::signature(n,first.as_ref())?;
                 let values=args.iter().zip(params).map(|(a,t)|self.expr(a,env,Some(&t))).collect::<LangResult<Vec<_>>>()?;
                 crate::primitives::expression(n,&values,first.as_ref(),self.native_f32)?
@@ -1743,6 +1751,7 @@ fn lower_with_layout(
             || functions[i]["result"]["element"]
                 .to_string()
                 .contains("\"kind\":\"int\"")
+            || functions[i]["result"]["element"].to_string().contains("\"kind\":\"f64\"")
         {
             format!("__intoOutput{i}")
         } else {
@@ -1761,7 +1770,7 @@ fn lower_with_layout(
     interface["prepared_compiled"] = json!({"semantics":"sealed-value-residual-v1","functions":prepared_metadata,"lifetime":"prepared token","evaluation":"lazy source-order; successful bindings only"});
     // Emit only helpers referenced by the compiled expressions. Descriptor
     // conversion is needed solely for signatures containing binary32 values.
-    let needs_conversion = !elisions.is_empty() || !sum_types.is_empty() || interface.to_string().contains("\"kind\":\"f32\"")
+    let needs_conversion = !elisions.is_empty() || !sum_types.is_empty() || interface.to_string().contains("\"kind\":\"f32\"") || interface.to_string().contains("\"kind\":\"f64\"")
         || interface.to_string().contains("\"kind\":\"int\"")
         || interface.to_string().contains("\"kind\":\"id\"");
     if !emitter.callbacks.is_empty() {
@@ -1790,7 +1799,7 @@ fn lower_with_layout(
                 || !p.keeps.is_empty()
                 || uses("__bits(")
                 || uses("__float(")
-                || uses("__nf") || uses("__ink_")
+                || uses("__nf") || uses("__df") || uses("__ink_")
         } else {
             uses(name)
                 || !p.actions.is_empty()
@@ -1993,7 +2002,8 @@ export function callOwned(name,args,limits={}){
                 .contains("\"kind\":\"f32\"")
             || interface["functions"][i]["result"]["element"]
                 .to_string()
-                .contains("\"kind\":\"int\""))
+                .contains("\"kind\":\"int\"")
+            || interface["functions"][i]["result"]["element"].to_string().contains("\"kind\":\"f64\""))
         {
             javascript.push_str(&format!("const __intoOutput{i}=__representation(metadata.functions[{i}].result.element,true);\n"));
         }
