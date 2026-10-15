@@ -49,6 +49,12 @@ distribution's [contract and evidence](https://github.com/siliconjungle/ink-lang
   supply the declared types; collection operations do not mutate inputs. Typed
   word arrays are accepted as list inputs, and map/filter/scan produce ordinary
   arrays so maps to Bool or u64 retain their element type.
+- Local scalar record literals can stay in scalar locals; whole-record uses and
+  worker captures reconstruct their ordinary record values. Immutable generated
+  F32 locals track whether they already hold rounded native Numbers or still need
+  the tagged-carrier conversion. Raw exceptional payloads and each arithmetic
+  rounding step remain unchanged. This storage/carrier bookkeeping does not prove
+  compiler correctness or authorize an algebraic rewrite.
 - Calls, lexical bindings, map/filter, indexed map, truncating zip, ordered sum,
   right fold, scan, numeric sort, bounded repeat and lazy branches/fallbacks are
   emitted literally. No floating-point reassociation or fused reductions.

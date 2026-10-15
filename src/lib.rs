@@ -227,9 +227,12 @@ struct Emitter<'a> {
     /// Unique-ownership facts of the function being emitted (see
     /// `ink_core::in_place`). Empty for recursive functions.
     in_place: ink_core::in_place::InPlace,
-    /// Loop-carried internal records held as one local per field. Maps the
-    /// logical binding to its (field, local) components.
+    /// Lexical scalar records and loop-carried internal records held as one
+    /// local per field. Maps each fresh logical binding to its components.
     split: BTreeMap<String, Vec<(String, String)>>,
+    /// Immutable emitted locals known to hold rounded native Numbers, rather
+    /// than the tagged F32 carrier. Never applied to mutable loop/call slots.
+    f32_numbers: BTreeSet<String>,
 }
 /// Fields of an emitted record literal whose values are all plain locals.
 fn record_literal_fields(value: &str, fields: &[String]) -> Option<Vec<String>> {
@@ -256,6 +259,24 @@ impl Emitter<'_> {
             return None;
         }
         Some(self.p.records.get(name)?.iter().map(|(f, _)| f.clone()).collect())
+    }
+    /// Keep already-evaluated scalar record literals in locals. This is only
+    /// invocation-local storage: whole-value uses reconstruct the ordinary record.
+    fn lexical_value(&mut self, value: &str, ty: &Type) -> String {
+        if let Type::Named(name) = ty {
+            if !self.equality.elisions.contains(name) {
+                if let Some(fields) = self.p.records.get(name).filter(|fields| fields.iter().all(|(_, t)|
+                    matches!(t, Type::F32 | Type::U32 | Type::U64 | Type::I32 | Type::Bool | Type::Unit))) {
+                    let names = fields.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+                    if let Some(locals) = record_literal_fields(value, &names) {
+                        let logical = self.fresh();
+                        self.split.insert(logical.clone(), names.into_iter().zip(locals).collect());
+                        return logical;
+                    }
+                }
+            }
+        }
+        self.bind(value)
     }
     fn rebuild(&self, logical: &str) -> String {
         let components = &self.split[logical];
@@ -297,7 +318,8 @@ impl Emitter<'_> {
     }
     fn arithmetic(&self, op: &str, a: &str, b: &str, t: &Type) -> String {
         if self.native_f32 && *t == Type::F32 {
-            format!("Math.fround(__nfNumber({a}) {op} __nfNumber({b}))")
+            let number = |v: &str| if self.f32_numbers.contains(v) { v.to_owned() } else { format!("__nfNumber({v})") };
+            format!("Math.fround({} {op} {})", number(a), number(b))
         } else { arithmetic(op,a,b,t) }
     }
     fn value_equal(&mut self, t: &Type, a: &str, b: &str) -> LangResult<String> {
@@ -315,6 +337,7 @@ impl Emitter<'_> {
     fn bind(&mut self, value: &str) -> String {
         let name = self.fresh();
         self.line(format!("const {name}={value};"));
+        if self.f32_numbers.contains(value) { self.f32_numbers.insert(name.clone()); }
         name
     }
     fn parallel(
@@ -355,7 +378,7 @@ impl Emitter<'_> {
             quote(&name),
             captures
                 .iter()
-                .map(|(_, (v, _))| v.as_str())
+                .map(|(_, (v, _))| if self.split.contains_key(v) { self.rebuild(v) } else { v.clone() })
                 .collect::<Vec<_>>()
                 .join(",")
         ))
@@ -790,9 +813,20 @@ impl Emitter<'_> {
             // including callbacks and at_or, instead of copying their ancestors.
             // Every other F32 constructor/arithmetic/call already produces the
             // internal carrier. Re-rounding each computed subtree is redundant.
-            if self.native_f32 && matches!(e,Expr::Var(_)|Expr::Field(..)|Expr::Method(..)) && self.infer(e,env,want)? == Type::F32 {
-                Ok(format!("__nfValue({value})"))
-            } else { Ok(value) }
+            if self.native_f32 && self.infer(e,env,want)? == Type::F32 {
+                let number = match e {
+                    Expr::Float(bits) => !f32::from_bits(*bits).is_nan(),
+                    Expr::Num(_) => !count_number,
+                    Expr::Binary(op,_,_) => matches!(op.as_str(), "+" | "-" | "*"),
+                    Expr::Call(n,_) => matches!(n.as_str(), "sqrt" | "f32_div") && !self.p.functions.iter().any(|f| &f.name == n),
+                    _ => false,
+                };
+                if number { self.f32_numbers.insert(value.clone()); }
+                if matches!(e,Expr::Var(_)|Expr::Field(..)|Expr::Method(..)) && !self.f32_numbers.contains(&value) {
+                    return Ok(format!("__nfValue({value})"));
+                }
+            }
+            Ok(value)
         });
         self.depth -= 1;
         result
@@ -852,7 +886,7 @@ impl Emitter<'_> {
                     Some(v) => v,
                     None => {
                         let value = self.expr(a, env, Some(&at))?;
-                        self.bind(&value)
+                        self.lexical_value(&value, &at)
                     }
                 };
                 let mut local = env.clone();
@@ -1609,6 +1643,7 @@ fn lower_with_layout(
         native_f32,
         in_place: Default::default(),
         split: BTreeMap::new(),
+        f32_numbers: BTreeSet::new(),
     };
     let mut javascript = String::new();
     let mut functions = vec![];
