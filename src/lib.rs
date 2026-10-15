@@ -1756,7 +1756,6 @@ fn lower_with_layout(
         ));
     }
     let (prepared_source, prepared_metadata) = prepared::emit(&mut emitter);
-    javascript.push_str(&prepared_source);
     javascript.push_str(&emitter.equality.source());
     let mut interface = json!({"schema":1,"backend":"javascript","abi":"ink-javascript-trusted-values-v2","destination_abi":{"name":"ink-javascript-into-v1","count_unit":"elements","ownership":"caller-owned","capacity":"trusted","aliasing":"destination-disjoint-from-all-reachable-inputs","tail":"unwritten"},"core_semantics":module.semantics(),"core_sha256":module.identity()?,"functions":functions});
     interface["prepared_compiled"] = json!({"semantics":"sealed-value-residual-v1","functions":prepared_metadata,"lifetime":"prepared token","evaluation":"lazy source-order; successful bindings only"});
@@ -1776,6 +1775,9 @@ fn lower_with_layout(
                 .join(",")
         ));
     }
+    // Optional prepared declarations follow ordinary bindings. Reachability
+    // still includes both lanes when selecting fixed support helpers.
+    let uses = |name: &str| javascript.contains(name) || prepared_source.contains(name);
     let mut helpers = String::new();
     for section in include_str!("values.mjs").split("// @helper ").skip(1) {
         let (name, source) = section.split_once('\n').unwrap();
@@ -1786,11 +1788,11 @@ fn lower_with_layout(
                 || !p.actions.is_empty()
                 || !p.states.is_empty()
                 || !p.keeps.is_empty()
-                || javascript.contains("__bits(")
-                || javascript.contains("__float(")
-                || javascript.contains("__nf") || javascript.contains("__ink_")
+                || uses("__bits(")
+                || uses("__float(")
+                || uses("__nf") || uses("__ink_")
         } else {
-            javascript.contains(name)
+            uses(name)
                 || !p.actions.is_empty()
                 || !p.states.is_empty()
                 || !p.keeps.is_empty()
@@ -1799,7 +1801,7 @@ fn lower_with_layout(
             helpers.push_str(source);
         }
     }
-    if javascript.contains("__ink_") || module.semantics()==ink_core::core::PRIMITIVE_SEMANTICS {helpers.push_str(include_str!("primitives.mjs"));}
+    if uses("__ink_") || module.semantics()==ink_core::core::PRIMITIVE_SEMANTICS {helpers.push_str(include_str!("primitives.mjs"));}
     let temporary = include_str!("temporary.mjs");
     if [
         "__InkBuffer",
@@ -1814,7 +1816,7 @@ fn lower_with_layout(
         "__bufferFill",
     ]
     .iter()
-    .any(|name| javascript.contains(name))
+    .any(|name| uses(name))
     {
         helpers.push_str(temporary);
     }
@@ -1823,7 +1825,7 @@ fn lower_with_layout(
     if !has_state
         && ["__try", "__checked", "__okOr", "__mapValue", "__equal"]
             .iter()
-            .any(|name| javascript.contains(name))
+            .any(|name| uses(name))
     {
         let pure = support
             .split("const __encoder=")
@@ -1834,7 +1836,7 @@ fn lower_with_layout(
             .1;
         helpers.push_str(pure);
     }
-    if has_state || javascript.contains("__word(") || javascript.contains("__rot") {
+    if has_state || uses("__word(") || uses("__rot") {
         helpers.push_str(include_str!("word.mjs"));
     }
     javascript = emitter.equality.sums.source()+&format!("const __recordElisions=new Set({});\nconst __nativeF32={native_f32};\n",serde_json::to_string(elisions).map_err(|e|e.to_string())?) + &helpers + &javascript;
@@ -2033,6 +2035,7 @@ export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.f
     if !emitter.callbacks.is_empty() {
         javascript.push_str(include_str!("parallel.mjs"));
     }
+    javascript.push_str(&prepared_source);
     let mut manifest = interface;
     manifest["javascript_sha256"] = json!(format!("{:x}", Sha256::digest(javascript.as_bytes())));
     manifest["trusted"] = json!([

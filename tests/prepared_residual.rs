@@ -8,7 +8,12 @@ fn sealed_partial_calls_retain_only_stable_readonly_values_in_source_order() {
  let module=CheckedModule::from_source(parse(source).unwrap()).unwrap();
  let mut cases=Vec::<Value>::new();
  for (name,args) in [
-  ("indexed",json!([[1,2,3],[0,1,2,7]])),("guarded",json!([[1,2,3],[]])),
+  ("wrapped",json!([[1,2,3],[0,1,2,7]])),
+ ("paired",json!([[1,2,3],[2,7],[0,1,2,7]])),("paired",json!([[1,2,3],[2,7],[]])),
+ ("lifted",json!([[1,2,3],[0,1,2,7]])),("lifted",json!([[2,3],[0,1,2,7]])),
+ ("delayed",json!([[1,2,3],[0,1,2,7],false])),("delayed",json!([[1,2,3],[0,1,2,7],true])),
+ ("varying",json!([[1,2,3],[7]])),("varying",json!([[1,2,3],[7,8]])),
+ ("indexed",json!([[1,2,3],[0,1,2,7]])),("guarded",json!([[1,2,3],[]])),
   ("guarded",json!([[1,2,3],[7]])),("guarded",json!([[1,2,3],[0,1,2,7]])),
   ("edited",json!([[1,2,3],[7,2,9]])),("edited",json!([[1,2,3],[9,7,11]])),
   ("transformed",json!([[1,2,4294967295u32],3])),("transformed",json!([[1,2,4294967295u32],7])),
@@ -83,6 +88,44 @@ for(const [name,argsA,argsB]of [['transformed',[[1,2,0xffffffff],3],[[1,2,0xffff
   const full=[fixed,c.params[1].capture(args[1])];assert.deepEqual(materialize(name,m.callPreparedCompiled(t,[full[1]])),materialize(name,m.callCompiled(name,full)));
  }
 }
+
+// Independently scoped helper calls retain their own readonly intermediates.
+const left=codecs.paired.params[0].capture([1,2,3]),right=codecs.paired.params[1].capture([2,7]);
+const paired=m.prepareCompiled('paired',[[0,left],[1,right]]),wrapped=m.prepareCompiled('wrapped',[[0,left]]);
+const lifted=m.prepareCompiled('lifted',[[0,left]]),delayed=m.prepareCompiled('delayed',[[0,left]]);
+const invalid=m.prepareCompiled('lifted',[[0,codecs.lifted.params[0].capture([2,3])]]);
+const varying=m.prepareCompiled('varying',[[0,left]]);
+builds=0;globalThis.Map=new Proxy(NativeMap,{construct(target,args){builds++;return Reflect.construct(target,args,target);}});
+try{
+ assert.deepEqual(result('wrapped',wrapped,[one]),[false,true,true,false]);assert.equal(builds,1);
+ assert.deepEqual(result('wrapped',wrapped,[two]),[false,true,false]);assert.equal(builds,1);
+ assert.deepEqual(result('paired',paired,[one]),[false,true,true,false,false,false,true,true]);assert.equal(builds,3);
+ assert.deepEqual(result('paired',paired,[two]),[false,true,false,true,true,false]);assert.equal(builds,3);
+ // Stable conditions inside a helper persist through a Result map. Unvisited
+ // guards remain lazy; valid/invalid results and variable inputs keep meaning.
+ assert.deepEqual(result('delayed',delayed,[one,no]),{Err:'disabled'});assert.equal(builds,3);
+ assert.deepEqual(result('delayed',delayed,[one,yes]),{Ok:[false,true,true,true,true]});assert.equal(builds,4);
+ assert.deepEqual(result('delayed',delayed,[two,yes]),{Ok:[true,true,true,true]});assert.equal(builds,4);
+ assert.deepEqual(result('delayed',delayed,[one,no]),{Err:'disabled'});assert.equal(builds,4);
+ assert.deepEqual(result('lifted',lifted,[one]),{Ok:[false,true,true,true,true]});assert.equal(builds,5);
+ assert.deepEqual(result('lifted',lifted,[two]),{Ok:[true,true,true,true]});assert.equal(builds,5);
+ assert.deepEqual(result('lifted',invalid,[one]),{Err:'invalid keys'});assert.equal(builds,6);
+ assert.deepEqual(result('lifted',invalid,[two]),{Err:'invalid keys'});assert.equal(builds,6);
+ // A transitive dependency on a varying argument forbids retaining the index.
+ const single=query([7]);
+ assert.deepEqual(result('varying',varying,[single]),[false]);assert.equal(builds,7);
+ assert.deepEqual(result('varying',varying,[two]),[true,true,true]);assert.equal(builds,8);
+ assert.deepEqual(result('varying',varying,[single]),[false]);assert.equal(builds,9);
+}finally{globalThis.Map=NativeMap;}
+// A thrown stable condition has not completed and must be evaluated again.
+const failedGuard=m.prepareCompiled('lifted',[[0,left]]);attempts=0;
+globalThis.Map=new Proxy(NativeMap,{construct(target,args){if(++attempts===1)throw sentinel;return Reflect.construct(target,args,target);}});
+try{
+ assert.throws(()=>result('lifted',failedGuard,[one]),e=>e===sentinel);
+ assert.deepEqual(result('lifted',failedGuard,[two]),{Ok:[true,true,true,true]});
+ assert.deepEqual(result('lifted',failedGuard,[one]),{Ok:[false,true,true,true,true]});assert.equal(attempts,2);
+}finally{globalThis.Map=NativeMap;}
+
 assert.throws(()=>m.prepareCompiled('missing',[]),/unsupported/);
 for(const bindings of [[[0,key],[0,key]],[[-1,key]],[[2,key]],[[0.5,key]],[[0,{}]],[[0,yes]]])assert.throws(()=>m.prepareCompiled('indexed',bindings));
 assert.throws(()=>m.callPreparedCompiled({},[one]),/invalid prepared/);assert.throws(()=>m.callPreparedCompiled(token,[]),/invalid prepared/);assert.throws(()=>m.callPreparedCompiled(token,[{}]),/owner mismatch/);
@@ -91,4 +134,32 @@ console.log(JSON.stringify({calls,referenceCases:cases.length,readonlyIndexBuild
 "#).unwrap();
  let output=Command::new("node").arg(root.join("test.mjs")).output().unwrap();
  assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));println!("{}",String::from_utf8_lossy(&output.stdout));fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bounded_helper_preparation_falls_back_without_changing_ordinary_calls() {
+ let mut source=String::from("module Bounded;\nfn leaf(xs:List<u32>,n:u32)->u32{let base=xs.map(fn(x)=>x+1);return base.at_or(n,99);}\n");
+ // A long helper chain reaches the runtime preparation-depth bound, then
+ // continues through ordinary calls without growing the preparation graph.
+ for i in (0..30).rev(){source+=&format!("fn chain{i}(xs:List<u32>,n:u32)->u32{{return {}(xs,n);}}\n",if i==29{"leaf".into()}else{format!("chain{}",i+1)});}
+ fn branch(depth:usize)->String {
+  if depth==0{return "let a:u32=n+1;let b:u32=n+2;let c:u32=n+3;let d:u32=n+4;let e:u32=n+5;return xs.at_or(n,99);".into();}
+  format!("if n<{} {{{}}}else{{{}}}",depth,branch(depth-1),branch(depth-1))
+ }
+ source+=&format!("fn oversized(xs:List<u32>,n:u32)->u32{{{}}}",branch(4));
+ let module=CheckedModule::from_source(parse(&source).unwrap()).unwrap();
+ let emission=ink_lowering_js::lower(&module).unwrap();
+ let root=std::env::temp_dir().join(format!("ink-prepared-helper-bounded-{}",std::process::id()));fs::create_dir_all(&root).unwrap();
+ fs::write(root.join("program.mjs"),emission.javascript).unwrap();
+ fs::write(root.join("test.mjs"),r#"
+import assert from 'node:assert/strict';import * as m from './program.mjs';
+const c=m.compiledValues.chain0,x=c.params[0].capture([1,2,3]),t=m.prepareCompiled('chain0',[[0,x]]);
+for(const[n,expected]of [[0,2],[2,4],[9,99]])for(let i=0;i<3;i++){
+ const arg=c.params[1].capture(n);assert.equal(c.result.materialize(m.callPreparedCompiled(t,[arg])),expected);
+ assert.equal(c.result.materialize(m.callCompiled('chain0',[x,arg])),expected);
+}
+const lane=m.metadata.prepared_compiled.functions.find(f=>f.function==='oversized');assert.equal(lane.factory,false);assert.match(lane.reason,/budget/);
+const o=m.compiledValues.oversized,ot=m.prepareCompiled('oversized',[[0,o.params[0].capture([1,2,3])]]);assert.equal(o.result.materialize(m.callPreparedCompiled(ot,[o.params[1].capture(1)])),2);
+"#).unwrap();
+ let out=Command::new("node").arg(root.join("test.mjs")).output().unwrap();assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));fs::remove_dir_all(root).unwrap();
 }

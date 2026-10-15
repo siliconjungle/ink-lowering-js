@@ -261,6 +261,19 @@ search validates the requested byte boundary, uses native substring search and
 converts the result back to bytes. Empty needles, BOMs and supplementary Unicode
 characters retain the fixed primitive semantics. No text cache crosses calls.
 
+## Pure helper preparation
+
+`prepareCompiled(name, [[parameterIndex, handle], ...])` captures immutable
+`compiledValues` handles; `callPreparedCompiled(token, remainingHandles)` executes
+the same checked source with changing remaining arguments. Stable readonly
+bindings and successful Boolean checks can persist through ordinary pure helpers.
+Each syntactic call site lazily owns its helper/cache; sixteen helper levels and
+bounded source emission retain ordinary fallback. Tokens/handles are module-owned,
+inputs are captured and public outputs detach. Source errors retain their ordinary
+value meaning; thrown errors are retried. Precondition checks precede cached work.
+There is no algorithm recognizer, global cache or automatic profitability decision.
+See the distribution's `docs/prepared-helpers.md` and retained lifecycle evidence.
+
 ## License
 
 Project code and documentation are [MIT licensed](LICENSE). Third-party dependencies,

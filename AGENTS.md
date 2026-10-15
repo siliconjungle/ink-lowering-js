@@ -19,3 +19,13 @@ Private first-order constructor nodes are immutable by construction. Direct
 recursive calls may replay only on the private depth sentinel, using the existing
 explicit call stack; other errors propagate. Use the core term visitor and retain
 stack-only emission when the optional lane exceeds the source-size limit.
+
+Sealed pure-call preparation may delegate to bounded, lazily created helpers.
+Preserve per-syntactic-site caches and transitive parameter stability masks;
+arguments execute once in source order. Stable checks stay at their original lazy
+position and thrown failures retry. Bound helper preparation depth (sixteen),
+source/body work and emitted size; missing factories retain ordinary calls.
+Retained owners must satisfy the core readonly-loan analysis, and no cached/input
+value gains unique storage. Changing model weights/context must run fresh primals;
+opacity never authenticates a prepared graph at an ABI boundary. This is literal
+execution support, not rewrite or profitability authority.
