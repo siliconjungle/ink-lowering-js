@@ -15,6 +15,22 @@ struct StateEmitter<'a> {
     at_position: BTreeMap<usize, String>,
 }
 impl StateEmitter<'_> {
+    /// Arithmetic-only Number intermediates. Leaves still execute at their
+    /// original expression position, and pre-evaluated children remain opaque.
+    /// The surrounding bit operation supplies its own final F32 rounding.
+    fn float_number(&mut self, e: &Expr, env: &Env) -> LangResult<String> {
+        if let Some(value)=self.at_position.get(&(e as *const Expr as usize)) {
+            return Ok(format!("__float({value})"));
+        }
+        if let Expr::Binary(op,a,b)=e {
+            if super::float_islands::arithmetic(op) && self.infer(e,env,Some(&Type::F32))?==Type::F32 {
+                let a=self.float_number(a,env)?;
+                let b=self.float_number(b,env)?;
+                return Ok(format!("Math.fround(({a}) {op} ({b}))"));
+            }
+        }
+        Ok(format!("__float({})",self.expr(e,env,Some(&Type::F32))?))
+    }
     fn fresh(&mut self) -> String {
         let n = format!("s{}", self.next);
         self.next += 1;
@@ -143,6 +159,12 @@ impl StateEmitter<'_> {
                     let a = self.expr_carrier(a, env, Some(&at), true)?;
                     let b = self.expr_carrier(b, env, Some(&at), true)?;
                     return Ok(super::count_carrier::emit(op, &a, &b));
+                }
+                if at==Type::F32 && super::float_islands::arithmetic(op)
+                    && [a.as_ref(),b.as_ref()].iter().any(|e|matches!(e,Expr::Binary(op,_,_) if super::float_islands::arithmetic(op))) {
+                    let a=self.float_number(a,env)?;
+                    let b=self.float_number(b,env)?;
+                    return Ok(format!("__bits(({a}) {op} ({b}))"));
                 }
                 let a = self.expr(a, env, Some(&at))?;
                 let b = self.expr(b, env, Some(&at))?;

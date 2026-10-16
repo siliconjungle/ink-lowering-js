@@ -24,7 +24,9 @@ mod primitives;
 mod count_carrier;
 mod prepared;
 mod helper_inline;
+mod float_islands;
 type Env = BTreeMap<String, (String, Type)>;
+const EXPRESSION_DEPTH: usize = 48;
 /// Fixed word operations with JavaScript's own 32-bit operators. u32 values
 /// are Numbers in [0, 2^32) and i32 values Numbers in [-2^31, 2^31); the
 /// operators work on exactly those 32 bits, and shift counts are taken modulo
@@ -256,6 +258,10 @@ struct Emitter<'a> {
     /// NaN tags. This is a representation invariant, not a Number/range fact.
     /// Mutable scalar slots enter only when every emitted store preserves it.
     normalized_f32: BTreeSet<String>,
+    /// Fresh immutable arithmetic locals in otherwise bit-carrier modules.
+    /// Ordinary observations encode their exact F32 bits before leaving scope.
+    bit_f32_numbers: BTreeSet<String>,
+    float_scan_work: usize,
     /// Fresh const bindings can be renamed without copying. Mutable loop,
     /// branch and recursive-call slots must still be snapshotted by bind().
     immutable_locals: BTreeSet<String>,
@@ -430,7 +436,8 @@ impl Emitter<'_> {
             quote(&name),
             captures
                 .iter()
-                .map(|(_, (v, _))| if self.split.contains_key(v) { self.rebuild(v) } else { v.clone() })
+                .map(|(_, (v, _))| if self.split.contains_key(v) { self.rebuild(v) }
+                    else if self.bit_f32_numbers.contains(v) { format!("__bits({v})") } else { v.clone() })
                 .collect::<Vec<_>>()
                 .join(",")
         ))
@@ -856,7 +863,7 @@ impl Emitter<'_> {
     fn expr_carrier(&mut self, e: &Expr, env: &Env, want: Option<&Type>, count_number: bool) -> LangResult<String> {
         // Target resource bound, matching C's scalar emission guard. A known
         // expression nesting cannot exceed the bounded emitter stack.
-        if self.depth >= 48 {
+        if self.depth >= EXPRESSION_DEPTH {
             return Err("JavaScript expression emission depth budget exceeded".into());
         }
         self.depth += 1;
@@ -913,7 +920,9 @@ impl Emitter<'_> {
             Expr::Var(n) if n == "None" => "({None:null})".into(),
             Expr::Var(n) => {
                 let bound = &env.get(n).ok_or("unbound JavaScript variable")?.0;
-                if self.split.contains_key(bound) { self.rebuild(bound) } else { bound.clone() }
+                if self.split.contains_key(bound) { self.rebuild(bound) }
+                else if self.bit_f32_numbers.contains(bound) { format!("__bits({bound})") }
+                else { bound.clone() }
             }
             Expr::Neg(a) => {
                 if t == Type::I32 {
@@ -940,13 +949,20 @@ impl Emitter<'_> {
                     Expr::Var(m) => env.get(m).map(|(v, _)| v.clone()).filter(|v| self.split.contains_key(v)),
                     _ => None,
                 };
-                let value = match aliased {
+                let native_number = !self.native_f32 && at == Type::F32
+                    && self.float_operand(a, env) && self.float_consumer(b, n);
+                let value = if native_number {
+                    let value = self.float_number(a, env)?;
+                    let value = self.bind(&value);
+                    self.bit_f32_numbers.insert(value.clone());
+                    value
+                } else { match aliased {
                     Some(v) => v,
                     None => {
                         let value = self.expr(a, env, Some(&at))?;
                         self.lexical_value(&value, &at)
                     }
-                };
+                }};
                 let mut local = env.clone();
                 local.insert(n.clone(), (value, at));
                 self.expr(b, &local, Some(&t))?
@@ -1004,6 +1020,16 @@ impl Emitter<'_> {
                     check::hint(a, &ts, self.p).or_else(|| check::hint(b, &ts, self.p))
                 };
                 let at = self.infer(a, env, context.as_ref())?;
+                if !self.native_f32 && at == Type::F32 && float_islands::arithmetic(op)
+                    && (self.float_operand(a, env) || self.float_operand(b, env)) {
+                    let av = self.float_number(a, env)?;
+                    let av = self.float_hold(a, av);
+                    let bv = self.float_number(b, env)?;
+                    let bv = self.float_hold(b, bv);
+                    // __bits supplies this outer operation's rounding and
+                    // canonical NaN; inner operations round in float_number.
+                    return Ok(format!("__bits({av} {op} {bv})"));
+                }
                 if count_carrier::comparison(op, &at, a, b) {
                     // Both operands have exact finite Number carriers. Use the
                     // ordinary emitter entry to retain node/depth accounting and
@@ -1717,6 +1743,8 @@ fn lower_with_layout(
         split: BTreeMap::new(),
         f32_numbers: BTreeSet::new(),
         normalized_f32: BTreeSet::new(),
+        bit_f32_numbers: BTreeSet::new(),
+        float_scan_work: 512,
         immutable_locals: BTreeSet::new(),
         prepared_sums: BTreeMap::new(),
         inline_depth: 0,
@@ -1727,6 +1755,7 @@ fn lower_with_layout(
     let mut functions = vec![];
     let mut input_types = vec![];
     for (i, f) in p.functions.iter().enumerate() {
+        emitter.float_scan_work = 512;
         let params = f
             .params
             .iter()

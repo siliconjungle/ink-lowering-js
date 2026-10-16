@@ -77,3 +77,13 @@ Scalar loop slots qualify only when initialization and every subsequent store
 preserve the carrier; they still need mutable-value snapshots. Restore normalized
 facts on optional-helper rollback with fresh names. Stateful bit carriers remain
 separate. This grants no arithmetic rewrite, ownership or profitability authority.
+
+Bit-carrier modules may keep adjacent F32 arithmetic and fresh immutable scalar
+arithmetic locals as rounded Numbers. Every source operation still rounds in its
+original grouping; opaque calls, negation, containers, bit observations, worker
+captures and state/result boundaries retain exact bits. Arithmetic NaNs become
+canonical when encoded; copied payloads and signed zero remain exact. Never label
+parameters, mutable loop/call/branch slots or arbitrary field reads as these Number
+locals. Preserve leaf snapshots and source-order failures, existing node/depth
+limits, bounded optional opportunity scans and all facts on helper rollback.
+These are invocation-local carriers, not retained values or range premises.
