@@ -1754,7 +1754,18 @@ fn lower_with_layout(
         }).collect::<Vec<_>>();
         // Whole-value escape/equality keeps eager capture semantics, including
         // single reads of accessor-backed fields. Field-only consumers borrow.
-        let captures=ink_core::input_demand::fields(f,p).into_iter().map(|fields|fields.is_none()).collect::<Vec<_>>();
+        let used=ink_core::analysis::free_variables(&f.body);
+        let predicate=p.contracts.precondition_checks.get(&f.name)
+            .and_then(|name|p.functions.iter().find(|candidate|&candidate.name==name));
+        let predicate_used=predicate.map(|function|ink_core::analysis::free_variables(&function.body));
+        let captures=ink_core::input_demand::fields(f,p).into_iter().enumerate().map(|(i,fields)|{
+            if native_f32 && f.params[i].1==Type::F32 {
+                // Unobserved scalars retain their lazy public boundary. A
+                // contract-only consumer still needs the same captured value.
+                used.contains(&f.params[i].0) || predicate.zip(predicate_used.as_ref())
+                    .is_some_and(|(function,used)|used.contains(&function.params[i].0))
+            } else { fields.is_none() }
+        }).collect::<Vec<_>>();
         input_types.push(json!({"types":projected,"capture":captures}));
         let mut env = Env::new();
         let mut vars = vec![];

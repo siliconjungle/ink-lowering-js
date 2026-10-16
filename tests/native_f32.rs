@@ -1,6 +1,44 @@
 use ink_core::{core::CheckedModule,eval,syntax::parse};
 use serde_json::{json,Value};
 use std::{fs,process::Command};
+
+#[test]
+fn native_float_tags_are_captured_once_and_borrowed_fields_stay_lazy() {
+ let source=r#"module CapturedFloat;
+record R {x:f32,}
+fn bits(x:f32)->u32{return f32_bits(x);}
+fn twice(x:f32)->u32{return f32_bits(x)+f32_bits(x);}
+fn guarded(x:f32)->u32{return choose([x]==[f32_from_bits(2139095041)],2139095041,f32_bits(x));}
+fn ignored(x:f32)->u32{return 7;}
+fn fields(r:R,pick:Bool)->u32{return choose(pick,f32_bits(r.x)+f32_bits(r.x),7);}
+fn identity(x:f32)->f32{return x;}
+fn negative(x:f32)->f32{return -x;}
+spec fn checked(x:f32)->u32 requires x==0.0; ensures true;
+implementation checked_body for checked {return f32_bits(x);}
+"#;
+ let module=CheckedModule::from_source(parse(source).unwrap()).unwrap();
+ let root=std::env::temp_dir().join(format!("ink-captured-float-{}",std::process::id()));fs::create_dir_all(&root).unwrap();
+ fs::write(root.join("program.mjs"),ink_lowering_js::lower(&module).unwrap().javascript).unwrap();
+ fs::write(root.join("test.mjs"),r#"import assert from 'node:assert/strict';import {functions as f} from './program.mjs';
+function raw(bits){let reads=0;return {value:{get F32Bits(){return reads++?2147483648:bits;}},reads:()=>reads};}
+for(const bits of [0,2147483648,1,2139095040,4286578688,2139095041,2143289345,4290777652]){
+ let input=raw(bits);assert.equal(f.bits(input.value),bits);assert.equal(input.reads(),1);
+ input=raw(bits);assert.equal(f.twice(input.value),(bits+bits)>>>0);assert.equal(input.reads(),1);
+ input=raw(bits);assert.equal(f.guarded(input.value),bits);assert.equal(input.reads(),1);
+}
+let input=raw(2139095041);assert.equal(f.ignored(input.value),7);assert.equal(input.reads(),0);
+const failure=Error('retry');let reads=0;const throwing={get F32Bits(){if(!reads++)throw failure;return 2139095041;}};
+assert.throws(()=>f.bits(throwing),e=>e===failure);assert.equal(f.bits(throwing),2139095041);assert.equal(reads,2);
+let fields=0,tags=0;const r={get x(){fields++;return {get F32Bits(){tags++;return fields===1?2139095041:2147483648;}};}};
+assert.equal(f.fields(r,false),7);assert.equal(fields,0);assert.equal(tags,0);
+assert.equal(f.fields(r,true),(2139095041+2147483648)>>>0);assert.equal(fields,2);assert.equal(tags,2);
+input=raw(0);assert.equal(f.checked(input.value),0);assert.equal(input.reads(),1);
+const host={F32Bits:2139095041};const result=f.identity(host);host.F32Bits=0;assert.deepEqual(result,{F32Bits:2139095041});
+result.F32Bits=1;assert.deepEqual(f.negative({F32Bits:2139095041}),{F32Bits:4286578689});
+console.log(JSON.stringify({status:'passed',exactTags:8,lazyFields:true,retry:true,contract:true,detached:true}));"#).unwrap();
+ let result=Command::new("node").arg(root.join("test.mjs")).output().unwrap();
+ fs::remove_dir_all(root).unwrap();assert!(result.status.success(),"{}",String::from_utf8_lossy(&result.stderr));
+}
 #[test]
 fn native_float_lane_preserves_binary32_bits_and_public_observations() {
  let source=r#"module NativeFloat;

@@ -22,12 +22,18 @@ const __dfCapture=value=>{
 };
 // Native binary32 lane for pure modules. Explicit NaN payloads remain tagged;
 // arithmetic canonicalizes NaNs just as __bits does in the exact-bit lane.
-const __nfValue = value => typeof value === 'number' ? Math.fround(value) : value;
+// Host tags are captured once at a typed read. Only private immutable tags
+// may pass through normalization without consulting a host property again.
+const __nfTagged = new WeakSet();
+const __nfValue = value => typeof value === 'number' ? Math.fround(value) : __nfTagged.has(value) ? value : __nfFromBits(value.F32Bits);
 // Number operands have already been normalised at their typed read or producer.
 const __nfNumber = value => typeof value === 'number' ? value : __float(value.F32Bits);
 const __nfBits = value => typeof value === 'number' ? __bits(value) : value.F32Bits;
-const __nfFromBits = bits => (bits & 0x7fffffff)>0x7f800000 ? {F32Bits:bits} : __float(bits);
-const __nfNeg = value => typeof value === 'number' && !Number.isNaN(value) ? -value : {F32Bits:(__nfBits(value) ^ 0x80000000) >>> 0};
+const __nfFromBits = bits => {
+  if((bits & 0x7fffffff)<=0x7f800000)return __float(bits);
+  const value=Object.freeze({F32Bits:bits});__nfTagged.add(value);return value;
+};
+const __nfNeg = value => typeof value === 'number' && !Number.isNaN(value) ? -value : __nfFromBits((__nfBits(value) ^ 0x80000000) >>> 0);
 const __nfOutput = value => {const n=typeof value==='number'?Math.fround(value):__float(value.F32Bits);return Number.isFinite(n)?n:{F32Bits:__nfBits(value)};};
 const __identity = value => value;
 // Intern declared conversion schemas once. An invocation owns one WeakMap per
