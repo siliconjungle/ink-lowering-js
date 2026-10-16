@@ -74,6 +74,14 @@ pub(crate) fn double_literal(bits: u64) -> String {
     if value.is_finite() { format!("{value:?}") }
     else { format!("__dfFromBits({bits}n)") }
 }
+// Every finite binary32 value embeds exactly in binary64. Spell that binary64
+// value directly; formatting the f32 itself could instead round to a different
+// JS Number (for example 0.1). Keep nonfinite payloads in the raw-bit carrier.
+fn float_literal(bits: u32) -> String {
+    let value = f32::from_bits(bits);
+    if value.is_finite() { format!("{:?}", f64::from(value)) }
+    else { format!("__nfFromBits({bits})") }
+}
 fn descriptor(t: &Type, p: &Program, _seen: &mut BTreeSet<String>) -> LangResult<Value> {
     ink_abi::describe(t, &p.records, &p.enums, &p.ids)
 }
@@ -887,12 +895,12 @@ impl Emitter<'_> {
             Expr::Num(n) if count_number => n.to_string(),
             Expr::Num(n) => match t {
                 Type::U64 | Type::Int => format!("{n}n"),
-                Type::F32 if self.native_f32 => format!("__nfFromBits({})", (*n as f32).to_bits()),
+                Type::F32 if self.native_f32 => float_literal((*n as f32).to_bits()),
                 Type::F32 => format!("{}", (*n as f32).to_bits()),
                 Type::F64 => double_literal((*n as f64).to_bits()),
                 _ => n.to_string(),
             },
-            Expr::Float(b) if self.native_f32 => format!("__nfFromBits({b})"),
+            Expr::Float(b) if self.native_f32 => float_literal(*b),
             Expr::Float(b) => b.to_string(),
             Expr::Double(b) => double_literal(*b),
             Expr::Bool(b) => b.to_string(),
