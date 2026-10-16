@@ -274,6 +274,15 @@ value meaning; thrown errors are retried. Precondition checks precede cached wor
 There is no algorithm recognizer, global cache or automatic profitability decision.
 See the distribution's `docs/prepared-helpers.md` and retained lifecycle evidence.
 
+Mixed immutable records retain field provenance through literal construction,
+projection and bounded helper returns. Captured topology or keys can stay fixed
+beside changing weights or queries. Evaluation dependencies remain separate:
+unused arguments/fields and checks still execute, failed work retries and loop
+elements remain dynamic. Expanded summaries and shared private mask constants
+respect the existing source budget. `tests/prepared_fields.rs` covers complete
+reference values, raw float bits, shadowing, failure/order and alias expansion.
+This mechanism supplies neither graph rewrite authority nor a speed guarantee.
+
 ## License
 
 Project code and documentation are [MIT licensed](LICENSE). Third-party dependencies,

@@ -41,3 +41,11 @@ failure. The opportunity scan (512 visits, depth 32) only avoids useless wrapper
 it supplies neither semantic facts nor a profitable-selection claim. Instrument
 ordinary and residual invocation bodies when measuring source validation; a
 factory's construction is not a validation execution.
+
+Mixed immutable records carry bounded field provenance through literal constructors,
+projections and helper returns. Keep returned-value provenance separate from the
+work needed to produce it: unused dynamic arguments/fields, guards and failures
+still execute before any cached projection. Iteration bindings stay dynamic.
+Mask sharing uses only private captured policies, never source/host object access.
+Bound expanded alias summaries as well as traversal; exhaustion retains ordinary
+execution. Do not raise source limits to accommodate verbose optional masks.
