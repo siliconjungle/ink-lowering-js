@@ -3,13 +3,16 @@
 use super::{arithmetic, descriptor, quote, zero, Env};
 use ink_core::{syntax::*, LangResult};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 struct StateEmitter<'a> {
     p: &'a Program,
     next: usize,
     preflight: bool,
     execution: &'a ink_core::action_ir::Execution,
     equality: super::TypedEquality<'a>,
+    // Invocation-local emission substitutions for borrowed AST children. These
+    // addresses are never serialized or accepted as semantic evidence.
+    at_position: BTreeMap<usize, String>,
 }
 impl StateEmitter<'_> {
     fn fresh(&mut self) -> String {
@@ -39,6 +42,9 @@ impl StateEmitter<'_> {
         self.expr_carrier(e, env, want, false)
     }
     fn expr_carrier(&mut self, e: &Expr, env: &Env, want: Option<&Type>, count_number: bool) -> LangResult<String> {
+        if let Some(value) = self.at_position.get(&(e as *const Expr as usize)) {
+            return Ok(value.clone());
+        }
         let t = self.infer(e, env, want)?;
         Ok(match e {
             Expr::Num(n) if count_number => n.to_string(),
@@ -160,16 +166,23 @@ impl StateEmitter<'_> {
                     format!("(({a}) {op} ({b}))")
                 }
             }
-            Expr::Let(n, annotation, value, body) => {
-                let t = self.infer(value, env, annotation.as_deref())?;
-                let value = self.expr(value, env, Some(&t))?;
-                let variable = self.fresh();
+            Expr::Let(..) => {
+                // One lexical block preserves the same strict initializers and
+                // scope without creating an arrow invocation for every binding.
+                // Keep the block at this operand/branch: neither source work nor
+                // host failures can move across surrounding evaluation.
                 let mut local = env.clone();
-                local.insert(n.clone(), (variable.clone(), t));
-                format!(
-                    "(({variable})=>({}))({value})",
-                    self.expr(body, &local, want)?
-                )
+                let mut bindings = String::new();
+                let mut tail = e;
+                while let Expr::Let(n, annotation, value, body) = tail {
+                    let t = self.infer(value, &local, annotation.as_deref())?;
+                    let value = self.expr(value, &local, Some(&t))?;
+                    let variable = self.fresh();
+                    bindings.push_str(&format!("const {variable}={value};"));
+                    local.insert(n.clone(), (variable, t));
+                    tail = body;
+                }
+                format!("(()=>{{{bindings}return {};}})()", self.expr(tail, &local, want)?)
             }
             Expr::Call(n, args) => match n.as_str() {
                 name if ink_core::primitives::primitive(name) => {
@@ -413,6 +426,38 @@ impl StateEmitter<'_> {
             _ => return Err("unsupported checked action expression".into()),
         })
     }
+    fn statement_expr(&mut self, e: &Expr, env: &Env, want: Option<&Type>) -> LangResult<(String, String)> {
+        fn leading(e: &Expr) -> bool {
+            match e { Expr::Let(..) => true, Expr::Binary(_, a, _) => leading(a), _ => false }
+        }
+        if !leading(e) { return Ok((String::new(), self.expr(e, env, want)?)); }
+        if let Expr::Binary(_, left, _) = e {
+            // Only the first strict operand can move to this statement's
+            // prelude. The right operand, including a short-circuit arm, keeps
+            // its exact evaluation position inside the emitted expression.
+            let (prefix, value) = self.statement_expr(left, env, None)?;
+            let address = left.as_ref() as *const Expr as usize;
+            let prior = self.at_position.insert(address, value);
+            let expression = self.expr(e, env, want);
+            match prior { Some(value) => { self.at_position.insert(address, value); }, None => { self.at_position.remove(&address); } }
+            return expression.map(|expression| (prefix, expression));
+        }
+        let mut local = env.clone();
+        let mut prefix = String::new();
+        let mut tail = e;
+        while let Expr::Let(name, annotation, value, body) = tail {
+            let ty = self.infer(value, &local, annotation.as_deref())?;
+            let (before, value) = self.statement_expr(value, &local, Some(&ty))?;
+            let variable = self.fresh();
+            prefix.push_str(&before);
+            prefix.push_str(&format!("const {variable}={value};"));
+            local.insert(name.clone(), (variable, ty));
+            tail = body;
+        }
+        let (before, value) = self.statement_expr(tail, &local, want)?;
+        prefix.push_str(&before);
+        Ok((prefix, value))
+    }
     fn block(&mut self, body: &[Statement], env: &mut Env, result: &Type) -> LangResult<String> {
         let mut code = String::new();
         for s in body {
@@ -420,24 +465,29 @@ impl StateEmitter<'_> {
             match s {
                 Statement::Let(n, t, e) => {
                     let at = self.infer(e, env, t.as_ref())?;
-                    let e = self.expr(e, env, Some(&at))?;
+                    let (prefix, e) = self.statement_expr(e, env, Some(&at))?;
+                    code.push_str(&prefix);
                     let v = self.fresh();
                     code.push_str(&format!("const {v}={e};"));
                     env.insert(n.clone(), (v, at));
                 }
-                Statement::Return(e) if self.preflight => code.push_str(&format!("value={};break __inkBody;",self.expr(e,env,Some(result))?)),
                 Statement::Return(e) => {
-                    code.push_str(&format!("return {};", self.expr(e, env, Some(result))?))
+                    let (prefix, e) = self.statement_expr(e, env, Some(result))?;
+                    code.push_str(&prefix);
+                    code.push_str(&if self.preflight { format!("value={e};break __inkBody;") } else { format!("return {e};") });
                 }
-                Statement::Expr(e) => code.push_str(&format!("{};", self.expr(e, env, None)?)),
-                Statement::Emit(n, e) if self.preflight => code.push_str(&format!("__eventChannel={};__eventValue={};",quote(n),self.expr(e,env,Some(&self.p.events[n]))?)),
-                Statement::Emit(n, e) => code.push_str(&format!(
-                    "__emit(rt,{},{});",
-                    quote(n),
-                    self.expr(e, env, Some(&self.p.events[n]))?
-                )),
+                Statement::Expr(e) => {
+                    let (prefix, e) = self.statement_expr(e, env, None)?;
+                    code.push_str(&prefix);code.push_str(&format!("{e};"));
+                }
+                Statement::Emit(n, e) => {
+                    let (prefix, e) = self.statement_expr(e, env, Some(&self.p.events[n]))?;
+                    code.push_str(&prefix);
+                    code.push_str(&if self.preflight {format!("__eventChannel={};__eventValue={e};",quote(n))}else{format!("__emit(rt,{},{e});",quote(n))});
+                }
                 Statement::If(e, a, b) => {
-                    let e = self.expr(e, env, Some(&Type::Bool))?;
+                    let (prefix, e) = self.statement_expr(e, env, Some(&Type::Bool))?;
+                    code.push_str(&prefix);
                     let a = self.block(a, &mut env.clone(), result)?;
                     let b = self.block(b, &mut env.clone(), result)?;
                     code.push_str(&format!("if({e}){{{a}}}else{{{b}}}"));
@@ -465,6 +515,7 @@ pub(crate) fn emit_with_sums(
         preflight: false,
         execution: &execution,
         equality: super::TypedEquality::new(p, "__stateValueEqual"),
+        at_position: BTreeMap::new(),
     };
     emitter.equality.elisions=elisions.clone();
     emitter.equality.sums=sums.clone();
