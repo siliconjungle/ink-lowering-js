@@ -244,6 +244,10 @@ struct Emitter<'a> {
     /// Immutable emitted locals known to hold rounded native Numbers, rather
     /// than the tagged F32 carrier. Never applied to mutable loop/call slots.
     f32_numbers: BTreeSet<String>,
+    /// Values already in the internal F32 carrier: rounded Numbers or exact
+    /// NaN tags. This is a representation invariant, not a Number/range fact.
+    /// Mutable scalar slots enter only when every emitted store preserves it.
+    normalized_f32: BTreeSet<String>,
     /// Fresh const bindings can be renamed without copying. Mutable loop,
     /// branch and recursive-call slots must still be snapshotted by bind().
     immutable_locals: BTreeSet<String>,
@@ -362,7 +366,23 @@ impl Emitter<'_> {
         self.line(format!("const {name}={value};"));
         self.immutable_locals.insert(name.clone());
         if self.f32_numbers.contains(value) { self.f32_numbers.insert(name.clone()); }
+        if self.normalized_f32.contains(value) { self.normalized_f32.insert(name.clone()); }
         name
+    }
+    fn normalized_scalar_slot(&mut self, value:&str, ty:&Type) {
+        if self.native_f32 && *ty==Type::F32 {self.normalized_f32.insert(value.to_owned());}
+    }
+    fn normalize_parameters(&mut self, f:&Function, vars:&[String]) {
+        if !self.native_f32 {return;}
+        let used=ink_core::analysis::free_variables(&f.body);
+        for ((name,ty),value) in f.params.iter().zip(vars) {
+            if *ty==Type::F32 && used.contains(name) {
+                // Scalars are passed by value. Records/lists keep their lazy
+                // typed reads; no borrowed host property is read here.
+                self.line(format!("{value}=__nfValue({value});"));
+                self.normalized_scalar_slot(value,ty);
+            }
+        }
     }
     fn parallel(
         &mut self,
@@ -832,7 +852,7 @@ impl Emitter<'_> {
             return Err("JavaScript expression emission depth budget exceeded".into());
         }
         self.depth += 1;
-        let result = self.expr_inner(e, env, want, count_number).and_then(|value| {
+        let result = self.expr_inner(e, env, want, count_number).and_then(|mut value| {
             // Borrow trusted host containers. Normalize scalar reads at demand,
             // including callbacks and at_or, instead of copying their ancestors.
             // Every other F32 constructor/arithmetic/call already produces the
@@ -846,9 +866,11 @@ impl Emitter<'_> {
                     _ => false,
                 };
                 if number { self.f32_numbers.insert(value.clone()); }
-                if matches!(e,Expr::Var(_)|Expr::Field(..)|Expr::Method(..)) && !self.f32_numbers.contains(&value) {
-                    return Ok(format!("__nfValue({value})"));
+                if matches!(e,Expr::Var(_)|Expr::Field(..)|Expr::Method(..)) && !self.f32_numbers.contains(&value)
+                    && !self.normalized_f32.contains(&value) {
+                    value=format!("__nfValue({value})");
                 }
+                self.normalized_f32.insert(value.clone());
             }
             Ok(value)
         });
@@ -1163,6 +1185,7 @@ impl Emitter<'_> {
                     }
                 };
                 let index = self.fresh();
+                self.normalized_scalar_slot(&out,&t);
                 self.line(format!("for(let {index}=0;{index}<{limit};{index}++){{"));
                 let (stop, local) = Self::callback(&args[2], env, &[(out.clone(), t.clone())])?;
                 let stop = self.expr(stop, &local, Some(&Type::Bool))?;
@@ -1383,6 +1406,7 @@ impl Emitter<'_> {
                     }
                 };
                 let index = self.fresh();
+                self.normalized_scalar_slot(&out,&t);
                 self.line(format!("for(let {index}=0;{index}<{bound};{index}++){{"));
                 let idx = self.bind(&format!("({index}>>>0)"));
                 let (body, local) =
@@ -1409,6 +1433,7 @@ impl Emitter<'_> {
                 let out = self.fresh();
                 let index = self.fresh();
                 self.line(format!("let {out}={initial};"));
+                self.normalized_scalar_slot(&out,&t);
                 self.line(if n == "foldr" {
                     format!("for(let {index}={xs}.length-1;{index}>=0;{index}--){{")
                 } else {
@@ -1683,6 +1708,7 @@ fn lower_with_layout(
         in_place: Default::default(),
         split: BTreeMap::new(),
         f32_numbers: BTreeSet::new(),
+        normalized_f32: BTreeSet::new(),
         immutable_locals: BTreeSet::new(),
         prepared_sums: BTreeMap::new(),
         inline_depth: 0,
@@ -1731,6 +1757,7 @@ fn lower_with_layout(
             vars.push(v);
         }
         emitter.lines.clear();
+        emitter.normalize_parameters(f,&vars);
         emitter.in_place = if ink_core::recursion::recursive(f) {
             Default::default()
         } else {
@@ -1778,6 +1805,7 @@ fn lower_with_layout(
         let destination = emitter.fresh();
         vars.push(destination.clone());
         emitter.lines.clear();
+        emitter.normalize_parameters(f,&vars);
         emitter.in_place = if ink_core::recursion::recursive(f) {
             Default::default()
         } else {

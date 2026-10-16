@@ -110,6 +110,7 @@ pub(super) fn call(e: &mut Emitter<'_>, f: &Function, actuals: &[String]) -> Opt
     let split = e.split.clone();
     let immutable = e.immutable_locals.clone();
     let floats = e.f32_numbers.clone();
+    let normalized = e.normalized_f32.clone();
     let next = e.next;
     let budget = e.budget;
     let in_place = std::mem::replace(
@@ -142,6 +143,7 @@ pub(super) fn call(e: &mut Emitter<'_>, f: &Function, actuals: &[String]) -> Opt
     e.split = split;
     e.immutable_locals = immutable;
     e.f32_numbers = floats;
+    e.normalized_f32 = normalized;
     e.next = next;
     None
 }

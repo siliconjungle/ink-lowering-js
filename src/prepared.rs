@@ -440,6 +440,7 @@ fn factory(emitter: &mut Emitter<'_>, f: &Function, index: usize) -> LangResult<
     if reusable.is_empty() {return Err("no reusable captured work".into());}
     let mut plan = Preparation::default();
     emitter.lines.clear();
+    emitter.normalize_parameters(f,&vars);
     let value = residual(emitter, &f.body, env, dependencies, &f.result,
         &mut plan, 0)?;
     if plan.retained == 0 && plan.delegated == 0 { return Err("no reusable lexical bindings".into()); }
@@ -482,6 +483,7 @@ fn residual(emitter: &mut Emitter<'_>, body: &Expr, mut env: Env,
                     let out = emitter.fresh(); emitter.line(format!("let {out}={initial};")); out
                 }
             };
+            emitter.normalized_scalar_slot(&out,result);
             let index = emitter.fresh();
             emitter.line(format!("for(let {index}=0;{index}<{limit};{index}++){{"));
             let (stop, local, found) = callback(&args[2], &env, &deps, &[(out.clone(), result.clone())])?;
@@ -505,6 +507,7 @@ fn residual(emitter: &mut Emitter<'_>, body: &Expr, mut env: Env,
             let xs = emitter.bind(&xs);
             let initial = ordinary(emitter, &args[1], &env, result)?;
             let out = emitter.fresh(); emitter.line(format!("let {out}={initial};"));
+            emitter.normalized_scalar_slot(&out,result);
             let index = emitter.fresh();
             emitter.line(if name == "foldr" {format!("for(let {index}={xs}.length-1;{index}>=0;{index}--){{")}
                 else {format!("for(let {index}=0;{index}<{xs}.length;{index}++){{")});

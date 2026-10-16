@@ -301,6 +301,14 @@ distribution's `docs/local-record-helpers.md` and matched text/neural controls.
 Conditional record results inside expanded helpers merge their fields lazily,
 avoiding a carrier allocation followed immediately by unpacking.
 
+Pure F32 emission also tracks already normalized internal carriers separately
+from guaranteed Numbers. Used scalar parameters normalize at entry; aliases and
+scalar loop slots with normalized stores avoid repeated normalization. Exact NaN
+tags, arithmetic rounding and mutable snapshots remain intact. Borrowed record/
+list fields retain every typed read and getter/error position. The stateful bit
+lane is unchanged. See `tests/f32_carriers.rs` and the distribution's
+`docs/normalized-f32-carriers.md`; these facts grant no arithmetic rewrite.
+
 ## License
 
 Project code and documentation are [MIT licensed](LICENSE). Third-party dependencies,

@@ -69,3 +69,11 @@ admission budget. Structural expansion grants no equality or profitability fact.
 Record merges inside expanded helpers evaluate only the selected branch and
 assign fresh field slots after its work. Whole-value uses rebuild normally;
 mutable merge slots must never become immutable-number or alias facts by name.
+
+Normalized F32 carriers are rounded Numbers or exact NaN tags, not Number/range
+facts. Normalize used scalar parameters at entry; borrowed composite fields keep
+each first typed read at its source position, including repeated/throwing getters.
+Scalar loop slots qualify only when initialization and every subsequent store
+preserve the carrier; they still need mutable-value snapshots. Restore normalized
+facts on optional-helper rollback with fresh names. Stateful bit carriers remain
+separate. This grants no arithmetic rewrite, ownership or profitability authority.
