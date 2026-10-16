@@ -246,6 +246,9 @@ struct Emitter<'a> {
     /// Fresh const bindings can be renamed without copying. Mutable loop,
     /// branch and recursive-call slots must still be snapshotted by bind().
     immutable_locals: BTreeSet<String>,
+    /// Checked source sum-method sites for the bounded preparation opportunity
+    /// scan. Keys use the core visitor's borrowed-expression identity convention.
+    prepared_sums: BTreeMap<usize, bool>,
 }
 /// Fields of an emitted record literal whose values are all plain locals.
 fn record_literal_fields(value: &str, fields: &[String]) -> Option<Vec<String>> {
@@ -1666,6 +1669,7 @@ fn lower_with_layout(
         split: BTreeMap::new(),
         f32_numbers: BTreeSet::new(),
         immutable_locals: BTreeSet::new(),
+        prepared_sums: BTreeMap::new(),
     };
     let mut javascript = String::new();
     let mut functions = vec![];

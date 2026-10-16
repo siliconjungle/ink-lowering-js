@@ -283,6 +283,14 @@ respect the existing source budget. `tests/prepared_fields.rs` covers complete
 reference values, raw float bits, shadowing, failure/order and alias expansion.
 This mechanism supplies neither graph rewrite authority nor a speed guarantee.
 
+Optional/result `fold`, `map` and `map_err` callbacks now propagate lexical
+stability. A complete captured immutable sum fixes its payload; changing sums
+retain fresh payload computation. Core typed traversal distinguishes these sites
+from loops. Checked sum layouts, ownership fallback, lazy arms, strict defaults
+and failure retry remain unchanged. Bounded structural work conditions can retain
+a direct ordinary call when a captured policy offers no useful preparation.
+See the distribution's `docs/prepared-sum-callbacks.md` and complete controls.
+
 ## License
 
 Project code and documentation are [MIT licensed](LICENSE). Third-party dependencies,

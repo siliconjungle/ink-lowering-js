@@ -143,10 +143,10 @@ fn bounded_helper_preparation_falls_back_without_changing_ordinary_calls() {
  // continues through ordinary calls without growing the preparation graph.
  for i in (0..30).rev(){source+=&format!("fn chain{i}(xs:List<u32>,n:u32)->u32{{return {}(xs,n);}}\n",if i==29{"leaf".into()}else{format!("chain{}",i+1)});}
  fn branch(depth:usize)->String {
-  if depth==0{return "let a:u32=n+1;let b:u32=n+2;let c:u32=n+3;let d:u32=n+4;let e:u32=n+5;return xs.at_or(n,99);".into();}
+  if depth==0{return "let a:u32=n+1;let b:u32=n+2;let c:u32=n+3;let d:u32=n+4;let e:u32=n+5;return prepared.at_or(n,99);".into();}
   format!("if n<{} {{{}}}else{{{}}}",depth,branch(depth-1),branch(depth-1))
  }
- source+=&format!("fn oversized(xs:List<u32>,n:u32)->u32{{{}}}",branch(4));
+ source+=&format!("fn oversized(xs:List<u32>,n:u32)->u32{{let prepared=xs.map(fn(x)=>x+1);{}}}",branch(4));
  let module=CheckedModule::from_source(parse(&source).unwrap()).unwrap();
  let emission=ink_lowering_js::lower(&module).unwrap();
  let root=std::env::temp_dir().join(format!("ink-prepared-helper-bounded-{}",std::process::id()));fs::create_dir_all(&root).unwrap();
@@ -159,7 +159,7 @@ for(const[n,expected]of [[0,2],[2,4],[9,99]])for(let i=0;i<3;i++){
  assert.equal(c.result.materialize(m.callCompiled('chain0',[x,arg])),expected);
 }
 const lane=m.metadata.prepared_compiled.functions.find(f=>f.function==='oversized');assert.equal(lane.factory,false);assert.match(lane.reason,/budget/);
-const o=m.compiledValues.oversized,ot=m.prepareCompiled('oversized',[[0,o.params[0].capture([1,2,3])]]);assert.equal(o.result.materialize(m.callPreparedCompiled(ot,[o.params[1].capture(1)])),2);
+const o=m.compiledValues.oversized,ot=m.prepareCompiled('oversized',[[0,o.params[0].capture([1,2,3])]]);assert.equal(o.result.materialize(m.callPreparedCompiled(ot,[o.params[1].capture(1)])),3);
 "#).unwrap();
  let out=Command::new("node").arg(root.join("test.mjs")).output().unwrap();assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));fs::remove_dir_all(root).unwrap();
 }

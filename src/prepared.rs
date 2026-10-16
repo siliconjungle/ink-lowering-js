@@ -65,13 +65,7 @@ impl Shape {
                 format!("{{all:{},fields:{{{fields}}}}}",eligibility(&self.origins()))
             }
         };
-        if matches!(expression.as_str(), "true" | "false") { return expression; }
-        if let Some(name) = plan.masks.get(&expression) { return name.clone(); }
-        let name = emitter.fresh();
-        // Masks depend only on this factory's private captured policy. Sharing
-        // their construction cannot evaluate source values, guards or branches.
-        plan.declarations.push_str(&format!("const {name}={expression};\n"));
-        plan.masks.insert(expression,name.clone()); name
+        plan.policy(expression,emitter)
     }
 }
 fn merge(mut out: BTreeSet<Input>, found: Origins) -> Origins {
@@ -176,78 +170,123 @@ fn shared_callback(expression: &Expr, env: &Env, p: &Program) -> bool {
         env.get(n).is_none_or(|(_, ty)| !local_collections::owned(ty, p)))
 }
 
-/// A bounded search for potentially reusable work under a parameter mask.
-/// This only avoids empty residual wrappers; it grants no transformation facts.
-/// Unknown/deep calls retain ordinary execution. Iteration bindings are never
-/// stable merely because their collection or enclosing loop is stable.
-fn potential(expression: &Expr, env: &Dependencies, p: &Program) -> bool {
-    type Stable = Dependencies;
-    fn stable(e: &Expr, env: &Stable, p: &Program) -> bool { dependencies(e,env,p).is_some() }
-    fn callback(e: &Expr, env: &Stable, count: usize, p: &Program, work: &mut usize, depth: usize) -> bool {
-        let mut env = env.clone(); let mut body = e;
-        for _ in 0..count {
-            let Expr::Lambda(name, rest) = body else { return false };
-            env.insert(name.clone(), Shape::dynamic()); body = rest;
-        }
-        visit(body, &env, p, work, depth + 1)
-    }
-    fn visit(e: &Expr, env: &Stable, p: &Program, work: &mut usize, depth: usize) -> bool {
-        if *work == 0 || depth >= 32 { return false; } *work -= 1;
+/// A bounded structural work estimate for the explicit preparation lane. Tiny
+/// scalar expressions stay literal; loops, collection construction and larger
+/// helper computations can repay a retained binding. This is neither a source
+/// fact nor measured profitability/automatic implementation-selection evidence.
+fn retention_work(expression: &Expr, p: &Program) -> bool {
+    let mut pending=vec![(expression,0)];let mut nodes=0;
+    while let Some((e,depth))=pending.pop() {
+        nodes+=1;if nodes>=32 {return true;}
+        if depth>=16 {continue;}
         match e {
-            Expr::Let(name, _, value, rest) => {
-                let fixed = stable(value, env, p);
-                if fixed && !matches!(value.as_ref(), Expr::Var(_) | Expr::Num(_) | Expr::Float(_) | Expr::Double(_) | Expr::Bool(_) | Expr::String(_) | Expr::Unit) { return true; }
-                if visit(value, env, p, work, depth + 1) { return true; }
-                let shape = returned(value,env,p);
-                let mut env = env.clone(); env.insert(name.clone(), shape);
-                visit(rest, &env, p, work, depth + 1)
+            Expr::Call(name,_) if matches!(name.as_str(),"foldl"|"foldr"|"fold_until"|"repeat_until"|"sum"|"count") => return true,
+            Expr::Method(_,method,_) if matches!(method.as_str(),"map"|"map_indexed"|"filter"|"zip"|"scan"|"concat") => return true,
+            Expr::Record(_,fields) if fields.len()>=4 => return true,
+            Expr::Call(name,_) => {
+                if let Some(f)=p.functions.iter().find(|f| &f.name==name) {
+                    if !recursion::recursive(f) {pending.push((&f.body,depth+1));}
+                }
             }
-            Expr::Call(name, args) if name == "choose" && args.len() == 3 => {
-                let mut expensive = false;
-                analysis::walk(&args[0], |e| expensive |= match e {
-                    Expr::Call(name, _) => p.functions.iter().any(|f| &f.name == name)
-                        || matches!(name.as_str(), "foldl" | "foldr" | "fold_until" | "repeat_until" | "sum"),
-                    Expr::Method(_, method, _) => matches!(method.as_str(), "map" | "filter" | "zip" | "scan"),
-                    _ => false,
-                });
-                (expensive && (stable(&args[0], env, p) || visit(&args[0], env, p, work, depth + 1)))
-                    || args[1..].iter().any(|e| visit(e, env, p, work, depth + 1))
+            _=>{},
+        }
+        pending.extend(analysis::children(e).into_iter().map(|e|(e,depth+1)));
+    }
+    false
+}
+
+/// Discover sufficient captured-input conditions for reusable work. Unlike the
+/// old Boolean opportunity scan this retains all reached alternatives within its
+/// budget, so a factory with an entirely changing mask can use its ordinary body.
+/// Binding fallback remains conservative; these conditions grant no authority.
+fn opportunities(expression: &Expr, env: &Dependencies, p: &Program, sums: &BTreeMap<usize,bool>) -> Vec<BTreeSet<Input>> {
+    struct Search<'a> {p:&'a Program,sums:&'a BTreeMap<usize,bool>,work:usize,found:Vec<BTreeSet<Input>>}
+    impl Search<'_> {
+        fn retain(&mut self,e:&Expr,env:&Dependencies) {
+            if !direct_read(e) && retention_work(e,self.p) {
+                if let Some(origins)=dependencies(e,env,self.p) {
+                    // A sufficient condition implied by an existing easier one
+                    // adds no opportunity. Whole-input stability implies every
+                    // descendant projection, in the same captured policy.
+                    let implies=|a:&BTreeSet<Input>,b:&BTreeSet<Input>| b.iter().all(|needed|
+                        a.iter().any(|have| have.parameter==needed.parameter && needed.path.starts_with(&have.path)));
+                    if self.found.iter().any(|old|implies(&origins,old)) {return;}
+                    self.found.retain(|old|!implies(old,&origins));
+                    if self.found.len()<64 {self.found.push(origins);}
+                }
             }
-            Expr::Call(name, args) if name == "repeat_until" && args.len() == 4 => {
-                callback(&args[2], env, 1, p, work, depth) || callback(&args[3], env, 2, p, work, depth)
+        }
+        fn callback(&mut self,e:&Expr,env:&Dependencies,count:usize,shape:Shape,depth:usize) {
+            let mut local=env.clone();let mut body=e;
+            for _ in 0..count {
+                let Expr::Lambda(name,rest)=body else {return;};
+                local.insert(name.clone(),shape.clone());body=rest;
             }
-            Expr::Call(name, args) if matches!(name.as_str(), "foldl" | "foldr" | "fold_until") => {
-                args[2..].iter().any(|e| callback(e, env, 2, p, work, depth))
+            self.visit(body,&local,depth+1);
+        }
+        fn visit(&mut self,e:&Expr,env:&Dependencies,depth:usize) {
+            if self.work==0 || depth>=32 {return;}self.work-=1;
+            match e {
+                Expr::Let(name,_,initial,rest)=>{
+                    self.retain(initial,env);self.visit(initial,env,depth+1);
+                    let mut local=env.clone();local.insert(name.clone(),returned(initial,env,self.p));
+                    self.visit(rest,&local,depth+1);
+                }
+                Expr::Call(name,args) if name=="choose" && args.len()==3=>{
+                    self.retain(&args[0],env);
+                    for arg in args {self.visit(arg,env,depth+1);}
+                }
+                Expr::Call(name,args) if name=="repeat_until" && args.len()==4=>{
+                    self.callback(&args[2],env,1,Shape::dynamic(),depth);
+                    self.callback(&args[3],env,2,Shape::dynamic(),depth);
+                }
+                Expr::Call(name,args) if matches!(name.as_str(),"foldl"|"foldr"|"fold_until")=>{
+                    for arg in &args[2..] {self.callback(arg,env,2,Shape::dynamic(),depth);}
+                }
+                Expr::Call(name,args)=>{
+                    if let Some(f)=self.p.functions.iter().find(|f| &f.name==name) {
+                        if !recursion::recursive(f) && !local_collections::owned(&f.result,self.p)
+                            && f.params.iter().all(|(_,t)|!local_collections::owned(t,self.p)) {
+                            let local=f.params.iter().zip(args).map(|((n,_),arg)|(n.clone(),returned(arg,env,self.p))).collect();
+                            self.visit(&f.body,&local,depth+1);
+                        }
+                        for arg in args {self.visit(arg,env,depth+1);}
+                    } else if matches!(name.as_str(),"list"|"Some"|"Ok"|"Err")
+                        || ink_core::primitives::primitive(name) || ink_core::word::primitive(name) {
+                        for arg in args {self.visit(arg,env,depth+1);}
+                    }
+                }
+                Expr::Method(receiver,method,args) if matches!(method.as_str(),"map"|"map_indexed"|"filter"|"fold"|"map_err")=>{
+                    let sum=self.sums.get(&(e as *const Expr as usize));
+                    for (i,arg) in args.iter().enumerate() {
+                        let shape=match sum {
+                            Some(true) if method=="fold" && i==1=>Shape::Value(Some(BTreeSet::new())),
+                            Some(_)=>Shape::Value(returned(receiver,env,self.p).origins()),
+                            None=>Shape::dynamic(),
+                        };
+                        self.callback(arg,env,if method=="map_indexed" {2}else{1},shape,depth);
+                    }
+                    if sum.is_some() {self.visit(receiver,env,depth+1);}
+                }
+                Expr::Method(receiver,method,args) if method=="concat"=>{
+                    self.visit(receiver,env,depth+1);for arg in args {self.visit(arg,env,depth+1);}
+                }
+                Expr::Method(receiver,_,_) if matches!(receiver.as_ref(),Expr::Call(..)|Expr::Let(..))=>self.visit(receiver,env,depth+1),
+                Expr::Binary(_,a,b)=>{self.visit(a,env,depth+1);self.visit(b,env,depth+1);}
+                Expr::Neg(a)|Expr::Field(a,_)=>self.visit(a,env,depth+1),
+                Expr::Record(_,fields)=>for (_,e) in fields {self.visit(e,env,depth+1);},
+                _=>{},
             }
-            Expr::Call(name, args) => {
-                let Some(f) = p.functions.iter().find(|f| &f.name == name) else {
-                    return (matches!(name.as_str(), "list" | "Some" | "Ok" | "Err")
-                        || ink_core::primitives::primitive(name) || ink_core::word::primitive(name))
-                        && args.iter().any(|e| visit(e, env, p, work, depth + 1));
-                };
-                if recursion::recursive(f) { return false; }
-                let local = f.params.iter().zip(args).map(|((n, _), arg)| (n.clone(), returned(arg, env, p))).collect();
-                visit(&f.body, &local, p, work, depth + 1)
-                    || args.iter().any(|e| visit(e, env, p, work, depth + 1))
-            }
-            Expr::Method(receiver, method, args) if matches!(method.as_str(), "map" | "map_indexed" | "filter") && args.len() == 1 => {
-                callback(&args[0], env, if method == "map_indexed" {2} else {1}, p, work, depth)
-                    || visit(receiver, env, p, work, depth + 1)
-            }
-            Expr::Method(receiver, method, args) if method == "concat" => visit(receiver, env, p, work, depth + 1)
-                || args.iter().any(|e| visit(e, env, p, work, depth + 1)),
-            Expr::Method(receiver, _, _) if matches!(receiver.as_ref(), Expr::Call(..) | Expr::Let(..)) => visit(receiver, env, p, work, depth + 1),
-            Expr::Binary(_, a, b) => visit(a, env, p, work, depth + 1) || visit(b, env, p, work, depth + 1),
-            Expr::Neg(a) | Expr::Field(a, _) => visit(a, env, p, work, depth + 1),
-            Expr::Record(_, fields) => fields.iter().any(|(_, e)| visit(e, env, p, work, depth + 1)),
-            _ => false,
         }
     }
-    visit(expression, env, p, &mut 512, 0)
+    let mut search=Search{p,sums,work:512,found:Vec::new()};search.visit(expression,env,0);search.found
 }
-fn useful(f: &Function, shapes: &[Shape], p: &Program) -> bool {
-    let env = f.params.iter().zip(shapes).map(|((n,_),shape)| (n.clone(),shape.clone())).collect();
-    potential(&f.body, &env, p)
+fn potential(expression:&Expr,env:&Dependencies,p:&Program,sums:&BTreeMap<usize,bool>)->bool {
+    !opportunities(expression,env,p,sums).is_empty()
+}
+fn useful(f:&Function,shapes:&[Shape],p:&Program,sums:&BTreeMap<usize,bool>)->Vec<BTreeSet<Input>> {
+    let env=f.params.iter().zip(shapes).map(|((n,_),shape)|(n.clone(),shape.clone())).collect();
+    opportunities(&f.body,&env,p,sums)
 }
 
 #[derive(Default)]
@@ -257,6 +296,24 @@ struct Preparation {
     count: usize,
     delegated: usize,
     masks: BTreeMap<String, String>,
+}
+impl Preparation {
+    fn policy(&mut self, expression: String, emitter: &mut Emitter<'_>) -> String {
+        if matches!(expression.as_str(),"true"|"false") {return expression;}
+        if let Some(name) = self.masks.get(&expression) {return name.clone();}
+        let name = emitter.fresh();
+        // This only reads the factory's private immutable policy, never source
+        // values, guards or branches. Identical tests can share one binding.
+        self.declarations.push_str(&format!("const {name}={expression};\n"));
+        self.masks.insert(expression,name.clone());name
+    }
+}
+
+/// Caching a literal or immutable lexical projection adds an avoidable branch.
+/// Calls and computed receivers keep their original evaluation/cache behavior.
+fn direct_read(mut expression: &Expr) -> bool {
+    while let Expr::Field(receiver,_) = expression {expression=receiver;}
+    matches!(expression,Expr::Var(_)|Expr::Num(_)|Expr::Float(_)|Expr::Double(_)|Expr::Bool(_)|Expr::String(_)|Expr::Unit)
 }
 
 
@@ -274,10 +331,10 @@ fn binding(emitter: &mut Emitter<'_>, expression: &Expr, env: &Env, deps: &Depen
     plan.count += 1;
     if plan.count > 64 { return Err("prepared residual binding budget".into()); }
     let var = emitter.fresh();
-    if let Some(found) = dependencies(expression, deps, emitter.p).filter(|_| readonly) {
-        let cache = emitter.fresh(); let ready = emitter.fresh(); let eligible = emitter.fresh();
-        let test = eligibility(&Some(found));
-        plan.declarations.push_str(&format!("const {eligible}={};let {ready}=false,{cache};\n", if test.is_empty() {"true"} else {&test}));
+    if let Some(found) = dependencies(expression, deps, emitter.p).filter(|_| readonly && !direct_read(expression) && retention_work(expression,emitter.p)) {
+        let cache = emitter.fresh(); let ready = emitter.fresh();
+        let eligible = plan.policy(eligibility(&Some(found)),emitter);
+        plan.declarations.push_str(&format!("let {ready}=false,{cache};\n"));
         emitter.line(format!("let {var};if({eligible}&&{ready}){{{var}={cache};}}else{{"));
         let value = residual(emitter, expression, env.clone(), deps.clone(), ty, plan, depth + 1)?;
         emitter.line(format!("{var}={value};if({eligible}){{{cache}={var};{ready}=true;}}}}"));
@@ -378,13 +435,16 @@ fn factory(emitter: &mut Emitter<'_>, f: &Function, index: usize) -> LangResult<
         env.insert(name.clone(), (var, ty.clone()));
         dependencies.insert(name.clone(), Shape::Input(Input{parameter:i,path:Vec::new()}));
     }
+    let reusable=opportunities(&f.body,&dependencies,emitter.p,&emitter.prepared_sums);
+    let reusable=reusable.iter().map(|origins|format!("({})",eligibility(&Some(origins.clone())))).collect::<Vec<_>>().join("||");
+    if reusable.is_empty() {return Err("no reusable captured work".into());}
     let mut plan = Preparation::default();
     emitter.lines.clear();
     let value = residual(emitter, &f.body, env, dependencies, &f.result,
         &mut plan, 0)?;
     if plan.retained == 0 && plan.delegated == 0 { return Err("no reusable lexical bindings".into()); }
     let declarations = plan.declarations;
-    let source = format!("function __prepareFn{index}(fixed,depth=0){{if(depth>=16)return __fn{index};{declarations}return function({}){{{}return {value};}};}}\n", vars.join(","), emitter.lines);
+    let source = format!("function __prepareFn{index}(fixed,depth=0){{if(depth>=16||!({reusable}))return __fn{index};{declarations}return function({}){{{}return {value};}};}}\n", vars.join(","), emitter.lines);
     if source.len() > 131_072 { return Err("prepared residual source budget".into()); }
     Ok((source, plan.retained, plan.delegated))
 }
@@ -465,13 +525,7 @@ fn residual(emitter: &mut Emitter<'_>, body: &Expr, mut env: Env,
             // The condition executes at its original source position. Stable
             // successful checks may persist; dynamic guards and unvisited
             // branches remain dynamic/lazy, and thrown failures are retried.
-            let mut expensive = false;
-            analysis::walk(&args[0], |e| expensive |= match e {
-                Expr::Call(name, _) => emitter.p.functions.iter().any(|f| &f.name == name)
-                    || matches!(name.as_str(), "foldl" | "foldr" | "fold_until" | "repeat_until" | "sum"),
-                Expr::Method(_, method, _) => matches!(method.as_str(), "map" | "filter" | "zip" | "scan"),
-                _ => false,
-            });
+            let expensive = retention_work(&args[0],emitter.p);
             let condition = if expensive {
                 binding(emitter, &args[0], &env, &deps, &Type::Bool, true, plan, depth)?
             } else {
@@ -491,7 +545,8 @@ fn residual(emitter: &mut Emitter<'_>, body: &Expr, mut env: Env,
             // residual helper. The mask carries transitive parameter provenance,
             // never an identity/trust claim about its runtime values.
             let possible = args.iter().map(|arg| returned(arg, &deps, emitter.p)).collect::<Vec<_>>();
-            if !recursion::recursive(f) && useful(f, &possible, emitter.p) && !local_collections::owned(&f.result, emitter.p)
+            let reusable=useful(f,&possible,emitter.p,&emitter.prepared_sums);
+            if !recursion::recursive(f) && !reusable.is_empty() && !local_collections::owned(&f.result, emitter.p)
                 && !f.params.iter().any(|(_, t)| local_collections::owned(t, emitter.p)) {
                 let f = f.clone(); let mut actuals = Vec::new(); let mut fixed = Vec::new();
                 for (arg, (_, ty)) in args.iter().zip(&f.params) {
@@ -502,10 +557,16 @@ fn residual(emitter: &mut Emitter<'_>, body: &Expr, mut env: Env,
                     fixed.push(returned(arg, &deps, emitter.p).mask(plan,emitter));
                 }
                 let helper = emitter.fresh(); let factory = emitter.fresh();
+                let test=reusable.iter().map(|origins|format!("({})",eligibility(&Some(origins.clone())))).collect::<Vec<_>>().join("||");
+                let active=plan.policy(format!("depth<15&&__preparedFactories.has({index})&&({test})"),emitter);
                 plan.declarations.push_str(&format!("let {helper};\n"));
-                emitter.line(format!("if(!{helper}){{const {factory}=__preparedFactories.get({index});{helper}={factory}?{factory}([{}],depth+1):__fn{index};}}",fixed.join(",")));
+                let out=emitter.fresh();
+                // Keep a direct ordinary call when this captured policy cannot
+                // reuse work. Even an ordinary function hidden behind a helper
+                // variable can lose target-engine inlining in a hot loop.
+                emitter.line(format!("let {out};if({active}){{if(!{helper}){{const {factory}=__preparedFactories.get({index});{helper}={factory}([{}],depth+1);}}{out}={helper}({});}}else{{{out}=__fn{index}({});}}",fixed.join(","),actuals.join(","),actuals.join(",")));
                 plan.delegated += 1;
-                return Ok(format!("{helper}({})", actuals.join(",")));
+                return Ok(out);
             }
         }
     }
@@ -531,6 +592,58 @@ fn residual(emitter: &mut Emitter<'_>, body: &Expr, mut env: Env,
             }
         }
         if let Ok(ty) = emitter.infer(receiver, &env, None) {
+            if matches!(ty, Type::Option(_) | Type::Result(..))
+                && !local_collections::owned(&ty, emitter.p) && !local_collections::owned(result, emitter.p)
+                && ((method == "fold" && args.len() == 2)
+                    || (matches!(method.as_str(), "map" | "map_err") && args.len() == 1))
+                && args.iter().all(|arg| shared_callback(arg,&env,emitter.p)) {
+                // The receiver executes exactly once before its selected arm.
+                // A stable complete sum makes its immutable payload stable; a
+                // changing sum never inherits the stability of lexical captures.
+                let payload = Shape::Value(returned(receiver,&deps,emitter.p).origins());
+                let value = residual(emitter,receiver,env.clone(),deps.clone(),&ty,plan,depth+1)?;
+                let value = emitter.equality.sums.view_type(emitter.p,&ty,&value)?;
+                let value = emitter.bind(&value);
+                let (a,b,tag_a,tag_b) = match &ty {
+                    Type::Option(a) => (a.as_ref().clone(),Type::Unit,"Some","None"),
+                    Type::Result(a,b) => (a.as_ref().clone(),b.as_ref().clone(),"Ok","Err"),
+                    _ => unreachable!(),
+                };
+                let tag = if method == "map_err" {tag_b} else {tag_a};
+                let out = emitter.fresh();
+                emitter.line(format!("let {out};if(Object.hasOwn({value},{})){{",super::quote(tag)));
+                let inner = if method == "map_err" {&b} else {&a};
+                let item = emitter.bind(&format!("{value}[{}]",super::quote(tag)));
+                let (body,local,mut found) = callback(&args[0],&env,&deps,&[(item,inner.clone())])?;
+                let Expr::Lambda(name,_) = &args[0] else {return Err("prepared sum callback".into())};
+                found.insert(name.clone(),payload.clone());
+                let mapped = match (method.as_str(),result) {
+                    ("fold",_) => result,
+                    ("map",Type::Option(a)) | ("map",Type::Result(a,_)) | ("map_err",Type::Result(_,a)) => a.as_ref(),
+                    _ => return Err("prepared sum result".into()),
+                };
+                let mapped = residual(emitter,body,local,found,mapped,plan,depth+1)?;
+                let mapped = if method == "fold" {mapped} else {
+                    emitter.equality.sums.make_type(emitter.p,result,tag,&mapped)?
+                };
+                emitter.line(format!("{out}={mapped};}}else{{"));
+                if method == "fold" {
+                    let item = emitter.bind(&if tag_b == "None" {"null".into()}
+                        else {format!("{value}[{}]",super::quote(tag_b))});
+                    let (body,local,mut found) = callback(&args[1],&env,&deps,&[(item,b)])?;
+                    let Expr::Lambda(name,_) = &args[1] else {return Err("prepared sum callback".into())};
+                    found.insert(name.clone(),if tag_b == "None" {Shape::Value(Some(BTreeSet::new()))} else {payload});
+                    let mapped = residual(emitter,body,local,found,result,plan,depth+1)?;
+                    emitter.line(format!("{out}={mapped};}}"));
+                } else {
+                    let other = if method == "map_err" {tag_a} else {tag_b};
+                    let passthrough = if other == "None" {value.clone()} else {
+                        emitter.equality.sums.make_type(emitter.p,result,other,&format!("{value}[{}]",super::quote(other)))?
+                    };
+                    emitter.line(format!("{out}={passthrough};}}"));
+                }
+                return Ok(out);
+            }
             if matches!(ty, Type::Option(_) | Type::Result(..)) && !local_collections::owned(&ty, emitter.p)
                 && matches!(receiver.as_ref(), Expr::Call(..) | Expr::Let(..)) {
                 // Preserve the ordinary sum method and its lazy callback. Only its
@@ -544,7 +657,7 @@ fn residual(emitter: &mut Emitter<'_>, body: &Expr, mut env: Env,
             }
         }
     }
-    if potential(body, &deps, emitter.p) {
+    if potential(body, &deps, emitter.p, &emitter.prepared_sums) {
         strict(emitter, body, env, deps, result, plan, depth)
     } else { ordinary(emitter, body, &env, result) }
 }
@@ -554,6 +667,25 @@ pub(super) fn emit(emitter: &mut Emitter<'_>) -> (String, Vec<Value>) {
     // emitter's work budget or reject an otherwise supported checked program.
     emitter.budget = 200_000;
     emitter.depth = 0;
+    emitter.prepared_sums.clear();
+    let mut work = 200_000;
+    for f in &emitter.p.functions {
+        let Some(nodes) = analysis::node_count(&f.body,work.min(4096)) else {continue};
+        work -= nodes;
+        // Reuse core lexical/type traversal. This optional classification only
+        // informs opportunity search; actual emission checks the type again.
+        let _ = analysis::typed_walk(emitter.p,f,|expression,env| {
+            if let Expr::Method(receiver,method,_) = expression {
+                if matches!(method.as_str(),"fold"|"map"|"map_err") {
+                    match ink_core::check::infer(receiver,env,emitter.p) {
+                        Ok(Type::Option(_)) => {emitter.prepared_sums.insert(expression as *const Expr as usize,true);}
+                        Ok(Type::Result(..)) => {emitter.prepared_sums.insert(expression as *const Expr as usize,false);}
+                        _ => {},
+                    }
+                }
+            }
+        });
+    }
     let mut source = String::from(r#"
 function __preparedPart(mask,path){
  for(const field of path){
