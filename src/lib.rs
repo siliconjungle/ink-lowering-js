@@ -23,6 +23,7 @@ mod value_reduce;
 mod primitives;
 mod count_carrier;
 mod prepared;
+mod helper_inline;
 type Env = BTreeMap<String, (String, Type)>;
 /// Fixed word operations with JavaScript's own 32-bit operators. u32 values
 /// are Numbers in [0, 2^32) and i32 values Numbers in [-2^31, 2^31); the
@@ -237,7 +238,7 @@ struct Emitter<'a> {
     /// Unique-ownership facts of the function being emitted (see
     /// `ink_core::in_place`). Empty for recursive functions.
     in_place: ink_core::in_place::InPlace,
-    /// Lexical scalar records and loop-carried internal records held as one
+    /// Immutable lexical records and loop-carried records held as one
     /// local per field. Maps each fresh logical binding to its components.
     split: BTreeMap<String, Vec<(String, String)>>,
     /// Immutable emitted locals known to hold rounded native Numbers, rather
@@ -249,6 +250,9 @@ struct Emitter<'a> {
     /// Checked source sum-method sites for the bounded preparation opportunity
     /// scan. Keys use the core visitor's borrowed-expression identity convention.
     prepared_sums: BTreeMap<usize, bool>,
+    inline_depth: usize,
+    inline_nodes: usize,
+    inline_source: usize,
 }
 /// Fields of an emitted record literal whose values are all plain locals.
 fn record_literal_fields(value: &str, fields: &[String]) -> Option<Vec<String>> {
@@ -268,21 +272,23 @@ fn record_literal_fields(value: &str, fields: &[String]) -> Option<Vec<String>> 
         .collect()
 }
 impl Emitter<'_> {
-    /// The internal loop-state record fields, when `t` can be held split.
+    /// Immutable user records and existing internal loop carriers can keep
+    /// one local per field. Owned user records retain ordinary affine storage.
     fn split_fields(&self, t: &Type) -> Option<Vec<String>> {
         let Type::Named(name) = t else { return None };
-        if !name.starts_with("__ink_loop") || self.equality.elisions.contains(name) {
+        if self.equality.elisions.contains(name) || (!name.starts_with("__ink_loop") && ink_core::local_collections::owned(t,self.p)) {
             return None;
         }
-        Some(self.p.records.get(name)?.iter().map(|(f, _)| f.clone()).collect())
+        let fields=self.p.records.get(name)?;
+        if !name.starts_with("__ink_loop") && fields.len()>64 {return None;}
+        Some(fields.iter().map(|(f, _)| f.clone()).collect())
     }
-    /// Keep already-evaluated scalar record literals in locals. This is only
+    /// Keep already-evaluated immutable record literals in locals. This is only
     /// invocation-local storage: whole-value uses reconstruct the ordinary record.
     fn lexical_value(&mut self, value: &str, ty: &Type) -> String {
         if let Type::Named(name) = ty {
             if !self.equality.elisions.contains(name) {
-                if let Some(fields) = self.p.records.get(name).filter(|fields| fields.iter().all(|(_, t)|
-                    matches!(t, Type::F32 | Type::U32 | Type::U64 | Type::I32 | Type::Bool | Type::Unit))) {
+                if let Some(fields) = self.p.records.get(name).filter(|fields| fields.len()<=64 && !ink_core::local_collections::owned(ty,self.p)) {
                     let names = fields.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
                     if let Some(locals) = record_literal_fields(value, &names) {
                         let logical = self.fresh();
@@ -1513,11 +1519,19 @@ impl Emitter<'_> {
                     .find(|(_, f)| &f.name == n)
                     .ok_or("unknown JavaScript function")?;
                 let f = f.clone();
+                let inline = helper_inline::eligible(self,&f);
                 let mut values = Vec::new();
+                // Every argument executes once, left to right, before entering
+                // an expanded body. Keep local record fields when possible;
+                // a failed or unhelpful expansion rebuilds the ordinary value.
                 for (expr, (_, ty)) in args.iter().zip(&f.params) {
                     let value = self.expr(expr, env, Some(ty))?;
-                    values.push(self.bind(&value));
+                    values.push(if inline {self.lexical_value(&value,ty)} else {self.bind(&value)});
                 }
+                if inline {
+                    if let Some(value)=helper_inline::call(self,&f,&values) {return Ok(value);}
+                }
+                let values=values.iter().map(|v|if self.split.contains_key(v){self.rebuild(v)}else{v.clone()}).collect::<Vec<_>>();
                 Ok::<_, String>(format!("__fn{index}({})", values.join(",")))?
             }
             Expr::Method(xs, method, args)
@@ -1670,6 +1684,9 @@ fn lower_with_layout(
         f32_numbers: BTreeSet::new(),
         immutable_locals: BTreeSet::new(),
         prepared_sums: BTreeMap::new(),
+        inline_depth: 0,
+        inline_nodes: 16_384,
+        inline_source: 262_144,
     };
     let mut javascript = String::new();
     let mut functions = vec![];

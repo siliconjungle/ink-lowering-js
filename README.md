@@ -291,6 +291,14 @@ and failure retry remain unchanged. Bounded structural work conditions can retai
 a direct ordinary call when a captured policy offers no useful preparation.
 See the distribution's `docs/prepared-sum-callbacks.md` and complete controls.
 
+Immutable record fields can remain in local variables across value loops and
+bounded readonly helper expansion, including F64 and immutable composite fields.
+Every argument/field still executes in order; whole values reconstruct normally,
+and owned values retain their loan/storage rules. Independent expansion/source
+limits and compiler-stack headroom keep ordinary-call fallback. This is literal
+execution support, not graph rewrite or profitable-selection authority. See the
+distribution's `docs/local-record-helpers.md` and matched text/neural controls.
+
 ## License
 
 Project code and documentation are [MIT licensed](LICENSE). Third-party dependencies,

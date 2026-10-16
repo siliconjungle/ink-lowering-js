@@ -58,3 +58,11 @@ strict defaults and thrown failure retry keep source behavior. Bounded opportuni
 conditions and structural work estimates affect only explicit preparation, never
 proof/evidence authority. Keep direct ordinary calls for non-reusable captured
 policies, and share private policy predicates without evaluating source work.
+
+Local immutable record fields can cross bounded readonly helper expansion and
+value loops. Arguments/fields evaluate once before the callee; aliases, worker
+captures and simultaneous updates retain snapshots. Expanded parameters stay
+shared. Preserve owned/recursive/codec fallback, account for returned expression
+bytes, and reserve stack headroom for core visitors. Failed optional emission
+restores its lines/callbacks/type helpers/field mappings/fresh names and ordinary
+admission budget. Structural expansion grants no equality or profitability fact.
