@@ -66,3 +66,6 @@ shared. Preserve owned/recursive/codec fallback, account for returned expression
 bytes, and reserve stack headroom for core visitors. Failed optional emission
 restores its lines/callbacks/type helpers/field mappings/fresh names and ordinary
 admission budget. Structural expansion grants no equality or profitability fact.
+Record merges inside expanded helpers evaluate only the selected branch and
+assign fresh field slots after its work. Whole-value uses rebuild normally;
+mutable merge slots must never become immutable-number or alias facts by name.

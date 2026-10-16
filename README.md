@@ -298,6 +298,8 @@ and owned values retain their loan/storage rules. Independent expansion/source
 limits and compiler-stack headroom keep ordinary-call fallback. This is literal
 execution support, not graph rewrite or profitable-selection authority. See the
 distribution's `docs/local-record-helpers.md` and matched text/neural controls.
+Conditional record results inside expanded helpers merge their fields lazily,
+avoiding a carrier allocation followed immediately by unpacking.
 
 ## License
 

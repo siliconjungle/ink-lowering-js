@@ -3,6 +3,67 @@
 use super::{Emitter, Env};
 use ink_core::{analysis, local_collections, recursion, syntax::*};
 
+/// A record produced inside an expanded helper can merge its fields directly.
+/// This avoids rebuilding a carrier merely to unpack it again in the caller.
+pub(super) fn choose_record(
+    e: &mut Emitter<'_>,
+    args: &[Expr],
+    env: &Env,
+    ty: &Type,
+) -> Option<ink_core::LangResult<String>> {
+    let Type::Named(name) = ty else {
+        return None;
+    };
+    if e.inline_depth == 0
+        || e.equality.elisions.contains(name)
+        || local_collections::owned(ty, e.p)
+    {
+        return None;
+    }
+    let fields = e.p.records.get(name)?;
+    if fields.len() > 64 {
+        return None;
+    }
+    let fields = fields
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    Some((|| {
+        let condition = e.expr(&args[0], env, Some(&Type::Bool))?;
+        let locals = fields.iter().map(|_| e.fresh()).collect::<Vec<_>>();
+        for local in &locals {
+            e.line(format!("let {local};"));
+        }
+        e.line(format!("if({condition}){{"));
+        for (index, branch) in args[1..].iter().enumerate() {
+            let value = e.expr(branch, env, Some(ty))?;
+            let values = match super::record_literal_fields(&value, &fields) {
+                Some(values) => values,
+                None => {
+                    let value = e.bind(&value);
+                    fields
+                        .iter()
+                        .map(|field| format!("{value}[{}]", super::quote(field)))
+                        .collect()
+                }
+            };
+            for (local, value) in locals.iter().zip(values) {
+                e.line(format!("{local}={value};"));
+            }
+            e.line(if index == 0 { "}else{" } else { "}" });
+        }
+        Ok(format!(
+            "({{{}}})",
+            fields
+                .iter()
+                .zip(locals)
+                .map(|(field, value)| format!("[{}]:{value}", super::quote(field)))
+                .collect::<Vec<_>>()
+                .join(",")
+        ))
+    })())
+}
+
 pub(super) fn eligible(e: &Emitter<'_>, f: &Function) -> bool {
     if e.inline_depth >= 4
         || e.inline_nodes == 0

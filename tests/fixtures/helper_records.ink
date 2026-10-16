@@ -15,6 +15,15 @@ fn projected(x:f64,y:f64,n:u32)->List<f64> {
     return [r.a,alias.a,r.b,alias.b,r.values.at_or(n,x),f64_from_u32(r.index)];
 }
 fn pick(n:Nested)->List<f64> {return [n.lane.a,n.lane.b,n.extra];}
+fn branch(r:Lane,n:u32)->Lane {
+    let changed=choose(n==0,Lane{..r,a:-r.b},Lane{..r,b:-r.a});
+    let alias=changed;
+    return choose(n==1,alias,advance(Lane{..changed,values:alias.values}));
+}
+fn selected(x:f64,y:f64,n:u32)->Lane {
+    let r=Lane{a:x,b:y,index:n,stop:false,label:"branch",values:[x,y]};
+    return branch(r,n);
+}
 fn nested(x:f64,y:f64,n:u32)->List<f64> {
     let r=Lane{a:x,b:y,index:n,stop:false,label:"nested",values:[x,y]};
     let outer=Nested{lane:r,extra:-y};return pick(outer);

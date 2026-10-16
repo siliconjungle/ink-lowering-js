@@ -52,6 +52,7 @@ fn local_record_helpers_preserve_aliases_composites_owned_fallback_and_all_bits(
                 for name in [
                     "drive",
                     "projected",
+                    "selected",
                     "nested",
                     "aliases",
                     "owned",
@@ -130,6 +131,6 @@ console.log(JSON.stringify({cases:cases.length,calls,exactTypedBytes:true}));
         }
         observations += cases.len();
     }
-    assert_eq!(observations, 960);
+    assert_eq!(observations, 1080);
     fs::remove_dir_all(root).unwrap();
 }

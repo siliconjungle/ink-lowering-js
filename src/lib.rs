@@ -1098,6 +1098,7 @@ impl Emitter<'_> {
                 format!("[{}]", values.join(","))
             }
             Expr::Call(n, args) if n == "choose" => {
+                if let Some(value)=helper_inline::choose_record(self,args,env,&t) {return value;}
                 let c = self.expr(&args[0], env, Some(&Type::Bool))?;
                 let out = self.fresh();
                 self.line(format!("let {out};if({c}){{"));
