@@ -79,5 +79,5 @@ for(const file of ['program.mjs','flat.mjs']){
  const again=x=>c.optional.result.materialize(m.callPreparedCompiled(retry,[c.optional.params[1].capture(x)]));
  try{assert.equal(again({None:null}),false);assert.equal(attempts,0);assert.throws(()=>again({Some:7}),e=>e===sentinel);assert.equal(again({None:null}),false);assert.equal(again({Some:1}),true);assert.equal(again({Some:7}),false);assert.equal(attempts,2);}finally{globalThis.Map=NativeMap;}
  delete globalThis.__sumSourceMap;
- console.log(JSON.stringify({module:file,referenceCases:cases.length,calls,selectedArmsLazy:true,capturedPayloadRetained:true,dynamicPayloadFresh:true,defaultStrict:true,failedWorkRetried:true}));
+ console.log(JSON.stringify({module:file,source_core:m.metadata.core_sha256,referenceCases:cases.length,calls,selectedArmsLazy:true,capturedPayloadRetained:true,dynamicPayloadFresh:true,defaultStrict:true,failedWorkRetried:true}));
 }

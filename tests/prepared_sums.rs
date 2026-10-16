@@ -42,10 +42,18 @@ fn sum_preparation_preserves_selected_arms_payloads_ownership_and_private_layout
   let layouts=sum_codec::source_types(&m).unwrap().iter().filter(|t|sum_codec::schema(&m,t).is_ok()).map(|t|checked_sums::layout(&m,t)).collect::<Vec<_>>();
   assert!(!layouts.is_empty());
   let physical:physical::Plan=serde_json::from_value(json!({"schema":1,"semantics":physical::SEMANTICS,"input_core_sha256":m.identity().unwrap(),"sum_spines":layouts})).unwrap();
-  let checked=planning::check(&m,&planning::Package{schema:1,semantics:planning::SEMANTICS.into(),input_core_sha256:m.identity().unwrap(),steps:vec![planning::Step::Physical(physical)]}).unwrap();
+  let package=planning::Package{schema:1,semantics:planning::SEMANTICS.into(),input_core_sha256:m.identity().unwrap(),steps:vec![planning::Step::Physical(physical)]};
+  let checked=planning::check(&m,&package).unwrap();
   fs::write(root.join("flat.mjs"),ink_lowering_js::lower_planned(&checked).unwrap().javascript).unwrap();
   let result=Command::new("node").arg(root.join("test.mjs")).output().unwrap();
   assert!(result.status.success(),"{carrier}: {}{}",String::from_utf8_lossy(&result.stdout),String::from_utf8_lossy(&result.stderr));println!("{carrier}: {}",String::from_utf8_lossy(&result.stdout));
+  if let Some(output)=std::env::var_os("INK_PREPARED_SUM_ARTIFACTS") {
+   let output=std::path::PathBuf::from(output).join(carrier);fs::create_dir_all(&output).unwrap();
+   for file in ["cases.json","program.mjs","flat.mjs"] {fs::copy(root.join(file),output.join(file)).unwrap();}
+   fs::write(output.join("source.core.json"),m.bytes().unwrap()).unwrap();
+   fs::write(output.join("layout.json"),serde_json::to_vec(&package).unwrap()).unwrap();
+   fs::write(output.join("observations.jsonl"),&result.stdout).unwrap();
+  }
  }
  fs::remove_dir_all(root).unwrap();
 }
