@@ -1,7 +1,7 @@
 //! Bounded literal helper expansion. This changes local storage and call
 //! boundaries, not source arithmetic, contracts, or implementation selection.
 use super::{Emitter, Env};
-use ink_core::{analysis, local_collections, recursion, syntax::*};
+use ink_core::{analysis, recursion, syntax::*};
 
 /// A record produced inside an expanded helper can merge its fields directly.
 /// This avoids rebuilding a carrier merely to unpack it again in the caller.
@@ -16,7 +16,6 @@ pub(super) fn choose_record(
     };
     if e.inline_depth == 0
         || e.equality.elisions.contains(name)
-        || local_collections::owned(ty, e.p)
     {
         return None;
     }
@@ -68,10 +67,6 @@ pub(super) fn eligible(e: &Emitter<'_>, f: &Function) -> bool {
     if e.inline_depth >= 4
         || e.inline_nodes == 0
         || recursion::recursive(f)
-        || local_collections::owned(&f.result, e.p)
-        || f.params
-            .iter()
-            .any(|(_, t)| local_collections::owned(t, e.p))
         || !f
             .params
             .iter()
@@ -115,6 +110,9 @@ pub(super) fn call(e: &mut Emitter<'_>, f: &Function, actuals: &[String]) -> Opt
     let float_scan = e.float_scan_work;
     let next = e.next;
     let budget = e.budget;
+    // Parameter storage remains shared in the callee's own List analysis.
+    // Affine Buffer/Map handles are neither cloned nor promoted by expansion;
+    // source admission already checks their moves and readonly loans.
     let in_place = std::mem::replace(
         &mut e.in_place,
         ink_core::in_place::analyse_with_result(&f.body, &f.params, Some(&f.result), e.p),

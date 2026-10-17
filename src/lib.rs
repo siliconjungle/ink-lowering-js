@@ -290,23 +290,24 @@ fn record_literal_fields(value: &str, fields: &[String]) -> Option<Vec<String>> 
         .collect()
 }
 impl Emitter<'_> {
-    /// Immutable user records and existing internal loop carriers can keep
-    /// one local per field. Owned user records retain ordinary affine storage.
+    /// Checked records can keep one local per field, including affine buffer
+    /// fields. This only changes the wrapper: each owner is still the same
+    /// checked private handle, and simultaneous updates retain field snapshots.
     fn split_fields(&self, t: &Type) -> Option<Vec<String>> {
         let Type::Named(name) = t else { return None };
-        if self.equality.elisions.contains(name) || (!name.starts_with("__ink_loop") && ink_core::local_collections::owned(t,self.p)) {
+        if self.equality.elisions.contains(name) {
             return None;
         }
         let fields=self.p.records.get(name)?;
         if !name.starts_with("__ink_loop") && fields.len()>64 {return None;}
         Some(fields.iter().map(|(f, _)| f.clone()).collect())
     }
-    /// Keep already-evaluated immutable record literals in locals. This is only
+    /// Keep already-evaluated record literals in locals. This is only
     /// invocation-local storage: whole-value uses reconstruct the ordinary record.
     fn lexical_value(&mut self, value: &str, ty: &Type) -> String {
         if let Type::Named(name) = ty {
             if !self.equality.elisions.contains(name) {
-                if let Some(fields) = self.p.records.get(name).filter(|fields| fields.len()<=64 && !ink_core::local_collections::owned(ty,self.p)) {
+                if let Some(fields) = self.p.records.get(name).filter(|fields| fields.len()<=64) {
                     let names = fields.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
                     if let Some(locals) = record_literal_fields(value, &names) {
                         let logical = self.fresh();
@@ -327,12 +328,21 @@ impl Emitter<'_> {
     }
     /// Start a loop over a split state: one mutable local per field.
     fn split_state(&mut self, initial: &str, fields: &[String]) -> String {
-        let init = self.bind(initial);
+        // A literal constructor's fields have already executed into snapshots.
+        // Do not allocate its wrapper just to read those same private slots.
+        let initial_fields = match record_literal_fields(initial,fields) {
+            Some(values) => values,
+            None => {
+                let init=self.bind(initial);
+                fields.iter().map(|f|format!("{init}[{}]",quote(f))).collect()
+            }
+        };
         let components: Vec<(String, String)> = fields
             .iter()
-            .map(|f| {
+            .zip(initial_fields)
+            .map(|(f,value)| {
                 let c = self.fresh();
-                self.line(format!("let {c}={init}[{}];", quote(f)));
+                self.line(format!("let {c}={value};"));
                 (f.clone(), c)
             })
             .collect();
@@ -1464,9 +1474,20 @@ impl Emitter<'_> {
                 let xs = self.expr(&args[0], env, None)?;
                 let xs = self.bind(&xs);
                 let initial = self.expr(&args[1], env, Some(&t))?;
-                let out = self.fresh();
+                // Affine record wrappers are private source values. A readonly
+                // record is split only when its constructor is already local:
+                // do not eagerly read arbitrary borrowed host record fields on
+                // an empty fold or before the callback's source position.
+                let split = self.split_fields(&t).filter(|fields|
+                    ink_core::local_collections::owned(&t,self.p)
+                    || record_literal_fields(&initial,fields).is_some());
+                let out = match &split {
+                    Some(fields) => self.split_state(&initial,fields),
+                    None => {
+                        let out=self.fresh();self.line(format!("let {out}={initial};"));out
+                    }
+                };
                 let index = self.fresh();
-                self.line(format!("let {out}={initial};"));
                 self.normalized_scalar_slot(&out,&t);
                 self.line(if n == "foldr" {
                     format!("for(let {index}={xs}.length-1;{index}>=0;{index}--){{")
@@ -1485,12 +1506,12 @@ impl Emitter<'_> {
                 let (body, local) =
                     Self::callback(&args[if n == "fold_until" { 3 } else { 2 }], env, &values)?;
                 let value = self.expr(body, &local, Some(&t))?;
-                self.line(format!("{out}={value};"));
+                if split.is_some(){self.split_update(&out,&value);}else{self.line(format!("{out}={value};"));}
                 if let Some(flag) = stop {
                     self.line(format!("if({flag})break;"));
                 }
                 self.line("}");
-                out
+                if split.is_some(){let result=self.rebuild(&out);self.split.remove(&out);result}else{out}
             }
             Expr::Call(n, args) if n == "sum" || n == "count" => {
                 let context = if n == "sum" {
