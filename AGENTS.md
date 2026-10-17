@@ -72,6 +72,11 @@ admission budget. Structural expansion grants no equality or profitability fact.
 Record merges inside expanded helpers evaluate only the selected branch and
 assign fresh field slots after its work. Whole-value uses rebuild normally;
 mutable merge slots must never become immutable-number or alias facts by name.
+Direct checked Buffer/Map parameters and records containing owners may also
+expand without an already split argument. Retain the same owner handles and
+callee-local List sharing analysis. Recursive helpers, exhausted body/depth/source
+budgets and unsuccessful optional expansion retain ordinary calls; no bounds
+are raised. Owned-parameter functions remain internal to the temporary ABI.
 
 Normalized F32 carriers are rounded Numbers or exact NaN tags, not Number/range
 facts. Normalize used scalar parameters at entry; borrowed composite fields keep

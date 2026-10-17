@@ -70,7 +70,7 @@ pub(super) fn eligible(e: &Emitter<'_>, f: &Function) -> bool {
         || !f
             .params
             .iter()
-            .any(|(_, t)| matches!(t,Type::Named(n) if e.p.records.contains_key(n)))
+            .any(|(_, t)| matches!(t,Type::Named(n) if e.p.records.contains_key(n)) || ink_core::local_collections::owned(t,e.p))
     {
         return false;
     }
@@ -94,7 +94,11 @@ pub(super) fn eligible(e: &Emitter<'_>, f: &Function) -> bool {
 }
 
 pub(super) fn call(e: &mut Emitter<'_>, f: &Function, actuals: &[String]) -> Option<String> {
-    if !actuals.iter().any(|v| e.split.contains_key(v)) {
+    // Direct affine parameters already have checked moves/readonly loans.
+    // Expanding them keeps the same private handle; it grants no new List
+    // uniqueness, public owner capability, or retention across invocations.
+    if !actuals.iter().any(|v| e.split.contains_key(v))
+        && !f.params.iter().any(|(_,t)|ink_core::local_collections::owned(t,e.p)) {
         return None;
     }
     let nodes = analysis::node_count(&f.body, e.inline_nodes.min(512))?;
