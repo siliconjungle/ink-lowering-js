@@ -1723,7 +1723,7 @@ pub fn lower_planned(plan: &ink_core::planning::CheckedPlan) -> LangResult<Emiss
         emission.javascript=emission.javascript.replace("__createState(__stateMetadata,__actions,__stateInputCaptures,[],__densePrefixes)","__createState(__stateMetadata,__actions,__stateInputCaptures,__compiledMaintained,__densePrefixes)");
         emission.manifest["maintained"]=json!({"source":views.package().input_core_sha256,"keeps":views.package().views.iter().map(|v|&v.keep).collect::<Vec<_>>(),"knowledge_snapshot":views.package().knowledge.snapshot.root});
     }
-    emission.manifest["compiled_plan"]=json!({"source":plan.original().identity()?,"plan":ink_core::registry::identity(plan.package())?});
+    emission.manifest["compiled_plan"]=json!({"source":plan.original().identity()?,"plan":ink_core::planning::identity(plan.package())?});
     Ok(emission)
 }
 /// Emit selected code with the snapshot origin authenticated by the core.
