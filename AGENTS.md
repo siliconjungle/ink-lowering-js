@@ -105,3 +105,12 @@ Numbers. Keep pure-only borrowed getters lazy. Preserve NaN payloads, signed zer
 rounding points, ownership, and exact histories/checkpoints. Owned/recursive float
 bridge shapes or bounded emission exhaustion retain the old bit lane. This is
 literal representation machinery, with no equality or profitability authority.
+
+Private evaluated constructors may use bounded scalar-record helper signatures.
+Keep public borrowed getter demand/multiplicity, source-order arguments and unused
+fields, mutable loop/merge snapshots, ownership and original exports. Shared
+straight-line IEEE bindings reuse identical computed carriers only; retain zero
+products, distinct rounding points, NaN payloads and signed zero. Exclude owned
+and recursive outline shapes; register destination/prepared helpers before final
+emission. Reserve full ordinary wrappers and restore all facts on optional failure.
+No differentiation name, finite-range assumption or algebraic identity is involved.

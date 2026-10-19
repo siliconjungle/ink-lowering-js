@@ -702,6 +702,8 @@ function __preparedStable(mask,path){const part=__preparedPart(mask,path);return
 "#); let mut entries = Vec::new(); let mut metadata = Vec::new();
     for (index, f) in emitter.p.functions.iter().enumerate() {
         let callbacks = emitter.callbacks.len(); let equality = emitter.equality.clone();
+        let local_values = emitter.local_values.clone(); let outlines = emitter.outlines.clone();
+        emitter.local_values = Default::default();
         let budget = emitter.budget;
         emitter.split.clear(); emitter.lines.clear();
         match factory(emitter, f, index) {
@@ -711,6 +713,7 @@ function __preparedStable(mask,path){const part=__preparedPart(mask,path);return
             }
             result => {
                 emitter.callbacks.truncate(callbacks); emitter.equality = equality; emitter.budget = budget;
+                emitter.local_values = local_values; emitter.outlines = outlines;
                 let reason = match result { Err(e) => e, _ => "prepared module source budget".into() };
                 metadata.push(json!({"function":f.name,"factory":false,"reason":reason}));
             }

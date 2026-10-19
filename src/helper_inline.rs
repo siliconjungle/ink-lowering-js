@@ -107,6 +107,9 @@ pub(super) fn call(e: &mut Emitter<'_>, f: &Function, actuals: &[String]) -> Opt
     let callbacks = e.callbacks.len();
     let equality = e.equality.clone();
     let split = e.split.clone();
+    let local_values = e.local_values.clone();
+    let outlines = e.outlines.clone();
+    e.local_values.enabled &= super::scalar_records::straight(f,e.p);
     let immutable = e.immutable_locals.clone();
     let floats = e.f32_numbers.clone();
     let normalized = e.normalized_f32.clone();
@@ -138,6 +141,7 @@ pub(super) fn call(e: &mut Emitter<'_>, f: &Function, actuals: &[String]) -> Opt
     if let Ok(value) = result {
         if bytes <= 65_536 && bytes <= e.inline_source {
             e.inline_source -= bytes;
+            e.local_values.enabled = local_values.enabled;
             return Some(value);
         }
     }
@@ -145,6 +149,8 @@ pub(super) fn call(e: &mut Emitter<'_>, f: &Function, actuals: &[String]) -> Opt
     e.callbacks.truncate(callbacks);
     e.equality = equality;
     e.split = split;
+    e.local_values = local_values;
+    e.outlines = outlines;
     e.immutable_locals = immutable;
     e.f32_numbers = floats;
     e.normalized_f32 = normalized;

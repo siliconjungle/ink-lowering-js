@@ -25,6 +25,7 @@ mod primitives;
 mod count_carrier;
 mod prepared;
 mod helper_inline;
+mod scalar_records;
 mod float_islands;
 type Env = BTreeMap<String, (String, Type)>;
 const EXPRESSION_DEPTH: usize = 48;
@@ -272,6 +273,8 @@ struct Emitter<'a> {
     /// Checked source sum-method sites for the bounded preparation opportunity
     /// scan. Keys use the core visitor's borrowed-expression identity convention.
     prepared_sums: BTreeMap<usize, bool>,
+    local_values: scalar_records::LocalValues,
+    outlines: scalar_records::Outlines,
     inline_depth: usize,
     inline_nodes: usize,
     inline_source: usize,
@@ -312,6 +315,11 @@ impl Emitter<'_> {
         if let Type::Named(name) = ty {
             if !self.equality.elisions.contains(name) {
                 if let Some(fields) = self.p.records.get(name).filter(|fields| fields.len()<=64) {
+                    if let Some(slots) = self.local_values.slots(value) {
+                        let logical=self.fresh();
+                        self.split.insert(logical.clone(),slots);
+                        return logical;
+                    }
                     let names = fields.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
                     if let Some(locals) = record_literal_fields(value, &names) {
                         let logical = self.fresh();
@@ -323,11 +331,32 @@ impl Emitter<'_> {
         }
         self.bind(value)
     }
+    fn snapshot_record(&mut self, logical: &str) -> String {
+        let mut slots=self.split[logical].clone();
+        let mut changed=false;
+        for (_,value) in &mut slots {
+            let captured=if self.split.contains_key(value) {self.snapshot_record(value)} else {self.bind(value)};
+            changed |= captured != *value;
+            *value=captured;
+        }
+        if !changed {return logical.to_owned();}
+        let snapshot=self.fresh();
+        self.split.insert(snapshot.clone(),slots);
+        snapshot
+    }
+    fn record_value(&mut self, logical: &str) -> String {
+        // A nested immutable constructor must capture today's loop/merge
+        // fields, before any later simultaneous update of their mutable slots.
+        let snapshot=self.snapshot_record(logical);
+        let value=self.rebuild(&snapshot);
+        self.local_values.record(&value,self.split[&snapshot].clone());
+        value
+    }
     fn rebuild(&self, logical: &str) -> String {
         let components = &self.split[logical];
         format!(
             "({{{}}})",
-            components.iter().map(|(f, c)| format!("[{}]:{c}", quote(f))).collect::<Vec<_>>().join(",")
+            components.iter().map(|(f, c)| format!("[{}]:{}", quote(f), if self.split.contains_key(c) {self.rebuild(c)} else {c.clone()})).collect::<Vec<_>>().join(",")
         )
     }
     /// Start a loop over a split state: one mutable local per field.
@@ -390,9 +419,11 @@ impl Emitter<'_> {
     }
     fn bind(&mut self, value: &str) -> String {
         if self.immutable_locals.contains(value) { return value.to_owned(); }
+        if let Some(local) = self.local_values.reuse(value) { return local; }
         let name = self.fresh();
         self.line(format!("const {name}={value};"));
         self.immutable_locals.insert(name.clone());
+        self.local_values.bound(value, &name);
         if self.f32_numbers.contains(value) { self.f32_numbers.insert(name.clone()); }
         if self.normalized_f32.contains(value) { self.normalized_f32.insert(name.clone()); }
         name
@@ -901,6 +932,7 @@ impl Emitter<'_> {
                 }
                 self.normalized_f32.insert(value.clone());
             }
+            self.local_values.expression(e, &value, self.captured_f32, self.infer(e,env,want)?);
             Ok(value)
         });
         self.depth -= 1;
@@ -934,7 +966,7 @@ impl Emitter<'_> {
             Expr::Var(n) if n == "None" => "({None:null})".into(),
             Expr::Var(n) => {
                 let bound = &env.get(n).ok_or("unbound JavaScript variable")?.0;
-                if self.split.contains_key(bound) { self.rebuild(bound) }
+                if self.split.contains_key(bound) { self.record_value(bound) }
                 else if self.bit_f32_numbers.contains(bound) { format!("__bits({bound})") }
                 else { bound.clone() }
             }
@@ -986,6 +1018,7 @@ impl Emitter<'_> {
             }
             Expr::Record(n, fields) => {
                 let mut values = Vec::new();
+                let mut slots = Vec::new();
                 for (field, expr) in fields {
                     let ft = &self.p.records[n]
                         .iter()
@@ -993,10 +1026,13 @@ impl Emitter<'_> {
                         .unwrap()
                         .1;
                     let value = self.expr(expr, env, Some(ft))?;
-                    let value = self.bind(&value);
-                    values.push(format!("[{}]:{value}", quote(field)));
+                    let value = self.lexical_value(&value,ft);
+                    slots.push((field.clone(),value.clone()));
+                    values.push(format!("[{}]:{}", quote(field), if self.split.contains_key(&value) {self.rebuild(&value)} else {value}));
                 }
-                format!("({{{}}})", values.join(","))
+                let value = format!("({{{}}})", values.join(","));
+                self.local_values.record(&value, slots);
+                value
             }
             Expr::Field(a, n) if matches!(a.as_ref(),Expr::Var(root) if !env.contains_key(root) && (self.p.enums.contains_key(root)||root=="ArithmeticError")) =>
             {
@@ -1005,16 +1041,16 @@ impl Emitter<'_> {
                 };
                 quote(&format!("{root}.{n}"))
             }
-            Expr::Field(a, n) if matches!(a.as_ref(), Expr::Var(m) if env.get(m).is_some_and(|(v, _)| self.split.contains_key(v))) => {
-                let Expr::Var(m) = a.as_ref() else { unreachable!() };
-                let logical = &env[m].0;
-                self.split[logical].iter().find(|(f, _)| f == n).ok_or("loop state field")?.1.clone()
+            Expr::Field(..) if scalar_records::projection(self,e,env).is_some() => {
+                let value=scalar_records::projection(self,e,env).unwrap();
+                if self.split.contains_key(&value) {self.record_value(&value)} else {value}
             }
             Expr::Field(a, n) => {
                 let at = self.infer(a, env, None)?;
                 let av = self.expr(a, env, None)?;
                 let av = self.bind(&av);
                 if matches!(&at,Type::Named(n) if self.equality.elisions.contains(n)) {return Ok(av);}
+                if let Some(value)=self.local_values.field(&av,n) {return Ok(value);}
                 let field = if matches!(at, Type::Vector(..)) {
                     ["x", "y", "z", "w"]
                         .iter()
@@ -1611,11 +1647,12 @@ impl Emitter<'_> {
                 // a failed or unhelpful expansion rebuilds the ordinary value.
                 for (expr, (_, ty)) in args.iter().zip(&f.params) {
                     let value = self.expr(expr, env, Some(ty))?;
-                    values.push(if inline {self.lexical_value(&value,ty)} else {self.bind(&value)});
+                    values.push(self.lexical_value(&value,ty));
                 }
                 if inline {
                     if let Some(value)=helper_inline::call(self,&f,&values) {return Ok(value);}
                 }
+                if let Some(value)=scalar_records::call(self,index,&f,&values) {return Ok(value);}
                 let values=values.iter().map(|v|if self.split.contains_key(v){self.rebuild(v)}else{v.clone()}).collect::<Vec<_>>();
                 Ok::<_, String>(format!("__fn{index}({})", values.join(",")))?
             }
@@ -1776,6 +1813,8 @@ fn lower_with_layout(
         float_scan_work: 512,
         immutable_locals: BTreeSet::new(),
         prepared_sums: BTreeMap::new(),
+        local_values: Default::default(),
+        outlines: scalar_records::Outlines::new(p),
         inline_depth: 0,
         inline_nodes: 16_384,
         inline_source: 262_144,
@@ -1838,6 +1877,7 @@ fn lower_with_layout(
             vars.push(v);
         }
         emitter.lines.clear();
+        emitter.local_values = scalar_records::LocalValues::for_function(f,p);
         emitter.normalize_parameters(f,&vars);
         emitter.in_place = if ink_core::recursion::recursive(f) {
             Default::default()
@@ -1868,6 +1908,7 @@ fn lower_with_layout(
         };
         functions.push(json!({"index":i,"name":f.name,"precondition":p.contracts.precondition_checks.get(&f.name).and_then(|n|p.functions.iter().position(|f|&f.name==n)),"params":params,"result":result,"parallel":needs_parallel(&f.body,p,&mut std::collections::BTreeSet::new()),"destination":destination,"internal":ink_core::local_collections::owned(&f.result,p)||f.params.iter().any(|(_,t)|ink_core::local_collections::owned(t,p))}));
     }
+    emitter.local_values = Default::default();
     // A separate budget ensures adding the destination capability does not
     // change the ordinary entrypoints' emission resource limits.
     emitter.budget = 200_000;
@@ -1912,6 +1953,7 @@ fn lower_with_layout(
         ));
     }
     let (prepared_source, prepared_metadata) = prepared::emit(&mut emitter);
+    scalar_records::emit(&mut emitter, &mut javascript);
     javascript.push_str(&emitter.equality.source());
     let mut interface = json!({"schema":1,"backend":"javascript","abi":"ink-javascript-trusted-values-v2","destination_abi":{"name":"ink-javascript-into-v1","count_unit":"elements","ownership":"caller-owned","capacity":"trusted","aliasing":"destination-disjoint-from-all-reachable-inputs","tail":"unwritten"},"core_semantics":module.semantics(),"core_sha256":module.identity()?,"functions":functions});
     interface["prepared_compiled"] = json!({"semantics":"sealed-value-residual-v1","functions":prepared_metadata,"lifetime":"prepared token","evaluation":"lazy source-order; successful bindings only"});
