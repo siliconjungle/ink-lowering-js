@@ -61,6 +61,7 @@ for(const file of files){
  for(const x of [{Ok:{Ok:3}},{Ok:{Err:{Ok:true}}},{Ok:{Err:{Err:{Int:'-999999999999999999999999'}}}},{Err:{Ok:'tail'}},{Err:{Err:false}}])assert.deepEqual(flat.callOwned('left',[x]),ordinary.callOwned('left',[x]));
  const leafCases=[{Ok:{F32Bits:0x80000000}},{Ok:{F32Bits:0x7fc01234}},{Err:{Ok:{Int:'-999999999999999999999999'}}},{Err:{Err:{payload:{Ok:{}}}}},{Err:{Err:{payload:{Err:{item0:[{payload:{Ok:{}}}]}}}}}];
  for(const x of leafCases){
+  assert.deepEqual(flat.createState().invoke('float_copy',[x]),ordinary.createState().invoke('float_copy',[x]));
   const expected=ordinary.callOwned('leafs',[x]);assert.deepEqual(flat.callOwned('leafs',[x]),expected);
   assert.equal(flat.callOwned('equal',[x,x]),ordinary.callOwned('equal',[x,x]));
   const entry=flat.compiledValues.leafs,h=entry.params[0].capture(x),reply=flat.callCompiled('leafs',[h]);assert.deepEqual(entry.result.materialize(reply),expected);

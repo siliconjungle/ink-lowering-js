@@ -39,8 +39,12 @@ distribution's [contract and evidence](https://github.com/siliconjungle/ink-lang
 - `u64` uses `BigInt` and wraps at 64 bits after each arithmetic operation.
   Native callers supply BigInt, including inside arrays/records. Results are
   BigInt. JSON consumers explicitly encode/decode them as decimal strings.
-- Pure modules keep `f32` in native Numbers with exact tagged exceptional values;
-  state modules retain the binary32 bit carrier. Every arithmetic operation
+- Pure modules keep `f32` in native Numbers with exact tagged exceptional values.
+  Eligible stateful modules also use native pure helpers, with typed bridges to
+  their unchanged binary32 state/action, event and snapshot carriers. Owned or
+  recursive float bridge shapes retain the existing bit execution lane.
+  Stateful pure entries capture normalized inputs eagerly; pure-only modules
+  retain borrowed lazy reads. Every arithmetic operation
   rounds separately to binary32; negation preserves the exact sign and payload. Input/output uses
   Numbers or explicit `{F32Bits: bits}` for exceptional values. Zero signs,
   subnormals and passed-through exceptional payloads survive. Arithmetic NaNs

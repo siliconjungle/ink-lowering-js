@@ -13,6 +13,7 @@ struct StateEmitter<'a> {
     // Invocation-local emission substitutions for borrowed AST children. These
     // addresses are never serialized or accepted as semantic evidence.
     at_position: BTreeMap<usize, String>,
+    native_helpers: BTreeSet<usize>,
 }
 impl StateEmitter<'_> {
     /// Arithmetic-only Number intermediates. Leaves still execute at their
@@ -326,7 +327,7 @@ impl StateEmitter<'_> {
                         let ty=&self.p.actions[index].result;
                         if change && self.equality.sums.selected(&descriptor(ty,self.p,&mut BTreeSet::new())?){format!("((v)=>{{__nested({},true);return v;}})({result})",self.equality.sums.view_type(self.p,ty,"v")?)}else{format!("__nested({result},{change})")}
                     } else {
-                        format!("__fn{index}({})", values.join(","))
+                        format!("{}{index}({})",if self.native_helpers.contains(&index) {"__stateFn"}else{"__fn"}, values.join(","))
                     }
                 }
             },
@@ -526,6 +527,7 @@ pub(crate) fn emit_with_sums(
     sums:&super::sum_layout::Sums,
     protocol:Option<&ink_core::protocol::CheckedProtocol>,
     kernels:&[Option<String>],
+    native_helpers:BTreeSet<usize>,
 ) -> LangResult<(String, Value)> {
     let p = module.program();
     let checked_actions = ink_core::action_ir::CheckedActions::elaborate_with_frozen_roots(module)?;
@@ -538,6 +540,7 @@ pub(crate) fn emit_with_sums(
         execution: &execution,
         equality: super::TypedEquality::new(p, "__stateValueEqual"),
         at_position: BTreeMap::new(),
+        native_helpers,
     };
     emitter.equality.elisions=elisions.clone();
     emitter.equality.sums=sums.clone();

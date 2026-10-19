@@ -10,9 +10,13 @@ fn bit_state_arithmetic_preserves_rounding_bits_laziness_and_capture_protocols()
         source.push_str(&format!("let a{i}={}*y+x;", if i==0 {"x".into()} else {format!("a{}",i-1)}));
     }
     source.push_str("return a23;}");
+    // An owned float handle has no state/native bridge yet. Keep this suite's
+    // bit-island fallback coverage while state_float tests the bridged lane.
+    source.push_str("fn owned_float(value:Buffer<f32>)->Buffer<f32>{return value;}");
     let module = CheckedModule::from_source(parse(&source).unwrap()).unwrap();
     let emitted = ink_lowering_js::lower(&module).unwrap();
     assert_eq!(emitted.manifest["f32_storage"], "exact-u32-bits");
+    assert_eq!(emitted.manifest["f32_computation"], "exact-u32-bits");
     let mut bits = vec![0,0x80000000,1,0x80000001,0x007fffff,0x00800000,0x7f7fffff,
         0xff7fffff,0x7f800000,0xff800000,0x7f800001,0x7fc12345,0xffc12345,
         0x3f800001,0xbf800002,0x4b800000];

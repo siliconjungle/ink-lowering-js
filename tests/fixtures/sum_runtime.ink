@@ -22,6 +22,7 @@ query shared()->Shared {let tail:Result<List<u32>,Bool>=Ok(list(1));return Share
 
 enum Tree{End,Branch(List<Tree>),}
 fn leafs(x:Result<f32,Result<Int,Tree>>)->Result<f32,Result<Int,Tree>>{return x;}
+query float_copy(x:Result<f32,Result<Int,Tree>>)->Result<f32,Result<Int,Tree>>{return leafs(x);}
 fn equal(a:Result<f32,Result<Int,Tree>>,b:Result<f32,Result<Int,Tree>>)->Bool{return a==b;}
 
 record Reused{first:Result<String,Bool>,second:Result<String,Bool>,}

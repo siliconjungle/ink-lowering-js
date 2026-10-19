@@ -95,3 +95,13 @@ parameters, mutable loop/call/branch slots or arbitrary field reads as these Num
 locals. Preserve leaf snapshots and source-order failures, existing node/depth
 limits, bounded optional opportunity scans and all facts on helper rollback.
 These are invocation-local carriers, not retained values or range premises.
+
+Eligible stateful modules may use native F32 pure helpers through typed private
+state bridges. Actions, keeps, events, equality and snapshots retain bit storage;
+bound scalar ingress and state outputs must explicitly use that representation.
+Stateful-module pure/compiled entries capture normalized descendants before
+execution, so their helpers may reuse normalized fields without claiming finite
+Numbers. Keep pure-only borrowed getters lazy. Preserve NaN payloads, signed zero,
+rounding points, ownership, and exact histories/checkpoints. Owned/recursive float
+bridge shapes or bounded emission exhaustion retain the old bit lane. This is
+literal representation machinery, with no equality or profitability authority.

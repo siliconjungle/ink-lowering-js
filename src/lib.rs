@@ -12,6 +12,7 @@ pub mod definition;
 pub mod portable_definition;
 mod state;
 mod state_capture;
+mod state_float;
 mod value_layout;
 mod sum_layout;
 mod owned_values;
@@ -245,6 +246,9 @@ struct Emitter<'a> {
     callbacks: Vec<(String, String)>,
     equality: TypedEquality<'a>,
     native_f32: bool,
+    // Every public/compiled/state ingress captures normalized F32 descendants.
+    // Pure-only modules retain borrowed host containers and lazy typed reads.
+    captured_f32: bool,
     /// Unique-ownership facts of the function being emitted (see
     /// `ink_core::in_place`). Empty for recursive functions.
     in_place: ink_core::in_place::InPlace,
@@ -401,9 +405,9 @@ impl Emitter<'_> {
         let used=ink_core::analysis::free_variables(&f.body);
         for ((name,ty),value) in f.params.iter().zip(vars) {
             if *ty==Type::F32 && used.contains(name) {
-                // Scalars are passed by value. Records/lists keep their lazy
-                // typed reads; no borrowed host property is read here.
-                self.line(format!("{value}=__nfValue({value});"));
+                // Borrowed pure-only ingress still needs this typed read.
+                // Stateful-module ingress and bridges already normalized it.
+                if !self.captured_f32 {self.line(format!("{value}=__nfValue({value});"));}
                 self.normalized_scalar_slot(value,ty);
             }
         }
@@ -878,8 +882,8 @@ impl Emitter<'_> {
         }
         self.depth += 1;
         let result = self.expr_inner(e, env, want, count_number).and_then(|mut value| {
-            // Borrow trusted host containers. Normalize scalar reads at demand,
-            // including callbacks and at_or, instead of copying their ancestors.
+            // Pure-only functions borrow host containers and normalize reads
+            // at demand. Captured stateful helpers already have typed carriers.
             // Every other F32 constructor/arithmetic/call already produces the
             // internal carrier. Re-rounding each computed subtree is redundant.
             if self.native_f32 && self.infer(e,env,want)? == Type::F32 {
@@ -891,7 +895,7 @@ impl Emitter<'_> {
                     _ => false,
                 };
                 if number { self.f32_numbers.insert(value.clone()); }
-                if matches!(e,Expr::Var(_)|Expr::Field(..)|Expr::Method(..)) && !self.f32_numbers.contains(&value)
+                if !self.captured_f32 && matches!(e,Expr::Var(_)|Expr::Field(..)|Expr::Method(..)) && !self.f32_numbers.contains(&value)
                     && !self.normalized_f32.contains(&value) {
                     value=format!("__nfValue({value})");
                 }
@@ -1744,13 +1748,16 @@ fn lower_with_layout(
     kernels:&[Option<String>],
 ) -> LangResult<Emission> {
     let p = module.program();
-    // Stateful functions share the exact-bit carrier with actions/snapshots.
-    // Pure modules can borrow native float inputs without a state bridge.
-    let native_f32 = p.actions.is_empty() && p.states.is_empty() && p.keeps.is_empty();
+    let has_state = !p.actions.is_empty() || !p.states.is_empty() || !p.keeps.is_empty();
+    let sums=sum_layout::Sums::new(p,sum_types)?;
+    // Pure helpers compute in native carriers; state/actions retain exact bits.
+    // Unsupported bridge shapes preserve the previous whole-module bit lane.
+    let state_floats=has_state.then(||state_float::Bridges::prepare(p,elisions,&sums)).flatten();
+    let native_f32 = !has_state || state_floats.is_some();
     let mut equality=TypedEquality::new(p,"__valueEqual");
     equality.native_f32=native_f32;
     equality.elisions=elisions.clone();
-    equality.sums=sum_layout::Sums::new(p,sum_types)?;
+    equality.sums=sums.clone();
     let mut emitter = Emitter {
         p,
         next: 0,
@@ -1760,6 +1767,7 @@ fn lower_with_layout(
         callbacks: Vec::new(),
         equality,
         native_f32,
+        captured_f32: state_floats.is_some(),
         in_place: Default::default(),
         split: BTreeMap::new(),
         f32_numbers: BTreeSet::new(),
@@ -1809,7 +1817,11 @@ fn lower_with_layout(
             .and_then(|name|p.functions.iter().find(|candidate|&candidate.name==name));
         let predicate_used=predicate.map(|function|ink_core::analysis::free_variables(&function.body));
         let captures=ink_core::input_demand::fields(f,p).into_iter().enumerate().map(|(i,fields)|{
-            if native_f32 && f.params[i].1==Type::F32 {
+            if has_state && native_f32 {
+                // Preserve the established stateful module's eager typed
+                // ingress, including accessor order and unused scalar inputs.
+                true
+            } else if native_f32 && f.params[i].1==Type::F32 {
                 // Unobserved scalars retain their lazy public boundary. A
                 // contract-only consumer still needs the same captured value.
                 used.contains(&f.params[i].0) || predicate.zip(predicate_used.as_ref())
@@ -1964,7 +1976,6 @@ fn lower_with_layout(
     {
         helpers.push_str(temporary);
     }
-    let has_state = !p.actions.is_empty() || !p.states.is_empty() || !p.keeps.is_empty();
     let support = include_str!("state.mjs");
     if !has_state
         && ["__try", "__checked", "__okOr", "__mapValue", "__equal"]
@@ -2000,10 +2011,11 @@ fn lower_with_layout(
     ));
     let state = if !p.actions.is_empty() || !p.states.is_empty() || !p.keeps.is_empty() {
         let (code, metadata) = if let Some(layout) = layout {
-            state::emit_with_sums(module, layout, elisions,&emitter.equality.sums,protocol,kernels)?
+            state::emit_with_sums(module, layout, elisions,&emitter.equality.sums,protocol,kernels,state_floats.as_ref().map(|b|b.functions()).unwrap_or_default())?
         } else {
-            state::emit_with_sums(module, &ink_core::snapshot::layout(p)?, elisions,&emitter.equality.sums,protocol,kernels)?
+            state::emit_with_sums(module, &ink_core::snapshot::layout(p)?, elisions,&emitter.equality.sums,protocol,kernels,state_floats.as_ref().map(|b|b.functions()).unwrap_or_default())?
         };
+        if let Some(bridge)=&state_floats {javascript.push_str(&bridge.source());}
         javascript.push_str(include_str!("snapshot.mjs"));
         javascript.push_str(&code);
         Some(metadata)
@@ -2012,7 +2024,8 @@ fn lower_with_layout(
     };
     interface["private_record_elisions"]=json!(elisions);
     interface["private_sum_spines"]=json!(sum_types);
-    interface["f32_storage"] = json!(if native_f32 {"native-number-with-exact-nonfinite-tags"} else {"exact-u32-bits"});
+    interface["f32_storage"] = json!(if has_state || !native_f32 {"exact-u32-bits"} else {"native-number-with-exact-nonfinite-tags"});
+    interface["f32_computation"] = json!(if native_f32 {"native-number-with-exact-nonfinite-tags"} else {"exact-u32-bits"});
     interface["wire"] = ink_abi::wire_contract::source_contract(p)?;
     interface["state"] = serde_json::to_value(state).map_err(|e| e.to_string())?;
     interface["named_types"] = serde_json::to_value(named).map_err(|e| e.to_string())?;
