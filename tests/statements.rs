@@ -286,7 +286,7 @@ fn second(xs:List<u32>,ys:List<u32>)->List<u32>{return xs.zip(ys,fn(x)=>fn(y)=>x
 "#).unwrap();
     let mut source = ink_lowering_js::lower(&CheckedModule::from_source(p).unwrap())
         .unwrap()
-        .javascript;
+        .javascript.replace("=[];", "=new Array(0);");
     for (i, key) in ["plus", "pred"].iter().enumerate() {
         let start = source.find(&format!("function __fn{i}(")).unwrap();
         let at = start + source[start..].find('{').unwrap() + 1;
@@ -306,7 +306,7 @@ const NativeArray=globalThis.Array;let allocations=0;
 globalThis.Array=new Proxy(NativeArray,{construct(target,args){allocations++;return Reflect.construct(target,args);}});
 let reads=[];function input(values,tag){const xs=values.slice();values.forEach((value,i)=>Object.defineProperty(xs,i,{get(){reads.push(tag+i);return value;}}));return xs;}
 function reset(){visits={plus:0,pred:0};reads=[];allocations=0;}globalThis.visits={plus:0,pred:0};
-let xs=input([1,2,3],'x'),ys=input([8,9],'y');reset();assert.deepEqual(functions.pipeline(xs,2),[4,5]);assert.deepEqual(reads,['x0','x1','x2']);assert.deepEqual(visits,{plus:2,pred:3});assert.equal(allocations,1); // filter literal + exactly one map allocation; no fused stages
+let xs=input([1,2,3],'x'),ys=input([8,9],'y');reset();assert.deepEqual(functions.pipeline(xs,2),[4,5]);assert.deepEqual(reads,['x0','x1','x2']);assert.deepEqual(visits,{plus:2,pred:3});assert.equal(allocations,1); // one filter array; map reuses it while keeping both complete stages
 reset();assert.deepEqual(functions.indexed(xs,1),[2,4,6]);assert.deepEqual(reads,['x0','x1','x2']);assert.equal(visits.plus,3);assert.equal(allocations,1);
 reset();assert.equal(functions.reverse(xs,9),(1-(2-(3-9)))>>>0);assert.deepEqual(reads,['x2','x1','x0']);assert.equal(allocations,0);
 reset();assert.deepEqual(functions.second(xs,ys),[9,11]);assert.deepEqual(reads,['x0','y0','x1','y1']);assert.equal(allocations,1);
