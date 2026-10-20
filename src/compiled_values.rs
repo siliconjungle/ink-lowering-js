@@ -124,8 +124,8 @@ pub(super) fn emit(
     let mut constructors=super::constructors::Constructors::new(elisions,sums);
     let mut reductions=super::value_reduce::Reductions::new(elisions,sums,native_f32);
     let mut read = super::wire_values::WireValues::private(elisions, native_f32).with_sums(sums);
-    let mut owned = super::owned_values::OwnedValues::private(p, elisions, native_f32).with_sums(sums);
-    let mut destination = super::owned_values::OwnedValues::private(p, elisions, native_f32).with_sums(sums).with_public_numbers();
+    let mut owned = super::owned_values::OwnedValues::private(p, elisions, native_f32).with_sums(sums).with_namespace("__compiledOwnedValue");
+    let mut destination = super::owned_values::OwnedValues::private(p, elisions, native_f32).with_sums(sums).with_public_numbers().with_namespace("__destinationOwnedValue");
     let mut write = Writers {
         elisions,
         native_f32,
@@ -213,7 +213,7 @@ pub(super) fn emit(
             .and_then(|name|p.functions.iter().find(|g|&g.name==name))
             .is_some_and(|guard|guard.params==f.params&&guard.body==expected);
         let into = if let Type::List(inner)=&f.result {
-            let copy=destination.for_type(inner)?.replace("__ownedValue","__destinationOwnedValue");
+            let copy=destination.for_type(inner)?;
             let direct=if matches!(inner.as_ref(),Type::Bool|Type::Unit|Type::U32|Type::I32|Type::U64|Type::F32|Type::F64|Type::Int|Type::String){format!("__into{index}")}else{"null".into()};
             format!("{{copy:{copy},direct:{direct}}}")
         }else{"null".into()};
@@ -232,12 +232,10 @@ pub(super) fn emit(
     }
     let mut source = capture.source()
         + &read.source()
-        + &owned
-            .source()
-            .replace("__ownedValue", "__compiledOwnedValue");
-    // Owned copy names live in their own literal namespace.
-    definitions = definitions.replace("__ownedValue", "__compiledOwnedValue");
-    source += &destination.source().replace("__ownedValue","__destinationOwnedValue");
+        + &owned.source();
+    // Helper namespaces are symbols, never replacements inside quoted source
+    // field/type names or schema literals.
+    source += &destination.source();
     source += &write
         .functions
         .values()

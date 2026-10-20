@@ -10,20 +10,23 @@ pub(super) struct OwnedValues<'a> {
     sums:super::sum_layout::Sums,
     native_f32: bool,
     public_numbers: bool,
+    namespace: &'static str,
     functions: BTreeMap<String, (String, String)>,
 }
 impl<'a> OwnedValues<'a> {
     pub fn private(program: &'a Program,elisions:&BTreeSet<String>,native_f32:bool) -> Self {
-        Self{program,elisions:elisions.clone(),sums:Default::default(),native_f32,public_numbers:false,functions:BTreeMap::new()}
+        Self{program,elisions:elisions.clone(),sums:Default::default(),native_f32,public_numbers:false,namespace:"__ownedValue",functions:BTreeMap::new()}
     }
     pub fn with_public_numbers(mut self)->Self{self.public_numbers=true;self}
+    pub fn with_namespace(mut self,namespace:&'static str)->Self{self.namespace=namespace;self}
     pub fn with_sums(mut self,sums:&super::sum_layout::Sums)->Self{self.sums=sums.clone();self}
     pub fn source(&self) -> String { self.functions.values().map(|(_, code)| code.as_str()).collect() }
     pub fn for_type(&mut self, ty: &Type) -> LangResult<String> {
         let original = self.functions.len();
         let result = self.compile(&descriptor(ty, self.program, &mut BTreeSet::new())?);
         if result.is_err() {
-            self.functions.retain(|_, (name, _)| name.trim_start_matches("__ownedValue").parse::<usize>().is_ok_and(|index| index < original));
+            let namespace=self.namespace;
+            self.functions.retain(|_, (name, _)| name.strip_prefix(namespace).and_then(|n|n.parse::<usize>().ok()).is_some_and(|index| index < original));
         }
         result
     }
@@ -31,7 +34,7 @@ impl<'a> OwnedValues<'a> {
         let key = serde_json::to_string(ty).map_err(|e| e.to_string())?;
         if let Some((name, _)) = self.functions.get(&key) { return Ok(name.clone()); }
         if self.functions.len() >= 4096 { return Err("owned value schema limit".into()); }
-        let name = format!("__ownedValue{}", self.functions.len());
+        let name = format!("{}{}",self.namespace,self.functions.len());
         self.functions.insert(key.clone(), (name.clone(), String::new()));
         let (bytes, body) = match ty["kind"].as_str().ok_or("owned value kind")? {
             "ref" => {

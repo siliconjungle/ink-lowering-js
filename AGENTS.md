@@ -126,3 +126,7 @@ remain trusted and partial writes are possible on failure; bounded canonical
 codec materialization is separate. No retained scratch pool, equality premise,
 range fact or profitable selection authority follows. See docs/prepared-destinations.md
 in the distribution and the call_boundaries conformance tests.
+
+Generated copier namespaces rename helper symbols only; preserve quoted source
+field/type names and schema literals verbatim. Do not text-replace whole emitted
+schemas or copier bodies to change private namespaces.

@@ -145,3 +145,55 @@ fn large_interfaces_keep_compact_adapters_when_fixed_arity_emission_is_exhausted
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn copier_namespaces_do_not_rename_source_fields_or_type_names() {
+    let dir = std::env::temp_dir().join(format!("ink-copier-names-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let base="module names;record Row__ownedValueType{first__ownedValue:f32,second__ownedValue0:List<f32>,}fn copy(xs:List<Row__ownedValueType>)->List<Row__ownedValueType>{return xs;}";
+    for mode in ["native", "captured", "bits", "wide"] {
+        let mut source = base.to_owned();
+        if mode == "wide" {
+            source = source.replace("f32", "f64");
+        }
+        if matches!(mode, "captured" | "bits") {
+            source += "state Counter:u32=0;";
+        }
+        if mode == "bits" {
+            source += "fn owner(x:Buffer<f32>)->Buffer<f32>{return x;}";
+        }
+        let checked = CheckedModule::from_source(parse(&source).unwrap()).unwrap();
+        fs::write(
+            dir.join("program.mjs"),
+            ink_lowering_js::lower(&checked).unwrap().javascript,
+        )
+        .unwrap();
+        fs::write(dir.join("check.mjs"),r#"
+import assert from 'node:assert/strict';import * as m from './program.mjs';
+const wide=process.argv[2]==='wide',zero=wide?{F64Bits:'9223372036854775808'}:{F32Bits:0x80000000},nan=wide?{F64Bits:'9221120237041095220'}:{F32Bits:0x7f812345};
+const input=[{first__ownedValue:zero,second__ownedValue0:[nan]}],expected=[{first__ownedValue:-0,second__ownedValue0:[nan]}],c=m.compiledValues.copy,h=c.params[0].capture(input);
+assert.deepEqual(c.result.materialize(m.callCompiled('copy',[h])),input);
+assert.deepEqual(m.callOwned('copy',[input]),input);
+assert.deepEqual(m.functions.copy(input),expected);
+const token=m.prepareCompiled('copy',[[0,h]]),out=['tail','tail'];
+for(let i=0;i<3;i++){
+ assert.equal(m.callPreparedCompiledInto(token,[],out),1);assert.deepEqual(out,[...expected,'tail']);
+ out[0].first__ownedValue=99;out[0].second__ownedValue0.push(88);
+ assert.deepEqual(c.result.materialize(m.callPreparedCompiled(token,[])),input);
+}
+const decoded=c.params[0].decode(c.params[0].encode(h));assert.deepEqual(c.params[0].materialize(decoded),input);
+assert.deepEqual(input,[{first__ownedValue:zero,second__ownedValue0:[nan]}]);
+"#).unwrap();
+        let out = Command::new("node")
+            .arg(dir.join("check.mjs"))
+            .arg(mode)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{mode}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
