@@ -341,7 +341,7 @@ fn binding(emitter: &mut Emitter<'_>, expression: &Expr, env: &Env, deps: &Depen
         plan.retained += 1;
     } else {
         let value = residual(emitter, expression, env.clone(), deps.clone(), ty, plan, depth + 1)?;
-        emitter.line(format!("const {var}={value};"));
+        return Ok(emitter.lexical_value(&value, ty));
     }
     Ok(var)
 }
@@ -351,7 +351,7 @@ fn operand(emitter: &mut Emitter<'_>, expression: &Expr, env: &mut Env, deps: &m
     ty: &Type, plan: &mut Preparation, depth: usize) -> LangResult<Expr> {
     let found = returned(expression, deps, emitter.p);
     let value = residual(emitter, expression, env.clone(), deps.clone(), ty, plan, depth + 1)?;
-    let value = emitter.bind(&value);
+    let value = emitter.lexical_value(&value, ty);
     let name = loop {
         let n = emitter.fresh();
         if !env.contains_key(&n) && !emitter.p.enums.contains_key(&n) && !emitter.p.ids.contains(&n)
@@ -441,13 +441,86 @@ fn factory(emitter: &mut Emitter<'_>, f: &Function, index: usize) -> LangResult<
     let mut plan = Preparation::default();
     emitter.lines.clear();
     emitter.normalize_parameters(f,&vars);
-    let value = residual(emitter, &f.body, env, dependencies, &f.result,
-        &mut plan, 0)?;
+    let list = matches!(f.result, Type::List(_));
+    let destination = if list { emitter.fresh() } else { String::new() };
+    let conversion = if list { emitter.fresh() } else { String::new() };
+    let value = if list {
+        residual_into(emitter, &f.body, env, dependencies, &f.result, &mut plan, 0,
+            &destination, &conversion)?
+    } else { residual(emitter, &f.body, env, dependencies, &f.result, &mut plan, 0)? };
     if plan.retained == 0 && plan.delegated == 0 { return Err("no reusable lexical bindings".into()); }
     let declarations = plan.declarations;
-    let source = format!("function __prepareFn{index}(fixed,depth=0){{if(depth>=16||!({reusable}))return __fn{index};{declarations}return function({}){{{}return {value};}};}}\n", vars.join(","), emitter.lines);
+    let source = if list {
+        let run = emitter.fresh();
+        let mut params = vars.clone(); params.push(destination.clone()); params.push(conversion);
+        format!("function __prepareFn{index}(fixed,depth=0){{if(depth>=16||!({reusable}))return __fn{index};{declarations}const {run}=function({}){{{}return {value};}};{run}.__destination={run};return {run};}}\n",params.join(","),emitter.lines)
+    } else { format!("function __prepareFn{index}(fixed,depth=0){{if(depth>=16||!({reusable}))return __fn{index};{declarations}return function({}){{{}return {value};}};}}\n", vars.join(","), emitter.lines) };
     if source.len() > 131_072 { return Err("prepared residual source budget".into()); }
     Ok((source, plan.retained, plan.delegated))
+}
+
+/// A residual's destination lane shares the same successful lexical caches as
+/// its ordinary lane. Only the terminal output changes storage. Cached inputs
+/// remain shared; callbacks still use ordinary residual preparation.
+#[allow(clippy::too_many_arguments)]
+fn residual_into(emitter: &mut Emitter<'_>, body: &Expr, mut env: Env,
+    mut deps: Dependencies, result: &Type, plan: &mut Preparation, depth: usize,
+    destination: &str, conversion: &str) -> LangResult<String> {
+    if depth >= 48 || emitter.budget == 0 { return Err("prepared destination work/depth budget".into()); }
+    emitter.budget -= 1;
+    if let Expr::Let(name, annotation, initializer, rest) = body {
+        let ty = emitter.infer(initializer, &env, annotation.as_deref())?;
+        let found = returned(initializer, &deps, emitter.p);
+        let ts = Emitter::types(&env);
+        let readonly = !local_collections::owned(&ty, emitter.p) || {
+            let callback = Expr::Lambda(name.clone(), rest.clone());
+            local_collections::callback_parameter_loans(&callback, &ts, emitter.p, &[ty.clone()], result)
+                .is_ok_and(|loans| loans == [true])
+        };
+        let var = binding(emitter, initializer, &env, &deps, &ty, readonly, plan, depth)?;
+        env.insert(name.clone(), (var, ty)); deps.insert(name.clone(), found);
+        return residual_into(emitter, rest, env, deps, result, plan, depth + 1, destination, conversion);
+    }
+    if let Expr::Call(name, args) = body {
+        if name == "choose" && args.len() == 3 {
+            let condition = if retention_work(&args[0],emitter.p) {
+                binding(emitter, &args[0], &env, &deps, &Type::Bool, true, plan, depth)?
+            } else { let value=ordinary(emitter,&args[0],&env,&Type::Bool)?;emitter.bind(&value) };
+            let out=emitter.fresh();emitter.line(format!("let {out};if({condition}){{"));
+            let yes=residual_into(emitter,&args[1],env.clone(),deps.clone(),result,plan,depth+1,destination,conversion)?;
+            emitter.line(format!("{out}={yes};}}else{{"));
+            let no=residual_into(emitter,&args[2],env,deps,result,plan,depth+1,destination,conversion)?;
+            emitter.line(format!("{out}={no};}}"));return Ok(out);
+        }
+    }
+    if let Expr::Method(receiver, method, args) = body {
+        if matches!(method.as_str(),"map"|"map_indexed"|"filter") && args.len()==1 {
+            let shared = shared_callback(&args[0],&env,emitter.p);
+            let Type::List(inner)=emitter.infer(receiver,&env,None)? else {return Err("prepared destination list".into())};
+            let value=ordinary(emitter,receiver,&env,&Type::List(inner.clone()))?;
+            let xs=emitter.bind(&value);let out=emitter.fresh();let count=emitter.fresh();let index=emitter.fresh();
+            emitter.line(format!("const {out}={destination}===undefined?[]:{destination};let {count}=0;for(let {index}=0;{index}<{xs}.length;{index}++){{"));
+            let element=emitter.bind(&super::word_load(&format!("{xs}[{index}]"),&inner));
+            let params=if method=="map_indexed" {vec![(format!("({index}>>>0)"),Type::U32),(element.clone(),*inner)]}
+                else {vec![(element.clone(),*inner)]};
+            let (callback,local,found)=callback(&args[0],&env,&deps,&params)?;
+            let Type::List(output)=result else {return Err("prepared destination result".into())};
+            let ty=if method=="filter" {&Type::Bool}else{output.as_ref()};
+            // Source checking already admits these sequential callbacks with
+            // readonly owner loans. Keep their ordinary body when an owner is
+            // captured: destination passing must not introduce callback caches.
+            let value=if shared {residual(emitter,callback,local,found,ty,plan,depth+1)?}
+                else {ordinary(emitter,callback,&local,ty)?};
+            let item=if method=="filter" {emitter.line(format!("if({value}){{"));element}else{emitter.bind(&value)};
+            emitter.line(format!("{out}[{count}++]={destination}===undefined?{item}:{conversion}({item},__destinationBudget,0);"));
+            if method=="filter" {emitter.line("}");} emitter.line("}");
+            return Ok(format!("({destination}===undefined?{out}:{count})"));
+        }
+    }
+    let value=residual(emitter,body,env,deps,result,plan,depth+1)?;
+    let value=emitter.bind(&value);let count=emitter.bind(&format!("{value}.length"));let index=emitter.fresh();
+    emitter.line(format!("if({destination}!==undefined){{for(let {index}=0;{index}<{count};{index}++){{{destination}[{index}]={conversion}({value}[{index}],__destinationBudget,0);}}}}"));
+    Ok(format!("({destination}===undefined?{value}:{count})"))
 }
 
 fn residual(emitter: &mut Emitter<'_>, body: &Expr, mut env: Env,

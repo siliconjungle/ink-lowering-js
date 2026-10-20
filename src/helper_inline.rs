@@ -70,7 +70,7 @@ pub(super) fn eligible(e: &Emitter<'_>, f: &Function) -> bool {
         || !f
             .params
             .iter()
-            .any(|(_, t)| matches!(t,Type::Named(n) if e.p.records.contains_key(n)) || ink_core::local_collections::owned(t,e.p))
+            .any(|(_, t)| matches!(t,Type::List(_)) || matches!(t,Type::Named(n) if e.p.records.contains_key(n)) || ink_core::local_collections::owned(t,e.p))
     {
         return false;
     }
@@ -93,11 +93,12 @@ pub(super) fn eligible(e: &Emitter<'_>, f: &Function) -> bool {
     true
 }
 
-pub(super) fn call(e: &mut Emitter<'_>, f: &Function, actuals: &[String]) -> Option<String> {
+pub(super) fn call(e: &mut Emitter<'_>, f: &Function, actuals: &[String], unique: &[bool]) -> Option<String> {
     // Direct affine parameters already have checked moves/readonly loans.
     // Expanding them keeps the same private handle; it grants no new List
     // uniqueness, public owner capability, or retention across invocations.
     if !actuals.iter().any(|v| e.split.contains_key(v))
+        && !unique.iter().any(|yes| *yes)
         && !f.params.iter().any(|(_,t)|ink_core::local_collections::owned(t,e.p)) {
         return None;
     }
@@ -122,7 +123,7 @@ pub(super) fn call(e: &mut Emitter<'_>, f: &Function, actuals: &[String]) -> Opt
     // source admission already checks their moves and readonly loans.
     let in_place = std::mem::replace(
         &mut e.in_place,
-        ink_core::in_place::analyse_with_result(&f.body, &f.params, Some(&f.result), e.p),
+        ink_core::in_place::analyse_with_unique_lists(&f.body, &f.params, Some(&f.result), e.p, unique),
     );
     let local: Env = f
         .params

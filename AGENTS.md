@@ -130,3 +130,11 @@ in the distribution and the call_boundaries conformance tests.
 Generated copier namespaces rename helper symbols only; preserve quoted source
 field/type names and schema literals verbatim. Do not text-replace whole emitted
 schemas or copier bodies to change private namespaces.
+
+Sequential stages may reuse only outer List arrays certified unique/dead by core.
+Bounded literal helper expansion can transfer those exact facts to corresponding
+List parameters; aliases, captures and pending earlier-operand loans still block
+reuse. Keep whole stages eager and ordered. Residual destinations share the same
+lexical caches as ordinary calls, copy structured outputs deeply, and retain the
+ordinary callback body when it borrows owned captures. No retained scratch pool,
+extra element ownership, fusion/rewriting authority or larger expansion limits.

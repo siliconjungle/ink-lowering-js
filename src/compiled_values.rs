@@ -307,6 +307,7 @@ export function callPreparedCompiledInto(token,args,destination){
  const {entry,captured,remaining,run}=prepared,owned=captured.slice();
  for(let i=0;i<remaining.length;i++){const at=remaining[i];owned[at]=__compiledEntry(args[i],entry.params[at]().identity);}
  const values=__compiledValidate(entry,owned),into=entry.destination;
+ if(run.__destination===run)return run(...values,destination,into.copy);
  // Ordinary scalar-list bodies can write the terminal stage directly. A
  // residual body keeps its lexical caches and copies only its final elements.
  if(into.direct&&run===__implementations[entry.index])return into.direct(...values,destination);

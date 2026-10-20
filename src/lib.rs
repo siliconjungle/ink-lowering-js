@@ -550,7 +550,7 @@ impl Emitter<'_> {
                     return self.list_into(a, env, ty, destination, conversion);
                 }
                 let value = self.expr(a, env, Some(&at))?;
-                let value = self.bind(&value);
+                let value = self.lexical_value(&value, &at);
                 let mut local = env.clone();
                 local.insert(n.clone(), (value, at));
                 self.list_into(b, &local, ty, destination, conversion)
@@ -731,6 +731,8 @@ impl Emitter<'_> {
         };
         // The receiver's storage is unique and dead after this use.
         let in_place = method == "concat" && self.in_place.contains(xs);
+        let reuse = self.in_place.can_reuse(xs)
+            && ["map", "map_indexed", "filter", "scan"].contains(&method.as_str());
         let xs = self.expr(xs, env, context)?;
         let xs = self.bind(&xs);
         Ok(match method.as_str() {
@@ -788,7 +790,7 @@ impl Emitter<'_> {
             }
             "scan" => {
                 let len = self.bind(&format!("{xs}.length"));
-                let out = self.bind(&format!("new Array({len})"));
+                let out = if reuse { xs.clone() } else { self.bind(&format!("new Array({len})")) };
                 let acc = self.fresh();
                 self.line(format!("let {acc}={};", zero(&inner)));
                 let i = self.fresh();
@@ -817,11 +819,13 @@ impl Emitter<'_> {
                 } else {
                     self.bind(&format!("{xs}.length"))
                 };
-                let out = self.bind(&if method == "filter" {
+                let out = if reuse { xs.clone() } else { self.bind(&if method == "filter" {
                     "[]".into()
                 } else {
                     format!("new Array({len})")
-                });
+                }) };
+                let count = if reuse && method == "filter" { self.fresh() } else { String::new() };
+                if reuse && method == "filter" { self.line(format!("let {count}=0;")); }
                 let i = self.fresh();
                 self.line(format!("for(let {i}=0;{i}<{len};{i}++){{"));
                 let element = self.bind(&word_load(&format!("{xs}[{i}]"), &inner));
@@ -853,11 +857,13 @@ impl Emitter<'_> {
                 let (body, local) = Self::callback(callback, env, &params)?;
                 let value = self.expr(body, &local, Some(result))?;
                 if method == "filter" {
-                    self.line(format!("if({value}){{{out}.push({element});}}"));
+                    if reuse { self.line(format!("if({value}){{{out}[{count}++]={element};}}")); }
+                    else { self.line(format!("if({value}){{{out}.push({element});}}")); }
                 } else {
                     self.line(format!("{out}[{i}]={value};"));
                 }
                 self.line("}");
+                if reuse && method == "filter" { self.line(format!("{out}.length={count};")); }
                 out
             }
             _ => return Err(format!("unsupported JavaScript method {method}")),
@@ -1642,6 +1648,7 @@ impl Emitter<'_> {
                     .ok_or("unknown JavaScript function")?;
                 let f = f.clone();
                 let inline = helper_inline::eligible(self,&f);
+                let unique = args.iter().map(|arg| self.in_place.can_reuse(arg)).collect::<Vec<_>>();
                 let mut values = Vec::new();
                 // Every argument executes once, left to right, before entering
                 // an expanded body. Keep local record fields when possible;
@@ -1651,7 +1658,7 @@ impl Emitter<'_> {
                     values.push(self.lexical_value(&value,ty));
                 }
                 if inline {
-                    if let Some(value)=helper_inline::call(self,&f,&values) {return Ok(value);}
+                    if let Some(value)=helper_inline::call(self,&f,&values,&unique) {return Ok(value);}
                 }
                 if let Some(value)=scalar_records::call(self,index,&f,&values) {return Ok(value);}
                 let values=values.iter().map(|v|if self.split.contains_key(v){self.rebuild(v)}else{v.clone()}).collect::<Vec<_>>();
