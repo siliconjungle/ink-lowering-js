@@ -18,6 +18,7 @@ mod sum_layout;
 mod owned_values;
 mod wire_values;
 mod compiled_values;
+mod call_boundaries;
 mod constructors;
 mod value_capture;
 mod value_reduce;
@@ -1957,6 +1958,7 @@ fn lower_with_layout(
     javascript.push_str(&emitter.equality.source());
     let mut interface = json!({"schema":1,"backend":"javascript","abi":"ink-javascript-trusted-values-v2","destination_abi":{"name":"ink-javascript-into-v1","count_unit":"elements","ownership":"caller-owned","capacity":"trusted","aliasing":"destination-disjoint-from-all-reachable-inputs","tail":"unwritten"},"core_semantics":module.semantics(),"core_sha256":module.identity()?,"functions":functions});
     interface["prepared_compiled"] = json!({"semantics":"sealed-value-residual-v1","functions":prepared_metadata,"lifetime":"prepared token","evaluation":"lazy source-order; successful bindings only"});
+    interface["prepared_compiled"]["destination"]=json!({"call":"callPreparedCompiledInto","inputs":"sealed compiled values","ownership":"caller-owned","capacity":"trusted","tail":"unwritten","structured_elements":"detached","float_values":"trusted public representation","failure":"destination may be partially written"});
     // Emit only helpers referenced by the compiled expressions. Descriptor
     // conversion is needed solely for signatures containing binary32 values.
     let needs_conversion = !elisions.is_empty() || !sum_types.is_empty() || interface.to_string().contains("\"kind\":\"f32\"") || interface.to_string().contains("\"kind\":\"f64\"")
@@ -2085,25 +2087,11 @@ __freeze(metadata);
 "#);
     if needs_conversion {
         javascript.push_str(&format!("const __inputTypes={};\n",serde_json::to_string(&input_types).map_err(|e|e.to_string())?));
-        javascript.push_str(
-            r#"
-// Descriptor work occurs once at module initialisation, never per word-list call.
-export const functions = Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal).map(f=> {
-  const input=__inputTypes[f.index].types.map((t,i)=>__representation(t,false,__inputTypes[f.index].capture[i]));
-  const output=__representation(f.result,true);
-  const body=__implementations[f.index];
-  const implementation=f.precondition==null?body:(...args)=>{if(__implementations[f.precondition](...args)!==true)throw Error('contract precondition failed');return body(...args);};
-  const needsInput=input.some(c=>c!==__identity);
-  const entry=!needsInput && output===__identity ? implementation :
-    (...args)=>{const context=new WeakMap();return output(implementation(...(needsInput ? args.map((v,i)=>input[i](v,context)) : args)),context);};
-  return [f.name,entry];
-})));
-"#,
-        );
-    } else if p.contracts.precondition_checks.is_empty() {
-        javascript.push_str("export const functions = Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal).map(f=>[f.name,__implementations[f.index]])));\n");
-    } else {
-        javascript.push_str("export const functions = Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal).map(f=>[f.name,f.precondition==null?__implementations[f.index]:(...args)=>{if(__implementations[f.precondition](...args)!==true)throw Error('contract precondition failed');return __implementations[f.index](...args);}])));\n");
+    }
+    if !needs_conversion && p.contracts.precondition_checks.is_empty() {
+        javascript.push_str("export const functions=Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal).map(f=>[f.name,__implementations[f.index]])));\n");
+    }else{
+        javascript.push_str(&format!("export const functions={};\n",call_boundaries::emit(&functions,needs_conversion,call_boundaries::Boundary::Public)));
     }
     // Owned temporaries are an internal capability, not a caller-value check.
     // Public trusted numeric entries remain direct functions without guards.
@@ -2145,17 +2133,8 @@ export const functions = Object.freeze(Object.fromEntries(metadata.functions.fil
     javascript.push_str(&wire.source());
     javascript.push_str(&format!("const __wireReaders=Object.freeze(Object.fromEntries([{}]));\n",wire_entries.join(",")));
     if needs_conversion {
-        javascript.push_str(r#"
-const __ownedImplementations=Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal).map(f=>{
- const input=__inputTypes[f.index].types.map((t,i)=>__representation(t,false,__inputTypes[f.index].capture[i]));
- const body=__implementations[f.index];
- const implementation=f.precondition==null?body:(...args)=>{if(__implementations[f.precondition](...args)!==true)throw Error('contract precondition failed');return body(...args);};
- return [f.name,input.every(c=>c===__identity)?implementation:(...args)=>{const context=new WeakMap();return implementation(...args.map((v,i)=>input[i](v,context)));}];
-})));
-"#);
-    } else {
-        javascript.push_str("const __ownedImplementations=functions;\n");
-    }
+        javascript.push_str(&format!("const __ownedImplementations={};\n",call_boundaries::emit(&functions,true,call_boundaries::Boundary::Owned)));
+    }else{javascript.push_str("const __ownedImplementations=functions;\n");}
     javascript.push_str(r#"
 export const valueCodecs=(()=>{const codecs={};for(const [name,s] of Object.entries(metadata.wire.functions)){if(s.unsupported)continue;let value;Object.defineProperty(codecs,name,{enumerable:true,get:()=>value??=(Object.freeze(Object.hasOwn(__wireReaders,name)?{arguments:createCompiledValueCodec(s.arguments,__wireReaders[name][0]),result:createCompiledValueCodec(s.result,__wireReaders[name][1])}:{arguments:new ValueCodec(s.arguments),result:new ValueCodec(s.result)}))});}return Object.freeze(codecs);})();
 function __callEncoded(name,bytes,limits,compact){
@@ -2211,21 +2190,7 @@ export function callOwned(name,args,limits={}){
             .collect::<Vec<_>>()
             .join(",")
     ));
-    if needs_conversion {
-        javascript.push_str(r#"
-export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal&&f.result.kind==='list').map(f=>{
-  const input=__inputTypes[f.index].types.map((t,i)=>__representation(t,false,__inputTypes[f.index].capture[i]));
-  const body=__intoImplementations[f.index];
-  const implementation=f.precondition==null?body:(...args)=>{if(__implementations[f.precondition](...args.slice(0,f.params.length))!==true)throw Error('contract precondition failed');return body(...args);};
-  const entry=input.every(c=>c===__identity)?implementation:(...values)=>{const context=new WeakMap();return implementation(...input.map((convert,i)=>convert(values[i],context)),values[f.params.length]);};
-  return [f.name,entry];
-})));
-"#);
-    } else if p.contracts.precondition_checks.is_empty() {
-        javascript.push_str("export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal&&f.result.kind==='list').map(f=>[f.name,__intoImplementations[f.index]])));\n");
-    } else {
-        javascript.push_str("export const functionsInto=Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal&&f.result.kind==='list').map(f=>[f.name,f.precondition==null?__intoImplementations[f.index]:(...args)=>{if(__implementations[f.precondition](...args.slice(0,f.params.length))!==true)throw Error('contract precondition failed');return __intoImplementations[f.index](...args);}])) );\n");
-    }
+    javascript.push_str(&format!("export const functionsInto={};\n",call_boundaries::emit(&functions,needs_conversion,call_boundaries::Boundary::Destination)));
     if internal_cases.is_empty() {
         javascript.push_str("export function callInto(name,args,destination){return functionsInto[name](...args,destination);}\n");
     } else {

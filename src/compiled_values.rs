@@ -125,6 +125,7 @@ pub(super) fn emit(
     let mut reductions=super::value_reduce::Reductions::new(elisions,sums,native_f32);
     let mut read = super::wire_values::WireValues::private(elisions, native_f32).with_sums(sums);
     let mut owned = super::owned_values::OwnedValues::private(p, elisions, native_f32).with_sums(sums);
+    let mut destination = super::owned_values::OwnedValues::private(p, elisions, native_f32).with_sums(sums).with_public_numbers();
     let mut write = Writers {
         elisions,
         native_f32,
@@ -211,8 +212,13 @@ pub(super) fn emit(
         let only_type_guards=!predicates.is_empty()&&p.contracts.precondition_checks.get(&f.name)
             .and_then(|name|p.functions.iter().find(|g|&g.name==name))
             .is_some_and(|guard|guard.params==f.params&&guard.body==expected);
+        let into = if let Type::List(inner)=&f.result {
+            let copy=destination.for_type(inner)?.replace("__ownedValue","__destinationOwnedValue");
+            let direct=if matches!(inner.as_ref(),Type::Bool|Type::Unit|Type::U32|Type::I32|Type::U64|Type::F32|Type::F64|Type::Int|Type::String){format!("__into{index}")}else{"null".into()};
+            format!("{{copy:{copy},direct:{direct}}}")
+        }else{"null".into()};
         entries.push(format!(
-            "[{},{{index:{index},params:[{}],result:{result},arguments:{args_read},argumentCodecs:[null,null],boundaryReaders:[{portable},{compact}],onlyTypeGuards:{only_type_guards},needsInvariants:{},precondition:{}}}]",
+            "[{},{{index:{index},params:[{}],result:{result},destination:{into},arguments:{args_read},argumentCodecs:[null,null],boundaryReaders:[{portable},{compact}],onlyTypeGuards:{only_type_guards},needsInvariants:{},precondition:{}}}]",
             quote(&f.name),
             codecs.join(","),
             serde_json::to_string(&needs_invariants).map_err(|e|e.to_string())?,
@@ -231,6 +237,7 @@ pub(super) fn emit(
             .replace("__ownedValue", "__compiledOwnedValue");
     // Owned copy names live in their own literal namespace.
     definitions = definitions.replace("__ownedValue", "__compiledOwnedValue");
+    source += &destination.source().replace("__ownedValue","__destinationOwnedValue");
     source += &write
         .functions
         .values()
@@ -291,6 +298,23 @@ export function callPreparedCompiled(token,args){
  for(let i=0;i<remaining.length;i++){const at=remaining[i];owned[at]=__compiledEntry(args[i],entry.params[at]().identity);}
  const values=__compiledValidate(entry,owned);
  return __compiledHandle(entry.result().identity,run(...values),true);
+}
+// The caller owns sufficiently large, disjoint destination storage. This is
+// the trusted Into ABI, not a bounded wire/materialization operation. Private
+// retained containers never escape: structured elements are deeply detached.
+const __destinationBudget=Object.freeze({remaining:Infinity,enter(){},text(){}});
+export function callPreparedCompiledInto(token,args,destination){
+ const prepared=__preparedCompiled.get(token);
+ if(!prepared||!prepared.entry.destination||!Array.isArray(args)||args.length!==prepared.remaining.length)throw Error('invalid prepared compiled destination call');
+ const {entry,captured,remaining,run}=prepared,owned=captured.slice();
+ for(let i=0;i<remaining.length;i++){const at=remaining[i];owned[at]=__compiledEntry(args[i],entry.params[at]().identity);}
+ const values=__compiledValidate(entry,owned),into=entry.destination;
+ // Ordinary scalar-list bodies can write the terminal stage directly. A
+ // residual body keeps its lexical caches and copies only its final elements.
+ if(into.direct&&run===__implementations[entry.index])return into.direct(...values,destination);
+ const result=run(...values),n=result.length;
+ for(let i=0;i<n;i++)destination[i]=into.copy(result[i],__destinationBudget,0);
+ return n;
 }
 "#;
     Ok(source)

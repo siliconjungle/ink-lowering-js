@@ -9,12 +9,14 @@ pub(super) struct OwnedValues<'a> {
     elisions: BTreeSet<String>,
     sums:super::sum_layout::Sums,
     native_f32: bool,
+    public_numbers: bool,
     functions: BTreeMap<String, (String, String)>,
 }
 impl<'a> OwnedValues<'a> {
     pub fn private(program: &'a Program,elisions:&BTreeSet<String>,native_f32:bool) -> Self {
-        Self{program,elisions:elisions.clone(),sums:Default::default(),native_f32,functions:BTreeMap::new()}
+        Self{program,elisions:elisions.clone(),sums:Default::default(),native_f32,public_numbers:false,functions:BTreeMap::new()}
     }
+    pub fn with_public_numbers(mut self)->Self{self.public_numbers=true;self}
     pub fn with_sums(mut self,sums:&super::sum_layout::Sums)->Self{self.sums=sums.clone();self}
     pub fn source(&self) -> String { self.functions.values().map(|(_, code)| code.as_str()).collect() }
     pub fn for_type(&mut self, ty: &Type) -> LangResult<String> {
@@ -43,8 +45,8 @@ impl<'a> OwnedValues<'a> {
             "u32" => (8, "return value>>>0;".into()),
             "i32" => (8, "return value|0;".into()),
             "u64" => (12, "return BigInt(value);".into()),
-            "f32" => (8, if !self.native_f32 {"return {F32Bits:value===0?0:value};".into()} else {"const bits=typeof value==='number'?__bits(value):value.F32Bits;return {F32Bits:bits===0?0:bits};".into()}),
-            "f64" => (12,"return {F64Bits:__dfBits(value).toString()};".into()),
+            "f32" => (8, if self.public_numbers {if self.native_f32 {"return __nfOutput(value);".into()}else{"const number=__float(value);return Number.isFinite(number)?number:{F32Bits:value};".into()}}else if !self.native_f32 {"return {F32Bits:value===0?0:value};".into()} else {"const bits=typeof value==='number'?__bits(value):value.F32Bits;return {F32Bits:bits===0?0:bits};".into()}),
+            "f64" => (12,if self.public_numbers {"return __dfOutput(value);".into()}else{"return {F64Bits:__dfBits(value).toString()};".into()}),
             "int" => (4, "const text=typeof value==='bigint'?value.toString():value.Int;budget.text(text);return {Int:text};".into()),
             "string" | "id" | "enum" => (4, "budget.text(value);return value;".into()),
             "record" => {

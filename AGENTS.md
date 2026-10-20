@@ -114,3 +114,15 @@ products, distinct rounding points, NaN payloads and signed zero. Exclude owned
 and recursive outline shapes; register destination/prepared helpers before final
 emission. Reserve full ordinary wrappers and restore all facts on optional failure.
 No differentiation name, finite-range assumption or algebraic identity is involved.
+
+Fixed-arity JavaScript public adapters preserve typed conversion order, contracts,
+exact floats and invocation-local schema memoization. Primitive scalar arguments
+need no memo; multiple converted object inputs and converted composites retain it.
+Unusual arity and exhausted adapter byte bounds keep the compact ordinary path.
+Prepared destination calls reuse existing sealed handles and lexical caches,
+never mutable host inputs. Scalar terminal lists can write directly; structured
+elements detach deeply with ordinary public floats. Destination capacity/disjointness
+remain trusted and partial writes are possible on failure; bounded canonical
+codec materialization is separate. No retained scratch pool, equality premise,
+range fact or profitable selection authority follows. See docs/prepared-destinations.md
+in the distribution and the call_boundaries conformance tests.

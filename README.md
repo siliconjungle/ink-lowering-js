@@ -1,5 +1,15 @@
 # Ink JavaScript lowering
 
+Exact-arity converted public calls use generated fixed-arity adapters, with
+compact fallback for large interfaces and invocation-local conversion memoization
+where aliasing requires it. `callPreparedCompiledInto(token, args, destination)`
+extends sealed preparation to trusted caller-owned list storage. Structured
+elements are detached, residual lexical caches retain their existing lifetime,
+and eligible scalar terminal maps write directly without a result list. The
+destination follows the ordinary public float representation; bounded canonical
+materialization remains a separate codec operation. See `tests/call_boundaries.rs`
+and the distribution's `docs/prepared-destinations.md` for contracts and limits.
+
 Literal ES module emission for checked Ink programs. This package depends only
 on `ink-core`, `ink-abi`, JSON and hashing; it contains no optimisation laws, cost selection
 or browser scheduling. Those responsibilities belong to `ink-knowledge`,
