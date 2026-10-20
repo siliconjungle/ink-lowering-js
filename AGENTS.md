@@ -139,3 +139,10 @@ reuse. Keep whole stages eager and ordered. Residual destinations share the same
 lexical caches as ordinary calls, copy structured outputs deeply, and retain the
 ordinary callback body when it borrows owned captures. No retained scratch pool,
 extra element ownership, fusion/rewriting authority or larger expansion limits.
+
+Logical List uniqueness does not establish ordinary Array storage. Preserve typed
+array element types and fixed lengths with an ordinary-result fallback. Select
+residual output mode before iteration, share callback caches across both loops,
+and bound duplicated generated code with structural-span fallback. Only sealed
+compiled destination carriers may omit redundant finite-float normalization;
+ordinary adapters and exact nonfinite output conversion retain their behavior.

@@ -125,7 +125,7 @@ pub(super) fn emit(
     let mut reductions=super::value_reduce::Reductions::new(elisions,sums,native_f32);
     let mut read = super::wire_values::WireValues::private(elisions, native_f32).with_sums(sums);
     let mut owned = super::owned_values::OwnedValues::private(p, elisions, native_f32).with_sums(sums).with_namespace("__compiledOwnedValue");
-    let mut destination = super::owned_values::OwnedValues::private(p, elisions, native_f32).with_sums(sums).with_public_numbers().with_namespace("__destinationOwnedValue");
+    let mut destination = super::owned_values::OwnedValues::private(p, elisions, native_f32).with_sums(sums).with_public_numbers().with_sealed_floats().with_namespace("__destinationOwnedValue");
     let mut write = Writers {
         elisions,
         native_f32,

@@ -296,6 +296,9 @@ struct Preparation {
     count: usize,
     delegated: usize,
     masks: BTreeMap<String, String>,
+    // Exact generated spans, never source-text matching. Large dual output
+    // loops can retain the ordinary residual/result-copy form within bounds.
+    outputs: Vec<(usize,usize,String)>,
 }
 impl Preparation {
     fn policy(&mut self, expression: String, emitter: &mut Emitter<'_>) -> String {
@@ -420,7 +423,7 @@ fn strict(emitter: &mut Emitter<'_>, expression: &Expr, mut env: Env, mut deps: 
     ordinary(emitter, &rebound, &env, result)
 }
 
-fn factory(emitter: &mut Emitter<'_>, f: &Function, index: usize) -> LangResult<(String, usize, usize)> {
+fn factory(emitter: &mut Emitter<'_>, f: &Function, index: usize, available: usize) -> LangResult<(String, usize, usize)> {
     if recursion::recursive(f) || local_collections::owned(&f.result, emitter.p)
         || f.params.iter().any(|(_, t)| local_collections::owned(t, emitter.p))
         || analysis::node_count(&f.body, 4096).is_none() {
@@ -450,12 +453,20 @@ fn factory(emitter: &mut Emitter<'_>, f: &Function, index: usize) -> LangResult<
     } else { residual(emitter, &f.body, env, dependencies, &f.result, &mut plan, 0)? };
     if plan.retained == 0 && plan.delegated == 0 { return Err("no reusable lexical bindings".into()); }
     let declarations = plan.declarations;
-    let source = if list {
+    let mut source = if list {
         let run = emitter.fresh();
-        let mut params = vars.clone(); params.push(destination.clone()); params.push(conversion);
+        let mut params = vars.clone(); params.push(destination.clone()); params.push(conversion.clone());
         format!("function __prepareFn{index}(fixed,depth=0){{if(depth>=16||!({reusable}))return __fn{index};{declarations}const {run}=function({}){{{}return {value};}};{run}.__destination={run};return {run};}}\n",params.join(","),emitter.lines)
     } else { format!("function __prepareFn{index}(fixed,depth=0){{if(depth>=16||!({reusable}))return __fn{index};{declarations}return function({}){{{}return {value};}};}}\n", vars.join(","), emitter.lines) };
-    if source.len() > 131_072 { return Err("prepared residual source budget".into()); }
+    let limit=available.min(131_072);
+    if source.len()>limit && !plan.outputs.is_empty() {
+        // All callback preparation was emitted once and is shared by both
+        // branches. Replacing only generated spans keeps exactly those caches.
+        for (start,end,fallback) in plan.outputs.iter().rev() {emitter.lines.replace_range(*start..*end,fallback);}
+        let run=emitter.fresh();let mut params=vars.clone();params.push(destination);params.push(conversion);
+        source=format!("function __prepareFn{index}(fixed,depth=0){{if(depth>=16||!({reusable}))return __fn{index};{declarations}const {run}=function({}){{{}return {value};}};{run}.__destination={run};return {run};}}\n",params.join(","),emitter.lines);
+    }
+    if source.len() > limit { return Err("prepared residual source budget".into()); }
     Ok((source, plan.retained, plan.delegated))
 }
 
@@ -498,8 +509,9 @@ fn residual_into(emitter: &mut Emitter<'_>, body: &Expr, mut env: Env,
             let shared = shared_callback(&args[0],&env,emitter.p);
             let Type::List(inner)=emitter.infer(receiver,&env,None)? else {return Err("prepared destination list".into())};
             let value=ordinary(emitter,receiver,&env,&Type::List(inner.clone()))?;
-            let xs=emitter.bind(&value);let out=emitter.fresh();let count=emitter.fresh();let index=emitter.fresh();
-            emitter.line(format!("const {out}={destination}===undefined?[]:{destination};let {count}=0;for(let {index}=0;{index}<{xs}.length;{index}++){{"));
+            let xs=emitter.bind(&value);let len=emitter.bind(&format!("{xs}.length"));
+            let out=emitter.fresh();let count=emitter.fresh();let index=emitter.fresh();let result_slot=emitter.fresh();
+            let callback_start=emitter.lines.len();
             let element=emitter.bind(&super::word_load(&format!("{xs}[{index}]"),&inner));
             let params=if method=="map_indexed" {vec![(format!("({index}>>>0)"),Type::U32),(element.clone(),*inner)]}
                 else {vec![(element.clone(),*inner)]};
@@ -511,10 +523,19 @@ fn residual_into(emitter: &mut Emitter<'_>, body: &Expr, mut env: Env,
             // captured: destination passing must not introduce callback caches.
             let value=if shared {residual(emitter,callback,local,found,ty,plan,depth+1)?}
                 else {ordinary(emitter,callback,&local,ty)?};
-            let item=if method=="filter" {emitter.line(format!("if({value}){{"));element}else{emitter.bind(&value)};
-            emitter.line(format!("{out}[{count}++]={destination}===undefined?{item}:{conversion}({item},__destinationBudget,0);"));
-            if method=="filter" {emitter.line("}");} emitter.line("}");
-            return Ok(format!("({destination}===undefined?{out}:{count})"));
+            let value=emitter.bind(&value);
+            let callback_source=emitter.lines.split_off(callback_start);
+            let (ordinary_store,destination_store)=if method=="filter" {
+                (format!("if({value}){out}.push({element});"),format!("if({value}){destination}[{count}++]={conversion}({element},__destinationBudget,0);"))
+            }else{(format!("{out}.push({value});"),format!("{destination}[{index}]={conversion}({value},__destinationBudget,0);"))};
+            let ordinary_loop=format!("const {out}=[];for(let {index}=0;{index}<{len};{index}++){{{callback_source}{ordinary_store}}}");
+            let destination_loop=format!("{}for(let {index}=0;{index}<{len};{index}++){{{callback_source}{destination_store}}}{result_slot}={};",if method=="filter"{format!("let {count}=0;")}else{String::new()},if method=="filter"{&count}else{&len});
+            let start=emitter.lines.len();
+            emitter.line(format!("let {result_slot};if({destination}===undefined){{{ordinary_loop}{result_slot}={out};}}else{{{destination_loop}}}"));
+            let end=emitter.lines.len();let copy_index=emitter.fresh();
+            let fallback=format!("let {result_slot};{ordinary_loop}if({destination}===undefined){{{result_slot}={out};}}else{{for(let {copy_index}=0;{copy_index}<{out}.length;{copy_index}++){{{destination}[{copy_index}]={conversion}({out}[{copy_index}],__destinationBudget,0);}}{result_slot}={out}.length;}}\n");
+            plan.outputs.push((start,end,fallback));
+            return Ok(result_slot);
         }
     }
     let value=residual(emitter,body,env,deps,result,plan,depth+1)?;
@@ -779,7 +800,7 @@ function __preparedStable(mask,path){const part=__preparedPart(mask,path);return
         emitter.local_values = Default::default();
         let budget = emitter.budget;
         emitter.split.clear(); emitter.lines.clear();
-        match factory(emitter, f, index) {
+        match factory(emitter, f, index, 262_144usize.saturating_sub(source.len())) {
             Ok((code, retained, delegated)) if source.len() + code.len() <= 262_144 => {
                 source.push_str(&code); entries.push(format!("[{index},__prepareFn{index}]"));
                 metadata.push(json!({"function":f.name,"retained_bindings":retained,"delegated_calls":delegated,"factory":true}));

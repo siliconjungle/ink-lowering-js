@@ -790,7 +790,8 @@ impl Emitter<'_> {
             }
             "scan" => {
                 let len = self.bind(&format!("{xs}.length"));
-                let out = if reuse { xs.clone() } else { self.bind(&format!("new Array({len})")) };
+                let out = if reuse { self.bind(&format!("Array.isArray({xs})?{xs}:new Array({len})")) }
+                    else { self.bind(&format!("new Array({len})")) };
                 let acc = self.fresh();
                 self.line(format!("let {acc}={};", zero(&inner)));
                 let i = self.fresh();
@@ -819,7 +820,12 @@ impl Emitter<'_> {
                 } else {
                     self.bind(&format!("{xs}.length"))
                 };
-                let out = if reuse { xs.clone() } else { self.bind(&if method == "filter" {
+                // Logical uniqueness does not establish a growable native Array:
+                // take/drop may have copied a borrowed typed array. A map may
+                // also change element type. Keep a fresh ordinary result there.
+                let out = if reuse {
+                    self.bind(&format!("Array.isArray({xs})?{xs}:{}", if method == "filter" {"[]".into()} else {format!("new Array({len})")}))
+                } else { self.bind(&if method == "filter" {
                     "[]".into()
                 } else {
                     format!("new Array({len})")
@@ -863,8 +869,12 @@ impl Emitter<'_> {
                     self.line(format!("{out}[{i}]={value};"));
                 }
                 self.line("}");
-                if reuse && method == "filter" { self.line(format!("{out}.length={count};")); }
-                out
+                if reuse && method == "filter" {
+                    // All predicates have run. A fresh empty result avoids
+                    // clearing an occupied backing store solely to return [].
+                    // No predicate, input read or later operand is skipped.
+                    format!("({count}===0?[]:({out}.length={count},{out}))")
+                } else { out }
             }
             _ => return Err(format!("unsupported JavaScript method {method}")),
         })

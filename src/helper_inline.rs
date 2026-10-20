@@ -118,9 +118,9 @@ pub(super) fn call(e: &mut Emitter<'_>, f: &Function, actuals: &[String], unique
     let float_scan = e.float_scan_work;
     let next = e.next;
     let budget = e.budget;
-    // Parameter storage remains shared in the callee's own List analysis.
-    // Affine Buffer/Map handles are neither cloned nor promoted by expansion;
-    // source admission already checks their moves and readonly loans.
+    // Caller-proven List transfers seed only corresponding List parameters.
+    // Other Lists retain sharing; affine Buffer/Map handles keep their loans.
+    // Expansion neither clones handles nor grants element ownership.
     let in_place = std::mem::replace(
         &mut e.in_place,
         ink_core::in_place::analyse_with_unique_lists(&f.body, &f.params, Some(&f.result), e.p, unique),
