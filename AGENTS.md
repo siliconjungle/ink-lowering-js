@@ -115,7 +115,7 @@ and recursive outline shapes; register destination/prepared helpers before final
 emission. Reserve full ordinary wrappers and restore all facts on optional failure.
 No differentiation name, finite-range assumption or algebraic identity is involved.
 
-Fixed-arity JavaScript public adapters preserve typed conversion order, contracts,
+Fixed-arity JavaScript scalar-result public adapters and owned/destination adapters preserve typed conversion order, contracts,
 exact floats and invocation-local schema memoization. Primitive scalar arguments
 need no memo; multiple converted object inputs and converted composites retain it.
 Unusual arity and exhausted adapter byte bounds keep the compact ordinary path.

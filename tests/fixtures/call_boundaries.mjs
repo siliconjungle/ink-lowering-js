@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import * as m from './program.mjs';
 const mode=process.argv[2],wide=mode==='wide',cases=JSON.parse(fs.readFileSync(new URL('cases.json',import.meta.url)));
+assert.equal(m.functions.scalar.length,2);
+assert.equal(m.functions.shift.length,0,'collection public calls keep the established variadic adapter');
 let calls=0;
 for(const c of cases){
  const codec=m.compiledValues[c.name],handles=c.args.map((v,i)=>codec.params[i].capture(v));

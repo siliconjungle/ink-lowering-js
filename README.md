@@ -1,6 +1,7 @@
 # Ink JavaScript lowering
 
-Exact-arity converted public calls use generated fixed-arity adapters, with
+Exact-arity converted scalar-result public, owned and destination calls use
+generated fixed-arity adapters; structured public results retain compact adapters, with
 compact fallback for large interfaces and invocation-local conversion memoization
 where aliasing requires it. `callPreparedCompiledInto(token, args, destination)`
 extends sealed preparation to trusted caller-owned list storage. Structured

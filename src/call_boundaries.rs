@@ -9,9 +9,40 @@ pub(super) enum Boundary {
     Destination,
 }
 
+fn scalar_result(f: &Value) -> bool {
+    matches!(
+        f["result"]["kind"].as_str(),
+        Some(
+            "unit"
+                | "bool"
+                | "u32"
+                | "i32"
+                | "u64"
+                | "f32"
+                | "f64"
+                | "int"
+                | "string"
+                | "id"
+                | "enum"
+        )
+    )
+}
+
 fn generic(conversion: bool, boundary: &Boundary) -> String {
     let destination = matches!(boundary, Boundary::Destination);
     let public = matches!(boundary, Boundary::Public);
+    if conversion && public {
+        return r#"Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal).map(f=> {
+  const input=__inputTypes[f.index].types.map((t,i)=>__representation(t,false,__inputTypes[f.index].capture[i]));
+  const output=__representation(f.result,true);
+  const body=__implementations[f.index];
+  const implementation=f.precondition==null?body:(...args)=>{if(__implementations[f.precondition](...args)!==true)throw Error('contract precondition failed');return body(...args);};
+  const needsInput=input.some(c=>c!==__identity);
+  const entry=!needsInput && output===__identity ? implementation :
+    (...args)=>{const context=new WeakMap();return output(implementation(...(needsInput ? args.map((v,i)=>input[i](v,context)) : args)),context);};
+  return [f.name,entry];
+})))"#.into();
+    }
     let filter = if destination {
         "!f.internal&&f.result.kind==='list'"
     } else {
@@ -60,6 +91,26 @@ fn generic(conversion: bool, boundary: &Boundary) -> String {
 }
 
 pub(super) fn emit(functions: &[Value], conversion: bool, boundary: Boundary) -> String {
+    // A direct caller can change V8's inlining of a collection-producing body.
+    // Keep that established common adapter. Scalar results retain the bounded
+    // fixed-arity lane; this is an emission heuristic, not a semantic fact.
+    if conversion
+        && matches!(boundary, Boundary::Public)
+        && functions
+            .iter()
+            .any(|f| f["internal"] != true && !scalar_result(f))
+    {
+        let scalars = functions
+            .iter()
+            .filter(|f| scalar_result(f))
+            .cloned()
+            .collect::<Vec<_>>();
+        let fixed = emit(&scalars, true, Boundary::Public);
+        return format!(
+            "Object.freeze({{...{},...{fixed}}})",
+            generic(true, &Boundary::Public)
+        );
+    }
     let destination = matches!(boundary, Boundary::Destination);
     let output = matches!(boundary, Boundary::Public);
     let mut entries = Vec::new();
