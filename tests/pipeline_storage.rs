@@ -102,7 +102,8 @@ for(const values of [[],[1],[1,2,3,4]]){
  }
  const wide=new BigUint64Array(values.map(BigInt));assert.deepEqual(f.flags(wide),values.map(x=>x>1));assert.deepEqual(Array.from(wide),values.map(BigInt));
 }
-console.log('39 typed-array slice/map/filter/scan/record cases preserve storage kinds, element conversions and borrowed inputs');
+const borrowed=[1,2,3,4];Object.defineProperty(borrowed,'constructor',{get(){throw Error('host species must not own compiler storage');}});borrowed.slice=()=>{throw Error('host slice must not implement a fixed List primitive');};assert.deepEqual(f.halve(borrowed),[.5,1,1.5]);assert.deepEqual(f.keep(borrowed),[3,4]);assert.deepEqual(f.cumulative(borrowed),[1,3,6]);
+console.log('39 typed-array cases and three host-slice/species checks preserve storage ownership, element conversions and borrowed inputs');
 "#).unwrap();
   let out=Command::new("node").arg(dir.join("test.mjs")).output().unwrap();assert!(out.status.success(),"{mode}: {}",String::from_utf8_lossy(&out.stderr));println!("{mode}: {}",String::from_utf8_lossy(&out.stdout));
  }

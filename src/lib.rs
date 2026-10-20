@@ -757,11 +757,19 @@ impl Emitter<'_> {
             }
             "drop" | "take" => {
                 let count = self.expr(&args[0], env, Some(&Type::U32))?;
-                if method == "drop" {
-                    format!("{xs}.slice({count})")
-                } else {
-                    format!("{xs}.slice(0,{count})")
-                }
+                let count = self.bind(&count);
+                let len = self.bind(&format!("{xs}.length"));
+                let clipped = self.bind(&format!("Math.min({count},{len})"));
+                let (start, len) = if method == "drop" {
+                    (clipped.clone(), self.bind(&format!("{len}-{clipped}")))
+                } else { ("0".into(), clipped) };
+                // Copy the fixed List primitive literally. A borrowed slice
+                // method/species constructor could leak its purportedly fresh
+                // result, and typed-array slices have incompatible storage.
+                let out = self.bind(&format!("new Array({len})"));
+                let i = self.fresh();
+                self.line(format!("for(let {i}=0;{i}<{len};{i}++){{{out}[{i}]={xs}[{start}+{i}];}}"));
+                out
             }
             "sort" => match *inner {
                 // The fixed sort primitive orders integers numerically. Keep
