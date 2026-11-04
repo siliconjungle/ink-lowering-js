@@ -77,8 +77,11 @@ impl<'a> Captures<'a> {
                 // storage. NaN payload tags retain the ordinary slot array.
                 // No host container, getter, validation or resource charge is
                 // skipped, and public materialization remains detached.
+                // Lists shorter than 1024 keep V8's packed double arrays: on Node 22 a
+                // Float32Array map costs about twice as much at 100 elements and
+                // only pays off for large lists.
                 let result=if self.native_f32&&ty["element"]["kind"]=="f32"{
-                    "return out.every(x=>typeof x==='number')?Float32Array.from(out):out;"
+                    "return n<1024||!out.every(x=>typeof x==='number')?out:Float32Array.from(out);"
                 }else{"return out;"};
                 format!("if(!Array.isArray(value)&&!(ArrayBuffer.isView(value)&&!(value instanceof DataView))){{{bad}}}const n=value.length;if(n>budget.remaining{fixed}){{{bad}}}budget.add(4);const out=new Array(n);for(let i=0;i<n;i++)out[i]={next}(value[i],budget,depth+1);{result}")
             }

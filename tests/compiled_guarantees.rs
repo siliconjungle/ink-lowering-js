@@ -21,11 +21,14 @@ fn kernel(xs:List<f32>,ids:List<u32>)->f32{return foldl(ids,0.0,fn(i)=>fn(acc)=>
 import assert from 'node:assert/strict';import * as m from './program.mjs';
 const cases=[[],[0,-0,1,3.25],[{F32Bits:1},{F32Bits:0x80000001},{F32Bits:0x7f800000}],
  [{F32Bits:0x7fc12345},-0,{F32Bits:0xff812345}],[-0,{F32Bits:0x7f812345},4],
- [1e20,-1e20,3],Array.from({length:257},(_,i)=>Math.fround((i-128)/7))];
+ [1e20,-1e20,3],Array.from({length:257},(_,i)=>Math.fround((i-128)/7)),
+ Array.from({length:1024},(_,i)=>Math.fround((i-512)/9)),
+ Array.from({length:1030},(_,i)=>i===900?{F32Bits:0x7fc12345}:Math.fround(i/5))];
 for(const xs of cases){
  const codec=m.compiledValues.copy.params[0],before=codec.capture(xs);
  const hasNaN=xs.some(v=>v&&typeof v==='object'&&(v.F32Bits&0x7fffffff)>0x7f800000);
- assert.equal(m.dense(before),!hasNaN);
+ // Lists shorter than 1024 stay slot arrays; longer NaN-free lists are dense.
+ assert.equal(m.dense(before),!hasNaN&&xs.length>=1024);
  for(const name of ['copy','grow','owned']){
   const c=m.compiledValues[name],plain=m.functions[name](xs),expected=m.valueCodecs[name].result.decode(m.valueCodecs[name].result.encode(plain)),result=m.callCompiled(name,[before]);
   const actual=c.result.materialize(result);assert.deepEqual(actual,expected,name);assert.equal(Array.isArray(actual),true);
