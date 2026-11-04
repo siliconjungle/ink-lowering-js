@@ -1310,7 +1310,8 @@ impl Emitter<'_> {
                     )
                 } else {
                     format!(
-                        "__bufferFill({},{})",
+                        "{}({},{})",
+                        if self.native_f32 && **inner==Type::F32 {"__bufferFillF32"} else {"__bufferFill"},
                         self.expr(&args[0], env, Some(&Type::U32))?,
                         self.expr(&args[1], env, Some(inner))?
                     )
@@ -1356,8 +1357,12 @@ impl Emitter<'_> {
                     if n == "scan" {
                         self.line(format!("let {acc}={};", zero(inner)));
                     }
-                    self.line(format!("for(let {i}=0;{i}<{xv}.length;{i}++){{"));
-                    let element = self.bind(&format!("{xv}.item({i})"));
+                    let data=self.fresh();let start=self.fresh();let length=self.fresh();
+                    self.line(format!("let {data}={xv}.data,{start}={xv}.start;const {length}={xv}.length;for(let {i}=0;{i}<{length};{i}++){{"));
+                    // This literal map traverses the owner's logical range.
+                    // Its callback cannot acquire that affine owner. Refresh
+                    // cached fields only when a tagged write detaches it.
+                    let element = self.bind(&format!("{data}[{start}+{i}]"));
                     let value = if n == "scan" {
                         let add = self.arithmetic("+", &acc, &element, inner);
                         self.line(format!("{acc}={add};"));
@@ -1371,7 +1376,8 @@ impl Emitter<'_> {
                         let (body, local) = Self::callback(&args[0], env, &params)?;
                         self.expr(body, &local, Some(inner))?
                     };
-                    self.line(format!("{xv}.set({i},{value});}}"));
+                    let value=self.bind(&value);
+                    self.line(format!("if(typeof {value}!=='number'&&!Array.isArray({data})){{{xv}.detach();{data}={xv}.data;{start}={xv}.start;}}{data}[{start}+{i}]={value};}}"));
                     return Ok(xv);
                 }
                 if n == "map_parallel" {

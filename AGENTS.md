@@ -84,6 +84,13 @@ Sealed native F32 list/vector captures may use dense private storage only after
 ordinary ordered validation/capture. Preserve tagged NaN payload fallback,
 signed zero, resource charges and detached public outputs. Fresh slices remain
 growable Lists. This fixed carrier grants no range or profitability authority.
+Native F32 Buffer fill can also use dense private Number storage. Exact NaN tags
+retain slots; tagged writes promote only that owner's logical range. Growth must
+detach and freezing must produce growable Lists. Literal map/scan traversal may
+cache private storage and bounds because its callback cannot acquire the affine
+receiver; refresh cached fields after promotion. Preserve partial ranges, sibling
+owners, strict callback order and every F32 rounding point. This fixed carrier
+adds no source rewrite, ownership, numeric-range or profitable-selection fact.
 
 Normalized F32 carriers are rounded Numbers or exact NaN tags, not Number/range
 facts. Normalize used scalar parameters at entry; borrowed composite fields keep

@@ -75,6 +75,12 @@ distribution's [contract and evidence](https://github.com/siliconjungle/ink-lang
   emitted literally. No floating-point reassociation or fused reductions.
 - Ordered sums emit indexed loops with the declared rounding/wrapping at each
   addition, eliminating per-element reduction callbacks.
+- Native F32 `buffer_fill` can use private `Float32Array` storage for Number
+  carriers. Exact NaN tags use ordinary slots; tagged writes promote only the
+  affected owner range. Growth detaches to growable slots and freezing returns
+  ordinary Lists. Literal Buffer map/indexed-map/scan traverse their checked
+  logical range directly, refreshing cached storage after a promotion. Arithmetic
+  order, payloads, signed zero and source ownership remain unchanged.
 - Small nonrecursive native-F32/F64-result helpers with scalar or scalar-list parameters
   can expand under the existing four-level/body/source bounds. Arguments still
   execute once in order and callee List parameters remain shared. No rounding

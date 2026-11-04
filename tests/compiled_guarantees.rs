@@ -2,6 +2,63 @@ use ink_core::{core::CheckedModule,syntax::parse};
 use std::{fs,process::Command};
 
 #[test]
+fn dense_f32_owners_preserve_tags_ranges_growth_and_map_order(){
+ use ink_core::eval;
+ use serde_json::json;
+ let source=r#"module DenseOwners;
+fn mapped(x:f32,y:f32,n:u32)->List<f32>{return buffer_fill(n,x).map_indexed(fn(i)=>fn(v)=>choose(i==1,y,v)).freeze().concat([x,y]);}
+fn grown(x:f32,y:f32,n:u32)->List<f32>{return buffer_fill(n,x).set(2,y).fill_range(3,2,y).copy_within(1,0,4).swap(0,6).pop().truncate(4).push(x).freeze().concat([y]);}
+fn parts(x:f32,y:f32,n:u32)->List<f32>{return buffer_fill(n,x).split_at(3,fn(left)=>fn(right)=>left.set(1,y).map(fn(v)=>v).append(right.map_indexed(fn(i)=>fn(v)=>v+x))).freeze();}
+fn ranges(x:f32,y:f32,n:u32)->List<f32>{return buffer_fill(n,x).split_at(1,fn(left)=>fn(right)=>right.truncate(5)).map_indexed(fn(i)=>fn(v)=>choose(i==2,y,v)).push(x).freeze();}
+fn observed(x:f32,y:f32,n:u32)->List<f32>{let b=buffer_fill(n,x);let first=b.borrow_range(1,3,fn(v)=>v.at_or(0,y));return [first].concat(b.set(1,y).freeze());}
+fn frozen(x:f32,y:f32,n:u32)->List<f32>{return buffer_fill(n,x).freeze().concat([y]);}
+"#;
+ let checked=CheckedModule::from_source(parse(source).unwrap()).unwrap();
+ let mut code=ink_lowering_js::lower(&checked).unwrap().javascript;
+ code.push_str(r#"
+export function denseOwnerProbe(){
+ const b=__bufferFillF32(8,0),dense=b.data instanceof Float32Array;
+ const [a,c]=__bufferSplit(b,3);a.set(1,__nfFromBits(0x7fc12345));
+ return {dense,promoted:Array.isArray(a.data),siblingDense:c.data instanceof Float32Array,
+    tag:a.item(1).F32Bits,sibling:c.freeze(),growable:Array.isArray(a.freeze())};
+}
+"#);
+ let bits=[0u32,0x80000000,1,0x80000001,0x007fffff,0x00800000,0x3f800001,0x7f7fffff,0x7f800000,0xff800000,0x7f812345,0xffc12345];
+ let mut cases=vec![];
+ for (i,&x) in bits.iter().enumerate(){for n in [0,1,7,65]{
+  let args=json!([{"F32Bits":x},{"F32Bits":bits[(i+5)%bits.len()]},n]);
+  for name in ["mapped","grown","parts","ranges","observed","frozen"]{
+   let f=checked.program().functions.iter().find(|f|f.name==name).unwrap();
+   let values=args.as_array().unwrap().iter().zip(&f.params).map(|(v,(_,t))|eval::Value::from_program_json(v,t,checked.program()).unwrap()).collect();
+   let expected=eval::call_checked(&checked,name,values,&mut 1_000_000).unwrap().json();
+   cases.push(json!({"name":name,"args":args,"expected":expected}));
+  }
+ }}
+ let dir=std::env::temp_dir().join(format!("ink-dense-owners-{}",std::process::id()));fs::create_dir_all(&dir).unwrap();
+ fs::write(dir.join("program.mjs"),code).unwrap();fs::write(dir.join("cases.json"),serde_json::to_vec(&cases).unwrap()).unwrap();
+ fs::write(dir.join("test.mjs"),r#"
+import assert from 'node:assert/strict';import fs from 'node:fs';import * as m from './program.mjs';
+assert.deepEqual(m.denseOwnerProbe(),{dense:true,promoted:true,siblingDense:true,tag:0x7fc12345,sibling:[0,0,0,0,0],growable:true});
+for(const row of JSON.parse(fs.readFileSync(new URL('cases.json',import.meta.url)))){
+ const codec=m.valueCodecs[row.name],expected=codec.result.encode(row.expected),entry=m.compiledValues[row.name];
+ assert.deepEqual(codec.result.encode(m.functions[row.name](...row.args)),expected,row.name);
+ const args=row.args.map((x,i)=>entry.params[i].capture(x));
+ assert.deepEqual(entry.result.encode(m.callCompiled(row.name,args)),expected);
+ const token=m.prepareCompiled(row.name,[[0,args[0]]]);
+ for(let k=0;k<2;k++){
+  const result=m.callPreparedCompiled(token,args.slice(1));assert.deepEqual(entry.result.encode(result),expected);
+  const destination=new Array(row.expected.length+2).fill('tail');
+  assert.equal(m.callPreparedCompiledInto(token,args.slice(1),destination),row.expected.length);
+  assert.deepEqual(codec.result.encode(destination.slice(0,row.expected.length)),expected);
+  assert.deepEqual(destination.slice(row.expected.length),['tail','tail']);
+ }
+}
+"#).unwrap();
+ let out=Command::new("node").arg(dir.join("test.mjs")).output().unwrap();fs::remove_dir_all(dir).unwrap();
+ assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
 fn dense_private_f32_captures_preserve_bits_growth_aliasing_and_limits(){
  let source=r#"module DenseFloat;
 fn copy(xs:List<f32>)->List<f32>{return xs;}
