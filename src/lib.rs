@@ -2210,6 +2210,10 @@ export function callOwned(name,args,limits={}){
         javascript.push_str(include_str!("parallel.mjs"));
     }
     javascript.push_str(&prepared_source);
+    let compiled_tasks = tasks::emit(module)?;
+    if let Some(source) = &compiled_tasks {
+        javascript.push_str(source);
+    }
     let mut manifest = interface;
     manifest["javascript_sha256"] = json!(format!("{:x}", Sha256::digest(javascript.as_bytes())));
     manifest["trusted"] = json!([
@@ -2220,6 +2224,9 @@ export function callOwned(name,args,limits={}){
     manifest["caller_contract"]=json!("trusted, well-typed target-native values; no input validation, snapshot capture or host resource budgets");
     manifest["owned_result_contract"] = json!({"functions":owned_entries.len(),"unsupported":unsupported_owned,"inputs":"same trusted caller contract","results":"canonical detached values with ABI byte/node/depth limits"});
     manifest["scope"]=json!("trusted pure functions and temporary collections; state/actions with portable snapshots and ordered transaction events");
+    if compiled_tasks.is_some() {
+        manifest["tasks"]=json!({"semantics":"ink-tasks-v1 compiled from ink-mir-v1","trace":"ink-task-trace-v1","names":module.program().contracts.tasks.tasks.iter().map(|t|&t.name).collect::<Vec<_>>()});
+    }
     Ok(Emission {
         javascript,
         manifest,
@@ -2229,3 +2236,5 @@ export function callOwned(name,args,limits={}){
 mod definition_literal;
 mod definition_native;
 pub mod representation_program;
+pub mod mir;
+pub mod tasks;
