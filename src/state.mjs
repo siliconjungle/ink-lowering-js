@@ -51,12 +51,25 @@ function __orderedKeys(rt,index){
 // closed, pure predicate admits. Writes only mark a key dirty; the next read
 // tests just the dirty rows. A test that throws leaves its keys dirty, so the
 // same error recurs on the next read. A staged single cell reads by scanning.
+// A view may also keep sums over its rows (view.sums: sum id -> exact BigInt
+// total), adjusted from each dirty row's old and new admitted value. A sum
+// whose contribution throws is dropped and recomputed by its next read, which
+// meets the same error at the same row a scan would.
 const __tableFilters=new WeakMap();
 function __filterScan(ctx,rt,index,test){const out=[];for(const k of __orderedKeys(rt,index)){const row=__cellGet(rt,index,k);if(test(ctx,rt,row))out.push(row);}return out;}
 function __applyFilter(ctx,rt,index,view,test){
  const type=rt.meta.roots[index].key,table=rt.tables[index],changes=[...view.dirty].sort((a,b)=>__keyCompare(a,b,type)),admit=new Array(changes.length);
  for(let i=0;i<changes.length;i++){const row=table.get(changes[i]);admit[i]=row!==undefined&&test(ctx,rt,row)?row:undefined;}
  const K=view.keys,R=view.rows;
+ if(view.sums&&view.sums.size){
+  const old=new Array(changes.length);
+  for(let i=0;i<changes.length;i++){const at=__keyPosition(K,changes[i],type);old[i]=at<K.length&&K[at]===changes[i]?R[at]:undefined;}
+  for(const [id,total] of view.sums){
+   const value=__filterSums[id];
+   try{let next=total;for(let i=0;i<changes.length;i++){if(old[i]!==undefined)next-=value(ctx,rt,old[i]);if(admit[i]!==undefined)next+=value(ctx,rt,admit[i]);}view.sums.set(id,next);}
+   catch{view.sums.delete(id);}
+  }
+ }
  if(changes.length<=32)for(let i=0;i<changes.length;i++){
   const key=changes[i],row=admit[i],at=__keyPosition(K,key,type),present=at<K.length&&K[at]===key;
   if(row!==undefined){if(present)R[at]=row;else{K.splice(at,0,key);R.splice(at,0,row);}}
@@ -71,20 +84,35 @@ function __applyFilter(ctx,rt,index,view,test){
  }
  view.dirty.clear();
 }
-function __filtered(ctx,rt,index,id){
+// The current view, built or refreshed; null while a staged cell is on its root.
+function __filterView(ctx,rt,index,id){
  const test=__filterTests[id],cell=rt.cell;
- if(cell&&cell.index===index)return __filterScan(ctx,rt,index,test);
+ if(cell&&cell.index===index)return null;
  const table=rt.tables[index];let views=__tableFilters.get(table);
  if(!views){views=[];__tableFilters.set(table,views);}
  const view=views[id];
  if(!view){
   const keys=[],rows=[];
   for(const k of __orderedKeys(rt,index)){const row=table.get(k);if(test(ctx,rt,row)){keys.push(k);rows.push(row);}}
-  views[id]={keys,rows,dirty:new Set()};
-  return rows.slice();
+  return views[id]={keys,rows,dirty:new Set(),sums:null};
  }
  if(view.dirty.size)__applyFilter(ctx,rt,index,view,test);
- return view.rows.slice();
+ return view;
+}
+function __filtered(ctx,rt,index,id){
+ const view=__filterView(ctx,rt,index,id);
+ return view?view.rows.slice():__filterScan(ctx,rt,index,__filterTests[id]);
+}
+function __filteredCount(ctx,rt,index,id){
+ const view=__filterView(ctx,rt,index,id);
+ return view?view.rows.length:__filterScan(ctx,rt,index,__filterTests[id]).length;
+}
+function __filteredSum(ctx,rt,index,id,sum){
+ const value=__filterSums[sum],view=__filterView(ctx,rt,index,id);
+ let total=view?.sums?.get(sum);if(total!==undefined)return total;
+ total=0n;for(const row of view?view.rows:__filterScan(ctx,rt,index,__filterTests[id]))total+=value(ctx,rt,row);
+ if(view)(view.sums??=new Map()).set(sum,total);
+ return total;
 }
 function __cellGet(rt,index,key){const cell=rt.cell;return cell&&cell.index===index&&cell.key===key?cell.next:rt.tables[index].get(key);}
 function __readTable(rt,index){const cell=rt.cell;if(!cell||cell.index!==index)return rt.tables[index];const table=new Map(rt.tables[index]);if(cell.next===undefined)table.delete(cell.key);else table.set(cell.key,cell.next);return table;}
