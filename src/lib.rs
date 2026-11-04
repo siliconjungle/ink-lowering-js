@@ -755,10 +755,19 @@ impl Emitter<'_> {
             }
             "drop" | "take" => {
                 let count = self.expr(&args[0], env, Some(&Type::U32))?;
-                if method == "drop" {
-                    format!("{xs}.slice({count})")
+                // Captured scalar lists may use dense private storage. A
+                // slice is a fresh logical List and may subsequently grow by
+                // an admitted final-use concat, so materialize ordinary slots.
+                // Borrowed ordinary receivers keep their original method.
+                let slice = if method == "drop" {
+                    format!("Array.prototype.slice.call({xs},{count})")
                 } else {
-                    format!("{xs}.slice(0,{count})")
+                    format!("Array.prototype.slice.call({xs},0,{count})")
+                };
+                if method == "drop" {
+                    format!("(ArrayBuffer.isView({xs})?{slice}:{xs}.slice({count}))")
+                } else {
+                    format!("(ArrayBuffer.isView({xs})?{slice}:{xs}.slice(0,{count}))")
                 }
             }
             "sort" => match *inner {

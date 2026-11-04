@@ -3,6 +3,17 @@
 use super::{Emitter, Env};
 use ink_core::{analysis, recursion, syntax::*};
 
+fn scalar(t: &Type) -> bool {
+    matches!(t, Type::Unit | Type::Bool | Type::U32 | Type::I32 | Type::U64 | Type::F32 | Type::F64)
+}
+
+/// Small floating-result helpers can retain evaluated immutable arguments in
+/// caller locals, just like expanded record helpers. No list is made unique.
+fn scalar_helper(e: &Emitter<'_>, f: &Function) -> bool {
+    (f.result == Type::F64 || (e.native_f32 && f.result == Type::F32))
+        && f.params.iter().all(|(_, t)| scalar(t) || matches!(t, Type::List(inner) if scalar(inner)))
+}
+
 /// A record produced inside an expanded helper can merge its fields directly.
 /// This avoids rebuilding a carrier merely to unpack it again in the caller.
 pub(super) fn choose_record(
@@ -67,10 +78,10 @@ pub(super) fn eligible(e: &Emitter<'_>, f: &Function) -> bool {
     if e.inline_depth >= 4
         || e.inline_nodes == 0
         || recursion::recursive(f)
-        || !f
+        || (!scalar_helper(e, f) && !f
             .params
             .iter()
-            .any(|(_, t)| matches!(t,Type::Named(n) if e.p.records.contains_key(n)) || ink_core::local_collections::owned(t,e.p))
+            .any(|(_, t)| matches!(t,Type::Named(n) if e.p.records.contains_key(n)) || ink_core::local_collections::owned(t,e.p)))
     {
         return false;
     }
@@ -98,7 +109,8 @@ pub(super) fn call(e: &mut Emitter<'_>, f: &Function, actuals: &[String]) -> Opt
     // Expanding them keeps the same private handle; it grants no new List
     // uniqueness, public owner capability, or retention across invocations.
     if !actuals.iter().any(|v| e.split.contains_key(v))
-        && !f.params.iter().any(|(_,t)|ink_core::local_collections::owned(t,e.p)) {
+        && !f.params.iter().any(|(_,t)|ink_core::local_collections::owned(t,e.p))
+        && !scalar_helper(e, f) {
         return None;
     }
     let nodes = analysis::node_count(&f.body, e.inline_nodes.min(512))?;

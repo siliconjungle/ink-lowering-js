@@ -235,7 +235,7 @@ fn literal_known_calls_match_interpreter_and_keep_exports() {
     let m = CheckedModule::from_source(p.clone()).unwrap();
     let emitted = ink_lowering_js::lower(&m).unwrap();
     let source = emitted.javascript;
-    for name in ["run_u32", "fold_f32", "eager_u64", "rr", "vr"] {
+    for name in ["run_u32", "eager_u64", "rr", "vr"] {
         let index = p.functions.iter().position(|f| f.name == name).unwrap();
         let b = body(&source, &format!("function __fn{index}("));
         assert!(!b.contains("/* inline "), "{name}: {b}");
@@ -244,6 +244,9 @@ fn literal_known_calls_match_interpreter_and_keep_exports() {
             "{name}: helper remains: {b}"
         );
     }
+    let index = p.functions.iter().position(|f| f.name == "fold_f32").unwrap();
+    assert!(!body(&source, &format!("function __fn{index}(")).split_once('{').unwrap().1.contains("__fn"),
+        "small nonrecursive floating helpers expand without changing the fold");
     for name in ["large_root", "chain0"] {
         let index = p.functions.iter().position(|f| f.name == name).unwrap();
         let b = body(&source, &format!("function __fn{index}("));

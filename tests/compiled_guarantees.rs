@@ -2,6 +2,60 @@ use ink_core::{core::CheckedModule,syntax::parse};
 use std::{fs,process::Command};
 
 #[test]
+fn dense_private_f32_captures_preserve_bits_growth_aliasing_and_limits(){
+ let source=r#"module DenseFloat;
+fn copy(xs:List<f32>)->List<f32>{return xs;}
+fn grow(xs:List<f32>)->List<f32>{return xs.drop(1).take(3).concat([7.0]);}
+fn owned(xs:List<f32>)->List<f32>{let b:Buffer<f32>=buffer(xs);return b.push(9.0).freeze();}
+fn equal(xs:List<f32>,ys:List<f32>)->Bool{return xs==ys;}
+fn leaf(xs:List<f32>,index:u32)->f32{return xs.at_or(index,0.0);}
+fn kernel(xs:List<f32>,ids:List<u32>)->f32{return foldl(ids,0.0,fn(i)=>fn(acc)=>acc+leaf(xs,i));}
+"#;
+ let module=CheckedModule::from_source(parse(source).unwrap()).unwrap();
+ let mut code=ink_lowering_js::lower(&module).unwrap().javascript;
+ // Test-only storage observation; production handles never expose payloads.
+ code.push_str("\nexport const dense=h=>__compiledHandles.get(h).value instanceof Float32Array;\n");
+ let root=std::env::temp_dir().join(format!("ink-dense-float-{}",std::process::id()));fs::create_dir_all(&root).unwrap();
+ fs::write(root.join("program.mjs"),code).unwrap();
+ fs::write(root.join("test.mjs"),r#"
+import assert from 'node:assert/strict';import * as m from './program.mjs';
+const cases=[[],[0,-0,1,3.25],[{F32Bits:1},{F32Bits:0x80000001},{F32Bits:0x7f800000}],
+ [{F32Bits:0x7fc12345},-0,{F32Bits:0xff812345}],[-0,{F32Bits:0x7f812345},4],
+ [1e20,-1e20,3],Array.from({length:257},(_,i)=>Math.fround((i-128)/7))];
+for(const xs of cases){
+ const codec=m.compiledValues.copy.params[0],before=codec.capture(xs);
+ const hasNaN=xs.some(v=>v&&typeof v==='object'&&(v.F32Bits&0x7fffffff)>0x7f800000);
+ assert.equal(m.dense(before),!hasNaN);
+ for(const name of ['copy','grow','owned']){
+  const c=m.compiledValues[name],plain=m.functions[name](xs),expected=m.valueCodecs[name].result.decode(m.valueCodecs[name].result.encode(plain)),result=m.callCompiled(name,[before]);
+  const actual=c.result.materialize(result);assert.deepEqual(actual,expected,name);assert.equal(Array.isArray(actual),true);
+  assert.deepEqual(c.result.encode(result),m.valueCodecs[name].result.encode(expected));
+  const decoded=codec.decode(codec.encode(before));assert.deepEqual(codec.materialize(decoded),codec.materialize(before));
+  const out=new Array(expected.length+2).fill('tail');const prepared=m.prepareCompiled(name,[[0,before]]);
+  assert.equal(m.callPreparedCompiledInto(prepared,[],out),expected.length);
+  assert.deepEqual(out.slice(0,expected.length),plain);assert.deepEqual(out.slice(expected.length),['tail','tail']);
+  actual.fill(99);assert.deepEqual(c.result.materialize(result),expected);
+ }
+ const eq=m.compiledValues.equal;assert.equal(eq.result.materialize(m.callCompiled('equal',[before,codec.decode(codec.encode(before))])),true);
+ const kernel=m.compiledValues.kernel,ids=[0,1,2,0,1000],captured=kernel.params[1].capture(ids);
+ const expected=m.valueCodecs.kernel.result.decode(m.valueCodecs.kernel.result.encode(m.functions.kernel(xs,ids)));
+ assert.deepEqual(kernel.result.materialize(m.callCompiled('kernel',[before,captured])),expected);
+}
+const codec=m.compiledValues.copy.params[0],host=[1,-0,2],captured=codec.capture(host);host[0]=99;
+assert.deepEqual(codec.materialize(captured),[{F32Bits:0x3f800000},{F32Bits:0x80000000},{F32Bits:0x40000000}]);
+// Ordered getter reads and errors precede any dense conversion.
+let reads=[];const xs=[1,2,3];xs.forEach((v,i)=>Object.defineProperty(xs,i,{get(){reads.push(i);if(i===1)throw Error('sentinel');return v;}}));
+assert.throws(()=>codec.capture(xs),/sentinel/);assert.deepEqual(reads,[0,1]);
+for(const value of [[1,2],new Float32Array([1,2])])for(const nodes of [0,1,2,3,4]){
+ const accepts=fn=>{try{fn();return true;}catch{return false;}};
+ assert.equal(accepts(()=>codec.capture(value,{nodes})),accepts(()=>new m.ValueCodec(codec.descriptor).encode(value,{nodes})));
+}
+"#).unwrap();
+ let result=Command::new("node").arg(root.join("test.mjs")).output().unwrap();
+ fs::remove_dir_all(root).unwrap();assert!(result.status.success(),"{}",String::from_utf8_lossy(&result.stderr));
+}
+
+#[test]
 fn immutable_handles_reuse_checked_type_facts_without_erasing_other_requires(){
  let source=r#"module Guarantees;
 refined record Positive{value:u32,} invariant value.value>0;

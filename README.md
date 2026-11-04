@@ -75,6 +75,15 @@ distribution's [contract and evidence](https://github.com/siliconjungle/ink-lang
   emitted literally. No floating-point reassociation or fused reductions.
 - Ordered sums emit indexed loops with the declared rounding/wrapping at each
   addition, eliminating per-element reduction callbacks.
+- Small nonrecursive native-F32/F64-result helpers with scalar or scalar-list parameters
+  can expand under the existing four-level/body/source bounds. Arguments still
+  execute once in order and callee List parameters remain shared. No rounding
+  points, branch demand or ownership rules change.
+- Sealed compiled captures of native F32 lists/vectors may use private
+  `Float32Array` storage after completing ordinary ordered validation/capture.
+  Exact NaN payload tags retain ordinary arrays. Public materialization stays
+  detached; fresh slices remain growable logical Lists. This adds preparation
+  allocation and establishes no finite/range or profitable-selection fact.
 
 ## Trusted native caller contract
 

@@ -72,7 +72,15 @@ impl<'a> Captures<'a> {
             "list"|"vector"=>{
                 let next=self.compile(&ty["element"],named)?;
                 let fixed=if ty["kind"]=="vector"{format!("||n!=={}",ty["size"])}else{String::new()};
-                format!("if(!Array.isArray(value)&&!(ArrayBuffer.isView(value)&&!(value instanceof DataView))){{{bad}}}const n=value.length;if(n>budget.remaining{fixed}){{{bad}}}budget.add(4);const out=new Array(n);for(let i=0;i<n;i++)out[i]={next}(value[i],budget,depth+1);return out;")
+                // Finish the ordinary validation/capture traversal first. Only
+                // its private, normalized numeric carriers enter dense F32
+                // storage. NaN payload tags retain the ordinary slot array.
+                // No host container, getter, validation or resource charge is
+                // skipped, and public materialization remains detached.
+                let result=if self.native_f32&&ty["element"]["kind"]=="f32"{
+                    "return out.every(x=>typeof x==='number')?Float32Array.from(out):out;"
+                }else{"return out;"};
+                format!("if(!Array.isArray(value)&&!(ArrayBuffer.isView(value)&&!(value instanceof DataView))){{{bad}}}const n=value.length;if(n>budget.remaining{fixed}){{{bad}}}budget.add(4);const out=new Array(n);for(let i=0;i<n;i++)out[i]={next}(value[i],budget,depth+1);{result}")
             }
             "record"=>{
                 let fs=ty["fields"].as_array().ok_or("capture fields")?;

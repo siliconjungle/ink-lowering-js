@@ -77,6 +77,13 @@ expand without an already split argument. Retain the same owner handles and
 callee-local List sharing analysis. Recursive helpers, exhausted body/depth/source
 budgets and unsuccessful optional expansion retain ordinary calls; no bounds
 are raised. Owned-parameter functions remain internal to the temporary ABI.
+Small native-F32/F64-result helpers with scalar/scalar-list inputs can use these same
+bounded expansion rules. Preserve eager unused arguments, callee-local sharing,
+borrowed getter demand and exact operation order; no new expansion budget applies.
+Sealed native F32 list/vector captures may use dense private storage only after
+ordinary ordered validation/capture. Preserve tagged NaN payload fallback,
+signed zero, resource charges and detached public outputs. Fresh slices remain
+growable Lists. This fixed carrier grants no range or profitability authority.
 
 Normalized F32 carriers are rounded Numbers or exact NaN tags, not Number/range
 facts. Normalize used scalar parameters at entry; borrowed composite fields keep
