@@ -77,8 +77,11 @@ impl<'a> Captures<'a> {
                 // storage. NaN payload tags retain the ordinary slot array.
                 // No host container, getter, validation or resource charge is
                 // skipped, and public materialization remains detached.
+                // Short lists keep V8's packed double arrays: a typed carrier
+                // only repays its allocation and copy from 64 elements (the call-boundary gate measured a regression for
+                // eight-element prepare-and-call without this bound).
                 let result=if self.native_f32&&ty["element"]["kind"]=="f32"{
-                    "return out.every(x=>typeof x==='number')?Float32Array.from(out):out;"
+                    "return n<64||!out.every(x=>typeof x==='number')?out:Float32Array.from(out);"
                 }else{"return out;"};
                 format!("if(!Array.isArray(value)&&!(ArrayBuffer.isView(value)&&!(value instanceof DataView))){{{bad}}}const n=value.length;if(n>budget.remaining{fixed}){{{bad}}}budget.add(4);const out=new Array(n);for(let i=0;i<n;i++)out[i]={next}(value[i],budget,depth+1);{result}")
             }
