@@ -5,11 +5,29 @@ function __snapshotLimits(limits={}){
  return result;
 }
 const __hash=async bytes=>new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256',bytes));
+const __snapshotText=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true});
 function __snapshotWriter(limits){
- const out=[];let left=limits.values,maxDepth=0;
- function bytes(xs){if(xs.length>limits.bytes-out.length)throw Error('snapshot byte limit exceeded');for(const x of xs)out.push(x);}
- function integer(n,size){n=BigInt(n);for(let i=0;i<size;i++){bytes([Number(n&255n)]);n>>=8n;}}
+ // Bytes accumulate in a growable buffer. The output, and every limit and
+ // conversion error, is the same as appending to a byte list one at a time.
+ let out=new Uint8Array(256),length=0,left=limits.values,maxDepth=0;
+ function grow(n){if(length+n>out.length){let size=out.length*2;while(size<length+n)size*=2;const next=new Uint8Array(size);next.set(out.subarray(0,length));out=next;}}
+ function reserve(n){if(n>limits.bytes-length)throw Error('snapshot byte limit exceeded');grow(n);}
+ function bytes(xs){reserve(xs.length);if(xs instanceof Uint8Array)out.set(xs,length);else for(let i=0;i<xs.length;i++)out[length+i]=xs[i];length+=xs.length;}
+ function word(x){out[length++]=x&255;out[length++]=(x>>>8)&255;out[length++]=(x>>>16)&255;out[length++]=x>>>24;}
+ function integer(n,size){
+  if(size===4&&typeof n==='number'&&Number.isInteger(n)){reserve(4);word(n>>>0);return;}
+  n=BigInt(n);
+  if(size===4){reserve(4);word(Number(BigInt.asUintN(32,n)));return;}
+  if(size===8){reserve(8);const u=BigInt.asUintN(64,n);word(Number(u&0xffffffffn));word(Number(u>>32n));return;}
+  for(let i=0;i<size;i++){bytes([Number(n&255n)]);n>>=8n;}
+ }
  function raw(xs){integer(xs.length,8);bytes(xs);}
+ function text(v){
+  // Encode in place after the length prefix; the limit applies to the bytes written.
+  grow(8+v.length*3);const {written}=__encoder.encodeInto(v,out.subarray(length+8));
+  if(8+written>limits.bytes-length)throw Error('snapshot byte limit exceeded');
+  const start=length;integer(written,8);length=start+8+written;
+ }
  function value(v,t,depth=0,bindings=[]){maxDepth=Math.max(maxDepth,depth);if(--left<0||depth>limits.depth)throw Error('snapshot value/depth limit exceeded');switch(t.kind){
   case 'bind':bindings.push([t.name,t.body]);try{value(v,t.body,depth+1,bindings);}finally{bindings.pop();}break;
   case 'ref':{const bound=bindings.findLast(([name])=>name===t.name);if(!bound)throw Error('unbound recursive snapshot schema');value(v,bound[1],depth+1,bindings);break;}
@@ -18,7 +36,7 @@ function __snapshotWriter(limits){
   case 'f64':integer(__dfBits(v),8);break;
   case 'vector':if(v.length!==t.size)throw Error('vector dimension mismatch');for(const x of v)value(x,t.element,depth+1,bindings);break;
   case 'int':{let n=v<0n?-v:v;const xs=[];while(n){if(xs.length>=4096)throw Error('snapshot Int exceeds size limit');xs.push(Number(n&255n));n>>=8n;}bytes([v===0n?0:v>0n?1:2]);raw(xs);break;}
-  case 'string':raw(__encoder.encode(v));break;
+  case 'string':text(v);break;
   case 'id':integer(BigInt('0x'+v),16);break;
   case 'enum':integer(t.variants.indexOf(v),4);break;
   case 'record':for(const f of t.fields)value(t.elided?v:v[f.name],f.type,depth+1,bindings);break;
@@ -27,7 +45,7 @@ function __snapshotWriter(limits){
   case 'result':{const branch=t.sum_key?__sumView(t.sum_key,v):v;if(Object.hasOwn(branch,'Ok')){bytes([0]);value(branch.Ok,t.ok,depth+1,bindings);}else{bytes([1]);value(branch.Err,t.error,depth+1,bindings);}break;}
   default:throw Error('unsupported snapshot type');
  }}
- return {bytes,integer,raw,value,charge(cells,depth){left-=cells;if(left<0||depth>limits.depth)throw Error('snapshot value/depth limit exceeded');},get maxDepth(){return maxDepth;},get left(){return left;},finish:()=>new Uint8Array(out)};
+ return {bytes,integer,raw,value,charge(cells,depth){left-=cells;if(left<0||depth>limits.depth)throw Error('snapshot value/depth limit exceeded');},get maxDepth(){return maxDepth;},get left(){return left;},finish:()=>out.slice(0,length)};
 }
 async function __snapshotEncode(meta,state,options){
  const limits=__snapshotLimits(options),w=__snapshotWriter(limits);
@@ -56,7 +74,12 @@ async function __snapshotDecode(meta,input,options){
  const end=bytes.length-32,digest=await __hash(bytes.subarray(0,end));if(!same(digest,bytes.subarray(end)))throw Error('snapshot integrity check failed');
  let at=76,left=limits.values;
  function take(n){if(!Number.isSafeInteger(n)||n<0||n>end-at)throw Error('truncated snapshot');const x=bytes.subarray(at,at+n);at+=n;return x;}
- function integer(size){const xs=take(size);let n=0n;for(let i=size-1;i>=0;i--)n=(n<<8n)+BigInt(xs[i]);return n;}
+ function integer(size){
+  const xs=take(size);
+  if(size===4)return BigInt((xs[0]|xs[1]<<8|xs[2]<<16|xs[3]<<24)>>>0);
+  if(size===8){const lo=(xs[0]|xs[1]<<8|xs[2]<<16|xs[3]<<24)>>>0,hi=(xs[4]|xs[5]<<8|xs[6]<<16|xs[7]<<24)>>>0;return hi===0?BigInt(lo):BigInt(hi)<<32n|BigInt(lo);}
+  let n=0n;for(let i=size-1;i>=0;i--)n=(n<<8n)+BigInt(xs[i]);return n;
+ }
  function length(){const n=integer(8);if(n>BigInt(Number.MAX_SAFE_INTEGER))throw Error('snapshot length not addressable');return Number(n);}
  function sequence(){const n=length();if(n>left)throw Error('snapshot value limit exceeded');return n;}
  function raw(){return take(length());}
@@ -69,10 +92,15 @@ async function __snapshotDecode(meta,input,options){
   case 'f64':return __dfFromBits(integer(8));
   case 'vector':{const xs=[];for(let i=0;i<t.size;i++)xs.push(value(t.element,depth+1,bindings));return xs;}
   case 'int':{const sign=take(1)[0],xs=raw();if(xs.length>4096)throw Error('snapshot Int exceeds size limit');if(!((sign===0&&xs.length===0)||((sign===1||sign===2)&&xs.length>0&&xs[xs.length-1]!==0)))throw Error('noncanonical signed integer');let n=0n;for(let i=xs.length-1;i>=0;i--)n=(n<<8n)+BigInt(xs[i]);return sign===2?-n:n;}
-  case 'string':return new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(raw());
+  case 'string':return __snapshotText.decode(raw());
   case 'id':return integer(16).toString(16).padStart(32,'0');
   case 'enum':{const i=Number(integer(4));if(i>=t.variants.length)throw Error('invalid enum tag');return t.variants[i];}
-  case 'record':if(t.elided)return value(t.fields[0].type,depth+1,bindings);return Object.fromEntries(t.fields.map(f=>[f.name,value(f.type,depth+1,bindings)]));
+  case 'record':{
+   if(t.elided)return value(t.fields[0].type,depth+1,bindings);
+   // Own data properties in field order, as Object.fromEntries builds them.
+   const out={};for(const f of t.fields){const field=value(f.type,depth+1,bindings);if(f.name==='__proto__')Object.defineProperty(out,f.name,{value:field,writable:true,enumerable:true,configurable:true});else out[f.name]=field;}
+   return out;
+  }
   case 'list':{const n=sequence(),xs=[];for(let i=0;i<n;i++)xs.push(value(t.element,depth+1,bindings));return xs;}
   case 'option':{const tag=take(1)[0];if(tag===0)return {None:null};if(tag===1)return {Some:value(t.element,depth+1,bindings)};throw Error('invalid Option tag');}
   case 'result':{const tag=take(1)[0];if(tag===0){const child=value(t.ok,depth+1,bindings);return t.sum_key?__sumMake(t.sum_key,true,child):{Ok:child};}if(tag===1){const child=value(t.error,depth+1,bindings);return t.sum_key?__sumMake(t.sum_key,false,child):{Err:child};}throw Error('invalid Result tag');}
