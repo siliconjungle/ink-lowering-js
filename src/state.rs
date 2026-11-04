@@ -24,6 +24,10 @@ struct StateEmitter<'a> {
 struct Filters {
     ids: BTreeMap<(usize, String), usize>,
     tests: Vec<(usize, String)>,
+    /// Sums maintained over a view: each emitted contribution function maps
+    /// an admitted row to a BigInt, keyed by (view, contribution source).
+    sum_ids: BTreeMap<(usize, String), usize>,
+    sums: Vec<String>,
 }
 fn filter_key(param: &str, body: &Expr) -> String {
     format!("{param}\u{0}{body:?}")
@@ -80,6 +84,77 @@ impl StateEmitter<'_> {
         let n = format!("s{}", self.next);
         self.next += 1;
         n
+    }
+    /// The maintained view a closed `Root.values().filter(..)` reads, creating
+    /// its test on first use: (root, view id). None where the filter scans:
+    /// preflight bodies, selected sum views and predicates that are not closed.
+    fn filter_view(&mut self, xs: &Expr, n: &str, args: &[Expr], env: &Env) -> LangResult<Option<(usize, usize)>> {
+        if self.preflight {
+            return Ok(None);
+        }
+        let Some((root, param, body)) = filter_pattern(self.p, xs, n, args) else { return Ok(None) };
+        let xt = self.infer(xs, env, None)?;
+        let probe = self.equality.sums.view_type(self.p, &xt, "__probe")?;
+        if probe != "__probe" || !closed_predicate(self.p, param, body, &|name| env.contains_key(name)) {
+            return Ok(None);
+        }
+        let key = (root, filter_key(param, body));
+        if let Some(id) = self.filters.ids.get(&key) {
+            return Ok(Some((root, *id)));
+        }
+        let Type::Table(_, row) = &self.p.states[root].ty else { return Err("filter root".into()) };
+        let var = self.fresh();
+        let mut local = Env::new();
+        local.insert(param.to_string(), (var.clone(), row.as_ref().clone()));
+        let test = self.expr(body, &local, Some(&Type::Bool))?;
+        let id = self.filters.tests.len();
+        self.filters.tests.push((root, format!("(ctx,rt,{var})=>{{__tick(ctx);return {test};}}")));
+        self.filters.ids.insert(key, id);
+        Ok(Some((root, id)))
+    }
+    /// `count(view)` and `sum(view.map(g))` over a maintained filtered view,
+    /// where `g` reads only its row: the view keeps the count and the total as
+    /// rows change, so a read costs the changed rows, not the admitted ones.
+    /// Totals are exact BigInts wrapped on read, as the scan's u64, u32 and i32
+    /// additions wrap; floating-point sums depend on order and keep the scan.
+    fn view_aggregate(&mut self, n: &str, arg: &Expr, env: &Env, t: &Type, count_number: bool) -> LangResult<Option<String>> {
+        if n == "count" {
+            let Expr::Method(xs, m, fargs) = arg else { return Ok(None) };
+            let Some((root, id)) = self.filter_view(xs, m, fargs, env)? else { return Ok(None) };
+            let count = format!("__filteredCount(ctx,rt,{root},{id})");
+            return Ok(Some(if count_number { count } else { format!("BigInt({count})") }));
+        }
+        let wrap = match t {
+            Type::U64 => "BigInt.asUintN(64,@)",
+            Type::Int => "@",
+            Type::U32 => "Number(BigInt.asUintN(32,@))",
+            Type::I32 => "Number(BigInt.asIntN(32,@))",
+            _ => return Ok(None),
+        };
+        let Expr::Method(inner, map, margs) = arg else { return Ok(None) };
+        let [Expr::Lambda(param, body)] = margs.as_slice() else { return Ok(None) };
+        let Expr::Method(xs, m, fargs) = inner.as_ref() else { return Ok(None) };
+        if map != "map" || !closed_predicate(self.p, param, body, &|name| env.contains_key(name)) {
+            return Ok(None);
+        }
+        let Some((root, id)) = self.filter_view(xs, m, fargs, env)? else { return Ok(None) };
+        let key = (id, filter_key(param, body));
+        let sum = match self.filters.sum_ids.get(&key) {
+            Some(sum) => *sum,
+            None => {
+                let Type::Table(_, row) = &self.p.states[root].ty else { return Err("filter root".into()) };
+                let var = self.fresh();
+                let mut local = Env::new();
+                local.insert(param.to_string(), (var.clone(), row.as_ref().clone()));
+                let value = self.expr(body, &local, Some(t))?;
+                let big = if matches!(t, Type::U32 | Type::I32) { format!("BigInt({value})") } else { value };
+                let sum = self.filters.sums.len();
+                self.filters.sums.push(format!("(ctx,rt,{var})=>{{__tick(ctx);return {big};}}"));
+                self.filters.sum_ids.insert(key, sum);
+                sum
+            }
+        };
+        Ok(Some(wrap.replace('@', &format!("__filteredSum(ctx,rt,{root},{id},{sum})"))))
     }
     fn infer(&self, e: &Expr, _env: &Env, _want: Option<&Type>) -> LangResult<Type> {
         self.execution
@@ -322,6 +397,9 @@ impl StateEmitter<'_> {
                     )
                 }
                 "sum" | "count" => {
+                    if let Some(code) = self.view_aggregate(n, &args[0], env, &t, count_number)? {
+                        return Ok(code);
+                    }
                     let xs = self.expr(&args[0], env, None)?;
                     if n == "count" {
                         if count_number { format!("({xs}).length") } else { format!("BigInt(({xs}).length)") }
@@ -431,28 +509,8 @@ impl StateEmitter<'_> {
                     // A closed filter over a table's rows reads a maintained
                     // view: rows are tested when they change, not on every read.
                     // Preflight bodies and selected sum views keep the scan.
-                    if !self.preflight {
-                        if let Some((root, param, body)) = filter_pattern(self.p, xs, n, args) {
-                            let probe = self.equality.sums.view_type(self.p, &xt, "__probe")?;
-                            if probe == "__probe" && closed_predicate(self.p, param, body, &|name| env.contains_key(name)) {
-                                let Type::Table(_, row) = &self.p.states[root].ty else { return Err("filter root".into()) };
-                                let key = (root, filter_key(param, body));
-                                let id = match self.filters.ids.get(&key) {
-                                    Some(id) => *id,
-                                    None => {
-                                        let var = self.fresh();
-                                        let mut local = Env::new();
-                                        local.insert(param.to_string(), (var.clone(), row.as_ref().clone()));
-                                        let test = self.expr(body, &local, Some(&Type::Bool))?;
-                                        let id = self.filters.tests.len();
-                                        self.filters.tests.push((root, format!("(ctx,rt,{var})=>{{__tick(ctx);return {test};}}")));
-                                        self.filters.ids.insert(key, id);
-                                        id
-                                    }
-                                };
-                                return Ok(format!("__filtered(ctx,rt,{root},{id})"));
-                            }
-                        }
+                    if let Some((root, id)) = self.filter_view(xs, n, args, env)? {
+                        return Ok(format!("__filtered(ctx,rt,{root},{id})"));
                     }
                     let raw = self.expr(xs, env, None)?;
                     let x=self.equality.sums.view_type(self.p,&xt,&raw)?;
@@ -756,7 +814,7 @@ pub(crate) fn emit_with_sums(
     // Maintained filter predicates, and the state each declaration depends on:
     // a root (any row), a filtered view of it (`Root#id`: rows its predicate
     // admits before or after a change) or one row named by a parameter (`Root[i]`).
-    code.push_str(&format!("const __filterTests=[{}];const __filterRoots=[{}];\n",emitter.filters.tests.iter().map(|(_,t)|t.as_str()).collect::<Vec<_>>().join(","),emitter.filters.tests.iter().map(|(r,_)|r.to_string()).collect::<Vec<_>>().join(",")));
+    code.push_str(&format!("const __filterTests=[{}];const __filterRoots=[{}];const __filterSums=[{}];\n",emitter.filters.tests.iter().map(|(_,t)|t.as_str()).collect::<Vec<_>>().join(","),emitter.filters.tests.iter().map(|(r,_)|r.to_string()).collect::<Vec<_>>().join(","),emitter.filters.sums.join(",")));
     let paths=Paths::new(p,&execution,&emitter.filters);
     let filters=emitter.filters.tests.iter().enumerate().map(|(id,(root,_))|json!({"id":id,"root":root,"path":format!("{}#{id}",p.states[*root].name)})).collect::<Vec<_>>();
     for (i,keep) in keeps.iter_mut().enumerate(){keep["deps"]=json!(paths.keep(i)?);}
