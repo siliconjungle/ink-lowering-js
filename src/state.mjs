@@ -47,6 +47,45 @@ function __orderedKeys(rt,index){
  }
  return keys;
 }
+// Maintained filtered views. A view holds the keys (in table order) and rows a
+// closed, pure predicate admits. Writes only mark a key dirty; the next read
+// tests just the dirty rows. A test that throws leaves its keys dirty, so the
+// same error recurs on the next read. A staged single cell reads by scanning.
+const __tableFilters=new WeakMap();
+function __filterScan(ctx,rt,index,test){const out=[];for(const k of __orderedKeys(rt,index)){const row=__cellGet(rt,index,k);if(test(ctx,rt,row))out.push(row);}return out;}
+function __applyFilter(ctx,rt,index,view,test){
+ const type=rt.meta.roots[index].key,table=rt.tables[index],changes=[...view.dirty].sort((a,b)=>__keyCompare(a,b,type)),admit=new Array(changes.length);
+ for(let i=0;i<changes.length;i++){const row=table.get(changes[i]);admit[i]=row!==undefined&&test(ctx,rt,row)?row:undefined;}
+ const K=view.keys,R=view.rows;
+ if(changes.length<=32)for(let i=0;i<changes.length;i++){
+  const key=changes[i],row=admit[i],at=__keyPosition(K,key,type),present=at<K.length&&K[at]===key;
+  if(row!==undefined){if(present)R[at]=row;else{K.splice(at,0,key);R.splice(at,0,row);}}
+  else if(present){K.splice(at,1);R.splice(at,1);}
+ }else{
+  const keys=[],rows=[];let i=0,j=0;
+  while(i<K.length||j<changes.length){
+   if(j===changes.length||(i<K.length&&__keyCompare(K[i],changes[j],type)<0)){keys.push(K[i]);rows.push(R[i]);i++;}
+   else{const key=changes[j],row=admit[j];j++;if(i<K.length&&K[i]===key)i++;if(row!==undefined){keys.push(key);rows.push(row);}}
+  }
+  view.keys=keys;view.rows=rows;
+ }
+ view.dirty.clear();
+}
+function __filtered(ctx,rt,index,id){
+ const test=__filterTests[id],cell=rt.cell;
+ if(cell&&cell.index===index)return __filterScan(ctx,rt,index,test);
+ const table=rt.tables[index];let views=__tableFilters.get(table);
+ if(!views){views=[];__tableFilters.set(table,views);}
+ const view=views[id];
+ if(!view){
+  const keys=[],rows=[];
+  for(const k of __orderedKeys(rt,index)){const row=table.get(k);if(test(ctx,rt,row)){keys.push(k);rows.push(row);}}
+  views[id]={keys,rows,dirty:new Set()};
+  return rows.slice();
+ }
+ if(view.dirty.size)__applyFilter(ctx,rt,index,view,test);
+ return view.rows.slice();
+}
 function __cellGet(rt,index,key){const cell=rt.cell;return cell&&cell.index===index&&cell.key===key?cell.next:rt.tables[index].get(key);}
 function __readTable(rt,index){const cell=rt.cell;if(!cell||cell.index!==index)return rt.tables[index];const table=new Map(rt.tables[index]);if(cell.next===undefined)table.delete(cell.key);else table.set(cell.key,cell.next);return table;}
 // The first before-image of each cell suffices for whole-transaction rollback.
@@ -96,7 +135,7 @@ function __pendingView(rt,view){
  return rt.pendingValues[keep];
 }
 function __prepareCell(rt){if(rt.cell&&rt.activeViewRoots[rt.cell.index]){const prepare=rt.views.prepareRoots?.[rt.cell.index];if(prepare)prepare(rt,rt.cell);else for(const view of rt.viewsByRoot[rt.cell.index])if(rt.keeps[view.keep]!==undefined)__pendingView(rt,view);}}
-function __invalidateSnapshotRow(rt,index,key){rt.snapshotRows?.[index].delete(key);}
+function __invalidateSnapshotRow(rt,index,key){rt.snapshotRows?.[index].delete(key);const filters=rt.filterRoots;if(filters&&filters[index]){const views=__tableFilters.get(rt.tables[index]);if(views)for(const view of views)if(view)view.dirty.add(key);}}
 function __writeCell(rt,index,key,next,prior){
  if(rt.cellMode){if(rt.cell)throw Error('checked single-cell bound exceeded');rt.cell={index,key,next,prior};}
  else{const table=rt.tables[index];__invalidateSnapshotRow(rt,index,key);if(rt.changeTracking)__recordChange(rt,index,key,prior,next);if((prior!==undefined)!==(next!==undefined))__tableMembership(rt,index,key,next!==undefined);if(next===undefined)table.delete(key);else table.set(key,next);}
@@ -149,7 +188,7 @@ function __emit(rt,channel,value){
 // Wide keys retain their original full-width value in the sparse fallback.
 class __DenseTable{
  constructor(capacity){this.limit=capacity;this.dense=[];for(let i=0;i<capacity;i++)this.dense.push(undefined);this.sparse=new Map();this.members=new Set();}
- clear(){this.dense.fill(undefined);this.sparse.clear();this.members.clear();__tableOrder.delete(this);return this;}
+ clear(){this.dense.fill(undefined);this.sparse.clear();this.members.clear();__tableOrder.delete(this);__tableFilters.delete(this);return this;}
  slot(key){const i=Number(key);return Number.isInteger(i)&&i>=0&&i<this.limit?i:-1;}
  get size(){return this.members.size;}
  get(key){const i=this.slot(key);return i<0?this.sparse.get(key):this.dense[i];}
@@ -255,6 +294,8 @@ function __createState(meta,implementations,captures=null,views=[],prefixes=[]){
  rt.changedRoots=new Set();rt.changedOutputs=new Array(meta.keeps.length).fill(0);rt.changedOutputEpoch=0;
  rt.snapshotRows=meta.snapshotRows?meta.roots.map(()=>new Map()):null;
  rt.restoreSpares=null;rt.changeTracking=false;rt.changeLog=[];rt.changeEpoch=0;rt.changeTokens=new Map();
+ rt.filterRoots=typeof __filterRoots!=='undefined'&&__filterRoots.length?Uint8Array.from(meta.roots,(_,i)=>__filterRoots.includes(i)?1:0):null;
+ rt.pathTracking=false;rt.pathMark=0;rt.pathAll=false;
  const actionMap=new Map(meta.actions.map(a=>[a.name,{...a,inputs:captures?captures[a.index]:a.params.map(p=>__stateCapture(p.type)),output:__stateResult(a.result)}]));
  const eventOutput=new Map(meta.events.map(e=>[e.name,__stateResult(e.type)]));
  rt.eventOutput=eventOutput;
@@ -377,7 +418,36 @@ function __createState(meta,implementations,captures=null,views=[],prefixes=[]){
    if(rt.busy||rt.host)throw Error('change token requires transaction boundary');
    const token=Object.freeze({});rt.changeTracking=true;rt.changeTokens.set(token,{epoch:rt.changeEpoch,index:rt.changeLog.length,version:__versionWord(rt.version)});return token;
   },
-  releaseChangeToken(token){rt.changeTokens.delete(token);if(!rt.changeTokens.size){rt.changeTracking=false;rt.changeLog.length=0;}},
+  releaseChangeToken(token){rt.changeTokens.delete(token);if(!rt.changeTokens.size){rt.changeTracking=rt.pathTracking;if(rt.pathTracking){rt.changeLog.splice(0,rt.pathMark);rt.pathMark=0;}else rt.changeLog.length=0;}},
+  // Commit change reports: which roots, filtered views and keys changed since
+  // the previous report. A view changed when a changed row passes its test
+  // before or after the change (a failing test counts as a change). Restores
+  // report everything. Keys list at most `limit` rows per root, else null.
+  trackChanges(){if(rt.busy||rt.host)throw Error('change tracking requires transaction boundary');if(!rt.pathTracking){rt.pathTracking=true;rt.changeTracking=true;rt.pathMark=rt.changeLog.length;rt.pathAll=false;}return true;},
+  takeChanges(limit=64){
+   if(rt.busy||rt.host)throw Error('changes require transaction boundary');
+   if(!rt.pathTracking)throw Error('change tracking is off');
+   const log=rt.changeLog,cells=new Map();
+   for(let i=rt.pathMark;i<log.length;i++){const [root,key,before,after]=log[i];let c=cells.get(root);if(!c)cells.set(root,c=new Map());const prior=c.get(key);if(prior)prior.after=after;else c.set(key,{before,after});}
+   if(rt.changeTokens.size)rt.pathMark=log.length;else{log.length=0;rt.pathMark=0;}
+   if(rt.pathAll){rt.pathAll=false;return {all:true,roots:[],filters:[],keys:{}};}
+   const roots=[],filters=[],keys={},ctx={fuel:100000000},tests=typeof __filterTests==='undefined'?[]:__filterTests;
+   const codecs=rt.changeOutputs??=meta.roots.map(schema=>({key:__stateResult(schema.key),row:__stateResult(schema.value)}));
+   for(const [root,c]of cells){
+    const changed=[];
+    for(const [key,{before,after}]of c)if(before===undefined?after!==undefined:after===undefined||!__stateRootEquals[root](before,after))changed.push(key,before,after);
+    if(!changed.length)continue;
+    const name=meta.roots[root].name;roots.push(name);
+    if(changed.length/3>limit)keys[name]=null;else{const out=[];for(let i=0;i<changed.length;i+=3)out.push(codecs[root].key(changed[i]));keys[name]=out;}
+    for(let id=0;id<tests.length;id++){
+     if(__filterRoots[id]!==root)continue;
+     let hit=false;
+     for(let i=0;i<changed.length&&!hit;i+=3){try{ctx.fuel=100000000;hit=(changed[i+1]!==undefined&&!!tests[id](ctx,rt,changed[i+1]))||(changed[i+2]!==undefined&&!!tests[id](ctx,rt,changed[i+2]));}catch{hit=true;}}
+     if(hit)filters.push(id);
+    }
+   }
+   return {all:false,roots,filters,keys};
+  },
   changesSince(token){
    if(rt.busy||rt.host)throw Error('changes require transaction boundary');
    const mark=rt.changeTokens.get(token);if(!mark||mark.epoch!==rt.changeEpoch)throw Error('invalid change token lineage');
@@ -401,9 +471,9 @@ function __createState(meta,implementations,captures=null,views=[],prefixes=[]){
   async invokeAsync(name,args){
    if(typeof __parallelInvokeAsync!=='function')return invoke(name,args);
    if(rt.busy||rt.host)throw Error('parallel state call requires transaction boundary');const captured=structuredClone(args);rt.busy=true;observers.hold();let completed=false;
-   try{const snapshot=await __snapshotEncode(meta,rt);const reply=await __parallelInvokeAsync(name,captured,snapshot);const s=await __snapshotDecode(meta,reply.snapshot);checkFixed(s.tables);const candidate={...rt,tables:__restoreTables(rt,prefixes,s.tables),keeps:rt.keeps.map(()=>undefined)};__rebuildViews(candidate);const previousTables=rt.tables;rt.tables=candidate.tables;rt.restoreSpares=previousTables.map(table=>table instanceof __DenseTable?table:null);rt.version=__storedCommit(meta,s.version);rt.outbox=__eventLog(meta,s.outbox);rt.keeps=candidate.keeps;rt.activeViewRoots=candidate.activeViewRoots;if(rt.snapshotRows)rt.snapshotRows=meta.roots.map(()=>new Map());rt.changeEpoch++;rt.changeLog.length=0;completed=true;return reply.value;}finally{rt.busy=false;if(completed)observers.commit(meta.roots.map((_,i)=>i));observers.release();}
+   try{const snapshot=await __snapshotEncode(meta,rt);const reply=await __parallelInvokeAsync(name,captured,snapshot);const s=await __snapshotDecode(meta,reply.snapshot);checkFixed(s.tables);const candidate={...rt,tables:__restoreTables(rt,prefixes,s.tables),keeps:rt.keeps.map(()=>undefined)};__rebuildViews(candidate);const previousTables=rt.tables;rt.tables=candidate.tables;rt.restoreSpares=previousTables.map(table=>table instanceof __DenseTable?table:null);rt.version=__storedCommit(meta,s.version);rt.outbox=__eventLog(meta,s.outbox);rt.keeps=candidate.keeps;rt.activeViewRoots=candidate.activeViewRoots;if(rt.snapshotRows)rt.snapshotRows=meta.roots.map(()=>new Map());rt.changeEpoch++;rt.changeLog.length=0;rt.pathMark=0;rt.pathAll=rt.pathTracking;completed=true;return reply.value;}finally{rt.busy=false;if(completed)observers.commit(meta.roots.map((_,i)=>i));observers.release();}
   },
   checkpoint(limits){if(rt.busy)throw Error('checkpoint requires transaction boundary');return __snapshotEncode(meta,rt,limits);},
-  async restore(bytes,limits){if(rt.host)throw Error('restore during transaction');if(rt.busy)throw Error('restore requires transaction boundary');rt.busy=true;rt.ctx.fuel=100000000;observers.hold();let restored=false;try{const s=await __snapshotDecode(meta,bytes,limits);checkFixed(s.tables);const candidate={...rt,tables:__restoreTables(rt,prefixes,s.tables),version:__storedCommit(meta,s.version),outbox:s.outbox,keeps:rt.keeps.map(()=>undefined)};__rebuildViews(candidate);for(const name of meta.invariantChecks||[]){const a=actionMap.get(name);if(implementations[a.index](rt.ctx,candidate)!==true)throw Error('snapshot violates state invariant');}const previousTables=rt.tables;rt.tables=candidate.tables;rt.restoreSpares=previousTables.map(table=>table instanceof __DenseTable?table:null);rt.version=__storedCommit(meta,s.version);rt.outbox=__eventLog(meta,s.outbox);rt.keeps=candidate.keeps;rt.activeViewRoots=candidate.activeViewRoots;if(rt.snapshotRows)rt.snapshotRows=meta.roots.map(()=>new Map());rt.changeEpoch++;rt.changeLog.length=0;restored=true;}finally{rt.busy=false;if(restored)observers.commit(meta.roots.map((_,i)=>i));observers.release();}},
+  async restore(bytes,limits){if(rt.host)throw Error('restore during transaction');if(rt.busy)throw Error('restore requires transaction boundary');rt.busy=true;rt.ctx.fuel=100000000;observers.hold();let restored=false;try{const s=await __snapshotDecode(meta,bytes,limits);checkFixed(s.tables);const candidate={...rt,tables:__restoreTables(rt,prefixes,s.tables),version:__storedCommit(meta,s.version),outbox:s.outbox,keeps:rt.keeps.map(()=>undefined)};__rebuildViews(candidate);for(const name of meta.invariantChecks||[]){const a=actionMap.get(name);if(implementations[a.index](rt.ctx,candidate)!==true)throw Error('snapshot violates state invariant');}const previousTables=rt.tables;rt.tables=candidate.tables;rt.restoreSpares=previousTables.map(table=>table instanceof __DenseTable?table:null);rt.version=__storedCommit(meta,s.version);rt.outbox=__eventLog(meta,s.outbox);rt.keeps=candidate.keeps;rt.activeViewRoots=candidate.activeViewRoots;if(rt.snapshotRows)rt.snapshotRows=meta.roots.map(()=>new Map());rt.changeEpoch++;rt.changeLog.length=0;rt.pathMark=0;rt.pathAll=rt.pathTracking;restored=true;}finally{rt.busy=false;if(restored)observers.commit(meta.roots.map((_,i)=>i));observers.release();}},
  });
 }

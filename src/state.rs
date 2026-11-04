@@ -14,6 +14,50 @@ struct StateEmitter<'a> {
     // addresses are never serialized or accepted as semantic evidence.
     at_position: BTreeMap<usize, String>,
     native_helpers: BTreeSet<usize>,
+    filters: Filters,
+}
+/// Maintained filtered views over state tables. A view is one closed predicate
+/// over one table's rows; identical predicates share a view. Each entry keeps
+/// the emitted predicate, which the runtime uses to maintain the view and to
+/// report whether a commit changed it.
+#[derive(Default)]
+struct Filters {
+    ids: BTreeMap<(usize, String), usize>,
+    tests: Vec<(usize, String)>,
+}
+fn filter_key(param: &str, body: &Expr) -> String {
+    format!("{param}\u{0}{body:?}")
+}
+/// A predicate is closed when it reads only its row: no captured local, state
+/// root or keep, and no call into a query or change. Pure function calls and
+/// constant names remain.
+fn closed_predicate(p: &Program, param: &str, body: &Expr, bound: &dyn Fn(&str) -> bool) -> bool {
+    let free = ink_core::analysis::free_variables(body);
+    if free.iter().any(|n| n != param && (bound(n) || p.states.iter().any(|s| &s.name == n) || p.keeps.iter().any(|k| &k.name == n))) {
+        return false;
+    }
+    let mut calls_action = false;
+    ink_core::analysis::walk(body, |e| {
+        if let Expr::Call(n, _) = e {
+            if p.actions.iter().any(|a| &a.name == n) {
+                calls_action = true;
+            }
+        }
+    });
+    !calls_action
+}
+/// `Root.values().filter(fn(row)=>...)` over a state table: (root index, parameter, body).
+fn filter_pattern<'e>(p: &Program, xs: &'e Expr, n: &str, args: &'e [Expr]) -> Option<(usize, &'e str, &'e Expr)> {
+    if n != "filter" {
+        return None;
+    }
+    let (Expr::Method(receiver, values, none), [Expr::Lambda(param, body)]) = (xs, args) else { return None };
+    let Expr::Var(root) = receiver.as_ref() else { return None };
+    if values != "values" || !none.is_empty() {
+        return None;
+    }
+    let i = p.states.iter().position(|s| &s.name == root)?;
+    matches!(p.states[i].ty, Type::Table(..)).then_some((i, param.as_str(), body.as_ref()))
 }
 impl StateEmitter<'_> {
     /// Arithmetic-only Number intermediates. Leaves still execute at their
@@ -384,6 +428,32 @@ impl StateEmitter<'_> {
                     }
                     format!("__table(rt,{i},{},[{}])", quote(n), values.join(","))
                 } else {
+                    // A closed filter over a table's rows reads a maintained
+                    // view: rows are tested when they change, not on every read.
+                    // Preflight bodies and selected sum views keep the scan.
+                    if !self.preflight {
+                        if let Some((root, param, body)) = filter_pattern(self.p, xs, n, args) {
+                            let probe = self.equality.sums.view_type(self.p, &xt, "__probe")?;
+                            if probe == "__probe" && closed_predicate(self.p, param, body, &|name| env.contains_key(name)) {
+                                let Type::Table(_, row) = &self.p.states[root].ty else { return Err("filter root".into()) };
+                                let key = (root, filter_key(param, body));
+                                let id = match self.filters.ids.get(&key) {
+                                    Some(id) => *id,
+                                    None => {
+                                        let var = self.fresh();
+                                        let mut local = Env::new();
+                                        local.insert(param.to_string(), (var.clone(), row.as_ref().clone()));
+                                        let test = self.expr(body, &local, Some(&Type::Bool))?;
+                                        let id = self.filters.tests.len();
+                                        self.filters.tests.push((root, format!("(ctx,rt,{var})=>{{__tick(ctx);return {test};}}")));
+                                        self.filters.ids.insert(key, id);
+                                        id
+                                    }
+                                };
+                                return Ok(format!("__filtered(ctx,rt,{root},{id})"));
+                            }
+                        }
+                    }
                     let raw = self.expr(xs, env, None)?;
                     let x=self.equality.sums.view_type(self.p,&xt,&raw)?;
                     if n == "concat" {
@@ -541,6 +611,7 @@ pub(crate) fn emit_with_sums(
         equality: super::TypedEquality::new(p, "__stateValueEqual"),
         at_position: BTreeMap::new(),
         native_helpers,
+        filters: Filters::default(),
     };
     emitter.equality.elisions=elisions.clone();
     emitter.equality.sums=sums.clone();
@@ -682,6 +753,14 @@ pub(crate) fn emit_with_sums(
         code.push_str(&format!("function __stateCommitRoot{root}(rt,key,prior,next,slot){{__storeDirect(rt,{root},key,prior,next,slot);const publish=rt.meta.outputPublication&&!rt.observers.directRoots[{root}]&&rt.observers.active;if(publish&&++rt.changedOutputEpoch===4294967296){{rt.changedOutputs.fill(0);rt.changedOutputEpoch=1;}}{updates}}}\n"));
     }
     code.push_str(&format!("const __stateDirectReadFactories=[{}];\n",direct_read_factories.join(",")));
+    // Maintained filter predicates, and the state each declaration depends on:
+    // a root (any row), a filtered view of it (`Root#id`: rows its predicate
+    // admits before or after a change) or one row named by a parameter (`Root[i]`).
+    code.push_str(&format!("const __filterTests=[{}];const __filterRoots=[{}];\n",emitter.filters.tests.iter().map(|(_,t)|t.as_str()).collect::<Vec<_>>().join(","),emitter.filters.tests.iter().map(|(r,_)|r.to_string()).collect::<Vec<_>>().join(",")));
+    let paths=Paths::new(p,&execution,&emitter.filters);
+    let filters=emitter.filters.tests.iter().enumerate().map(|(id,(root,_))|json!({"id":id,"root":root,"path":format!("{}#{id}",p.states[*root].name)})).collect::<Vec<_>>();
+    for (i,keep) in keeps.iter_mut().enumerate(){keep["deps"]=json!(paths.keep(i)?);}
+    for action in actions.iter_mut(){let name=action["name"].as_str().unwrap_or_default().to_string();let mut deps=paths.action(&name)?;if let Some(guard)=p.contracts.precondition_checks.get(&name){deps.extend(paths.action(guard)?.into_iter().map(|d|paths.unkeyed(&d)));}action["deps"]=json!(deps);}
     code.push_str(&emitter.equality.source());
     // Embedded data uses the public capture boundary. Encode u64s as decimal
     // strings before JSON.parse so JavaScript never rounds a large word literal.
@@ -718,7 +797,7 @@ pub(crate) fn emit_with_sums(
         .iter()
         .map(|(n, t)| Ok(json!({"name":n,"type":descriptor(t,p,&mut BTreeSet::new())?,"snapshotType":ink_core::snapshot_wire::descriptor(&layout.events.iter().find(|(name,_)|name==n).unwrap().1)})))
         .collect::<LangResult<Vec<_>>>()?;
-    let mut state = json!({"actions":actions,"roots":roots,"events":events,"keeps":keeps,"keepInvalidations":keep_invalidations,"lazyMaintenance":protocol.is_none(),"invariantChecks":p.contracts.invariant_checks,"outputPublication":protocol.is_some_and(|p|p.plan().output_publication),"snapshotRows":protocol.is_some_and(|p|p.plan().snapshot_rows),"eventColumns":protocol.is_some_and(|p|p.plan().event_columns),"eventRuns":protocol.is_some_and(|p|p.plan().event_runs),"compactCommits":protocol.is_some_and(|p|p.plan().compact_commits.is_some()),"snapshot":{"program":layout.program,"schema":layout.schema}});
+    let mut state = json!({"actions":actions,"filters":filters,"roots":roots,"events":events,"keeps":keeps,"keepInvalidations":keep_invalidations,"lazyMaintenance":protocol.is_none(),"invariantChecks":p.contracts.invariant_checks,"outputPublication":protocol.is_some_and(|p|p.plan().output_publication),"snapshotRows":protocol.is_some_and(|p|p.plan().snapshot_rows),"eventColumns":protocol.is_some_and(|p|p.plan().event_columns),"eventRuns":protocol.is_some_and(|p|p.plan().event_runs),"compactCommits":protocol.is_some_and(|p|p.plan().compact_commits.is_some()),"snapshot":{"program":layout.program,"schema":layout.schema}});
     if let Some(protocol)=protocol {
         for prefix in &protocol.plan().columns {
             let i=p.states.iter().position(|s|s.name==prefix.table).unwrap();
@@ -739,4 +818,118 @@ pub(crate) fn emit_with_sums(
         "export function createState(){return __createState(__stateMetadata,__actions,__stateInputCaptures);}\n",
     );
     Ok((code, state))
+}
+
+/// State dependencies of checked declarations, in the paths the runtime
+/// reports for each commit. Analysis follows the same elaborated bodies the
+/// emitter lowers; anything it cannot name precisely depends on the whole root.
+struct Paths<'a> {
+    p: &'a Program,
+    execution: &'a ink_core::action_ir::Execution,
+    filters: &'a Filters,
+    keeps: std::cell::RefCell<BTreeMap<usize, BTreeSet<String>>>,
+    actions: std::cell::RefCell<BTreeMap<String, BTreeSet<String>>>,
+    active: std::cell::RefCell<BTreeSet<String>>,
+}
+// A lexical scope: parameters carry their position, other locals none.
+type Scope = BTreeMap<String, Option<usize>>;
+impl<'a> Paths<'a> {
+    fn new(p: &'a Program, execution: &'a ink_core::action_ir::Execution, filters: &'a Filters) -> Self {
+        Paths { p, execution, filters, keeps: Default::default(), actions: Default::default(), active: Default::default() }
+    }
+    /// A parameter-keyed row path is only meaningful to the declaration whose
+    /// parameter it names; through a call it widens to the root.
+    fn unkeyed(&self, path: &str) -> String {
+        match path.find('[') { Some(i) => path[..i].to_string(), None => path.to_string() }
+    }
+    fn enter(&self, name: String) -> LangResult<()> {
+        if !self.active.borrow_mut().insert(name.clone()) { return Err(format!("cyclic state dependency through {name}")); }
+        Ok(())
+    }
+    fn keep(&self, i: usize) -> LangResult<BTreeSet<String>> {
+        if let Some(found) = self.keeps.borrow().get(&i) { return Ok(found.clone()); }
+        let keep = self.execution.keeps().get(i).ok_or("keep index")?;
+        self.enter(format!("keep {}", keep.name))?;
+        let mut out = BTreeSet::new();
+        let result = self.expr(&keep.value, &Scope::new(), &mut out);
+        self.active.borrow_mut().remove(&format!("keep {}", keep.name));
+        result?;
+        self.keeps.borrow_mut().insert(i, out.clone());
+        Ok(out)
+    }
+    fn action(&self, name: &str) -> LangResult<BTreeSet<String>> {
+        if let Some(found) = self.actions.borrow().get(name) { return Ok(found.clone()); }
+        let action = self.execution.actions().iter().find(|a| a.name == name).ok_or("action dependency")?;
+        self.enter(format!("action {name}"))?;
+        let mut scope = Scope::new();
+        for (i, (n, _)) in action.params.iter().enumerate() { scope.insert(n.clone(), Some(i)); }
+        let mut out = BTreeSet::new();
+        let result = self.block(&action.body, &mut scope, &mut out);
+        self.active.borrow_mut().remove(&format!("action {name}"));
+        result?;
+        self.actions.borrow_mut().insert(name.to_string(), out.clone());
+        Ok(out)
+    }
+    fn block(&self, body: &[Statement], scope: &mut Scope, out: &mut BTreeSet<String>) -> LangResult<()> {
+        for statement in body {
+            match statement {
+                Statement::Let(n, _, e) => { self.expr(e, scope, out)?; scope.insert(n.clone(), None); }
+                Statement::Return(e) | Statement::Expr(e) | Statement::Emit(_, e) => self.expr(e, scope, out)?,
+                Statement::If(c, a, b) => {
+                    self.expr(c, scope, out)?;
+                    self.block(a, &mut scope.clone(), out)?;
+                    self.block(b, &mut scope.clone(), out)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    fn expr(&self, e: &Expr, scope: &Scope, out: &mut BTreeSet<String>) -> LangResult<()> {
+        match e {
+            Expr::Method(xs, n, args) => {
+                if let Some((root, param, body)) = filter_pattern(self.p, xs, n, args) {
+                    if closed_predicate(self.p, param, body, &|name| scope.contains_key(name)) {
+                        if let Some(id) = self.filters.ids.get(&(root, filter_key(param, body))) {
+                            out.insert(format!("{}#{id}", self.p.states[root].name));
+                            return Ok(());
+                        }
+                    }
+                }
+                if let (Expr::Var(root), [Expr::Var(key)]) = (xs.as_ref(), args.as_slice()) {
+                    if (n == "get" || n == "contains") && !scope.contains_key(root) && self.p.states.iter().any(|s| &s.name == root) {
+                        if let Some(Some(i)) = scope.get(key) {
+                            out.insert(format!("{root}[{i}]"));
+                            return Ok(());
+                        }
+                    }
+                }
+                self.expr(xs, scope, out)?;
+                for a in args { self.expr(a, scope, out)?; }
+            }
+            Expr::Var(n) => {
+                if scope.contains_key(n) { return Ok(()); }
+                if self.p.states.iter().any(|s| &s.name == n) { out.insert(n.clone()); }
+                else if let Some(i) = self.execution.keeps().iter().position(|k| &k.name == n) { out.extend(self.keep(i)?); }
+            }
+            Expr::Call(n, args) => {
+                if self.execution.actions().iter().any(|a| &a.name == n) {
+                    out.extend(self.action(n)?.iter().map(|d| self.unkeyed(d)));
+                }
+                for a in args { self.expr(a, scope, out)?; }
+            }
+            Expr::Let(n, _, a, b) => {
+                self.expr(a, scope, out)?;
+                let mut local = scope.clone();
+                local.insert(n.clone(), None);
+                self.expr(b, &local, out)?;
+            }
+            Expr::Lambda(n, b) => {
+                let mut local = scope.clone();
+                local.insert(n.clone(), None);
+                self.expr(b, &local, out)?;
+            }
+            _ => { for c in ink_core::analysis::children(e) { self.expr(c, scope, out)?; } }
+        }
+        Ok(())
+    }
 }
