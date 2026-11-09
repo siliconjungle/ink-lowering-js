@@ -109,6 +109,7 @@ pub(super) fn emit(
     native_f32: bool,
     sums:&super::sum_layout::Sums,
     boundaries:&[ink_core::physical::BoundaryReader],
+    contract:&serde_json::Value,
 ) -> LangResult<String> {
     let named = p
         .records
@@ -138,7 +139,6 @@ pub(super) fn emit(
     let mut named_groups = BTreeMap::<String, (String, String)>::new();
     let mut definitions = String::new();
     let mut entries = vec![];
-    let contract = ink_abi::wire_contract::source_contract(p)?;
     for (index, f) in p.functions.iter().enumerate() {
         if ink_core::local_collections::owned(&f.result, p)
             || f.params
