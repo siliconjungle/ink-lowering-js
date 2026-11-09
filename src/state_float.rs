@@ -68,7 +68,7 @@ impl<'a> Bridges<'a> {
                     format!("({{{}}})",fields.join(","))
                 }
             }
-            Type::List(t)|Type::Vector(t,_)=>format!("Array.from(value,item=>{})",self.convert(t,"item",native)?),
+            Type::List(t)|Type::Vector(t,_)=>format!("__mapList(value,item=>{})",self.convert(t,"item",native)?),
             Type::Option(t)=>format!("Object.hasOwn(value,'Some')?{{Some:{}}}:{{None:null}}",self.convert(t,"value.Some",native)?),
             Type::Result(a,b)=>{
                 let schema=descriptor(ty,self.program,&mut BTreeSet::new())?;
