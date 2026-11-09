@@ -1,5 +1,13 @@
 // @helper representation
 // Representation conversion only. Callers supply values matching metadata.
+// Map a List element-wise with a counted loop: Array.from with a mapping
+// callback is several times slower. Other iterables keep Array.from.
+const __mapList = (value,f,context) => {
+  if(!Array.isArray(value)&&!ArrayBuffer.isView(value))return Array.from(value,item=>f(item,context));
+  const n=value.length,out=new Array(n);
+  for(let i=0;i<n;i++)out[i]=f(value[i],context);
+  return out;
+};
 const __view = new DataView(new ArrayBuffer(4));
 const __float = bits => { __view.setUint32(0, bits, true); return __view.getFloat32(0, true); };
 const __bits = number => { if(Number.isNaN(number))return 0x7fc00000; __view.setFloat32(0, number, true); return __view.getUint32(0, true); };
@@ -82,7 +90,7 @@ function __representationRaw(type, output, capture) {
     } : value => typeof value === 'number' ? __bits(value) : value.F32Bits;
     case 'list': case 'vector': {
       const element = __representation(type.element, output,capture);
-      return element === __identity ? __identity : (value,context) => Array.from(value, item=>element(item,context));
+      return element === __identity ? __identity : (value,context) => __mapList(value,element,context);
     }
     case 'record': {
       if((typeof __recordElisions!=='undefined'&&__recordElisions.has(type.name))){
@@ -198,7 +206,7 @@ function __stateInput(value,type,budget={cells:1000000},depth=0,maxDepth=64){
     case 'list':case 'vector':{
       if(!Array.isArray(value)&&!(ArrayBuffer.isView(value)&&!(value instanceof DataView)))throw Error('invalid list');
       if(type.kind==='vector'&&value.length!==type.size)throw Error('invalid vector length');
-      return Array.from(value,v=>input(v,type.element));
+      return __mapList(value,input,type.element);
     }
     case 'record':if(!value||typeof value!=='object'||Array.isArray(value)||!type.fields.every(f=>Object.hasOwn(value,f.name)))throw Error('invalid record');if((typeof __recordElisions!=='undefined'&&__recordElisions.has(type.name))){const f=type.fields[0];return input(value[f.name],f.type);}return Object.fromEntries(type.fields.map(f=>[f.name,input(value[f.name],f.type)]));
     case 'option':if(tagged('Some'))return {Some:input(value.Some,type.element)};if(tagged('None')&&value.None===null)return {None:null};throw Error('invalid Option');
@@ -245,7 +253,7 @@ function __stateResult(type){
    // the intermediate entry arrays; only __proto__ needs defineProperty.
    const plain=fields.every(([name])=>name!=='__proto__');
    return __ownedResult(plain?(value,context)=>{const result={};for(let i=0;i<fields.length;i++){const field=fields[i];result[field[0]]=field[1](value[field[0]],context);}return result;}:(value,context)=>Object.fromEntries(fields.map(([name,copy])=>[name,copy(value[name],context)])),fields.some(([,copy])=>copy.container),type);}
-  case 'list':case 'vector':{const copy=__stateResult(type.element);return __ownedResult((value,context)=>Array.from(value,item=>copy(item,context)),copy.container,type);}
+  case 'list':case 'vector':{const copy=__stateResult(type.element);return __ownedResult((value,context)=>__mapList(value,copy,context),copy.container,type);}
   case 'option':{const copy=__stateResult(type.element);return __ownedResult((value,context)=>Object.hasOwn(value,'Some')?{Some:copy(value.Some,context)}:{None:null},copy.container,type);}
   case 'result':{const ok=__stateResult(type.ok),err=__stateResult(type.error),key=typeof __sumSpecs==='undefined'?null:__sumKey(type),flat=key!==null&&__sumSpecs.has(key);return __ownedResult((value,context)=>{const v=flat?__sumView(key,value):value;return Object.hasOwn(v,'Ok')?{Ok:ok(v.Ok,context)}:{Err:err(v.Err,context)};},ok.container||err.container,type);}
   default:return __representation(type,true);
