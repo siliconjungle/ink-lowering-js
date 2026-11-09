@@ -2361,7 +2361,8 @@ export function callOwned(name,args,limits={}){
  const result=__ownedImplementations[name](...args);return __ownedFunctions[name](result,createValueCaptureBudget(limits),0);
 }
 "#);
-    javascript.push_str(&compiled_values::emit(p,elisions,native_f32,&emitter.equality.sums,boundary_readers)?);
+    // The wire contract built for the interface above, not rebuilt.
+    javascript.push_str(&compiled_values::emit(p,elisions,native_f32,&emitter.equality.sums,boundary_readers,&interface["wire"])?);
     for (i, f) in p.functions.iter().enumerate() {
         if matches!(f.result, Type::List(_))
             && (!elisions.is_empty() || !sum_types.is_empty() || interface["functions"][i]["result"]["element"]
