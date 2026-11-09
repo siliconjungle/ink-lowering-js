@@ -132,6 +132,44 @@ fn word_load(value: &str, t: &Type) -> String {
     }
 }
 
+/// A list pipeline: a source list (or two lists zipped by a callback) and the
+/// map/filter stages applied to it, innermost first. Emitted as one loop, it
+/// allocates no intermediate lists and traverses its input once.
+struct Pipeline<'a> {
+    source: &'a Expr,
+    zip: Option<(&'a Expr, &'a Expr)>,
+    stages: Vec<(&'a str, &'a Expr, &'a Expr)>,
+}
+fn pipeline(e: &Expr) -> Pipeline<'_> {
+    let mut stages = vec![];
+    let mut current = e;
+    let mut zip = None;
+    loop {
+        match current {
+            Expr::Method(xs, m, args)
+                if (m == "map" || m == "filter") && args.len() == 1 && matches!(args[0], Expr::Lambda(..)) =>
+            {
+                stages.push((m.as_str(), &args[0], current));
+                current = xs;
+            }
+            Expr::Method(xs, m, args) if m == "zip" && args.len() == 2 && matches!(args[1], Expr::Lambda(..)) => {
+                zip = Some((&args[0], &args[1]));
+                stages.push(("zip", &args[1], current));
+                current = xs;
+                break;
+            }
+            _ => break,
+        }
+    }
+    stages.reverse();
+    Pipeline { source: current, zip, stages }
+}
+enum Sink {
+    Collect,
+    Sum,
+    Count,
+}
+
 fn needs_parallel(e: &Expr, p: &Program, seen: &mut std::collections::BTreeSet<String>) -> bool {
     let mut found = false;
     ink_core::analysis::walk(e, |node: &Expr| match node {
@@ -711,6 +749,93 @@ impl Emitter<'_> {
             }
         }
     }
+    /// Emit a pipeline as one loop into a sink, or None when it does not
+    /// apply (a non-list source). `t` is the sink's result type: the list
+    /// type for Collect, the element type for Sum. Callbacks are pure, so
+    /// evaluating each element through every stage in turn, rather than each
+    /// stage over every element, gives the same results in the same order.
+    fn fused(&mut self, p: &Pipeline, env: &Env, sink: Sink, t: &Type) -> LangResult<Option<String>> {
+        let Type::List(inner) = self.infer(p.source, env, None)? else { return Ok(None) };
+        // Each stage's result list type, from its own expression.
+        let mut types = vec![];
+        for (_, _, stage) in &p.stages {
+            let Type::List(element) = self.infer(stage, env, None)? else { return Ok(None) };
+            types.push(*element);
+        }
+        // The last stage produces the sink's element type, as the unfused
+        // code's expected type would give it.
+        match (&sink, types.last_mut(), t) {
+            (Sink::Sum, Some(last), _) => *last = t.clone(),
+            (Sink::Collect, Some(last), Type::List(element)) => *last = *element.clone(),
+            _ => {}
+        }
+        let context = match p.stages.first() {
+            Some(("filter", _, stage)) => Some(self.infer(stage, env, None)?),
+            _ => None,
+        };
+        let xs = self.expr(p.source, env, context.as_ref())?;
+        let xs = self.bind(&xs);
+        let mut second = None;
+        let len = if let Some((ys, _)) = p.zip {
+            let Type::List(other) = self.infer(ys, env, None)? else { return Ok(None) };
+            let ys = self.expr(ys, env, None)?;
+            let ys = self.bind(&ys);
+            let len = self.bind(&format!("Math.min({xs}.length,{ys}.length)"));
+            second = Some((ys, *other));
+            len
+        } else {
+            self.bind(&format!("{xs}.length"))
+        };
+        let filtered = p.stages.iter().any(|(m, ..)| *m == "filter");
+        let out = self.fresh();
+        match sink {
+            Sink::Collect if filtered => self.line(format!("const {out}=[];")),
+            Sink::Collect => self.line(format!("const {out}=new Array({len});")),
+            Sink::Sum => self.line(format!("let {out}={};", zero(t))),
+            Sink::Count => self.line(format!("let {out}=0;")),
+        }
+        let i = self.fresh();
+        self.line(format!("for(let {i}=0;{i}<{len};{i}++){{"));
+        let mut value = self.bind(&word_load(&format!("{xs}[{i}]"), &inner));
+        let mut ty = *inner;
+        // Every stage runs for each element that reaches it, as unfused stages
+        // do, even when the sink only counts: borrowed host inputs can observe
+        // their reads.
+        for (k, (method, callback, _)) in p.stages.iter().enumerate() {
+            match *method {
+                "zip" => {
+                    let (ys, other) = second.clone().expect("zip source");
+                    let right = self.bind(&word_load(&format!("{ys}[{i}]"), &other));
+                    let (body, local) = Self::callback(callback, env, &[(value.clone(), ty.clone()), (right, other)])?;
+                    let next = self.expr(body, &local, Some(&types[k]))?;
+                    value = self.bind(&next);
+                    ty = types[k].clone();
+                }
+                "map" => {
+                    let (body, local) = Self::callback(callback, env, &[(value.clone(), ty.clone())])?;
+                    let next = self.expr(body, &local, Some(&types[k]))?;
+                    value = self.bind(&next);
+                    ty = types[k].clone();
+                }
+                _ => {
+                    let (body, local) = Self::callback(callback, env, &[(value.clone(), ty.clone())])?;
+                    let keep = self.expr(body, &local, Some(&Type::Bool))?;
+                    self.line(format!("if(!({keep}))continue;"));
+                }
+            }
+        }
+        match sink {
+            Sink::Collect if filtered => self.line(format!("{out}.push({value});")),
+            Sink::Collect => self.line(format!("{out}[{i}]={value};")),
+            Sink::Sum => {
+                let add = self.arithmetic("+", &out, &value, t);
+                self.line(format!("{out}={add};"));
+            }
+            Sink::Count => self.line(format!("{out}++;")),
+        }
+        self.line("}");
+        Ok(Some(out))
+    }
     // Keep collection emission off the recursive scalar emitter's stack frame.
     fn collection_expr(
         &mut self,
@@ -729,8 +854,34 @@ impl Emitter<'_> {
         let Type::List(inner) = self.infer(xs, env, context)? else {
             unreachable!()
         };
+        if (method == "map" || method == "filter") && matches!(args.first(), Some(Expr::Lambda(..))) {
+            let p = pipeline(_e);
+            if p.stages.len() >= 2 {
+                if let Some(out) = self.fused(&p, env, Sink::Collect, t)? {
+                    return Ok(out);
+                }
+            }
+        }
         // The receiver's storage is unique and dead after this use.
         let in_place = method == "concat" && self.in_place.contains(xs);
+        // xs.drop(a).take(b) copies only the b elements it keeps: one slice
+        // instead of a copy of everything after a and then a second slice.
+        if method == "take" {
+            if let Expr::Method(base, inner_method, drop_args) = xs {
+                if inner_method == "drop" && drop_args.len() == 1 {
+                    let base = self.expr(base, env, None)?;
+                    let base = self.bind(&base);
+                    let start = self.expr(&drop_args[0], env, Some(&Type::U32))?;
+                    let start = self.bind(&start);
+                    let count = self.expr(&args[0], env, Some(&Type::U32))?;
+                    let count = self.bind(&count);
+                    let end = format!("{start}+{count}");
+                    return Ok(format!(
+                        "(ArrayBuffer.isView({base})?Array.prototype.slice.call({base},{start},{end}):{base}.slice({start},{end}))"
+                    ));
+                }
+            }
+        }
         let xs = self.expr(xs, env, context)?;
         let xs = self.bind(&xs);
         Ok(match method.as_str() {
@@ -1249,6 +1400,13 @@ impl Emitter<'_> {
                 self.line(format!("{out}={value};}}"));
                 out
             }
+            Expr::Call(n, args) if n == "length" && !pipeline(&args[0]).stages.is_empty() => {
+                let p = pipeline(&args[0]);
+                match self.fused(&p, env, Sink::Count, &Type::U32)? {
+                    Some(out) => out,
+                    None => format!("({}).length", self.expr(&args[0], env, None)?),
+                }
+            }
             Expr::Call(n, args) if n == "length" => {
                 format!("({}).length", self.expr(&args[0], env, None)?)
             }
@@ -1568,6 +1726,31 @@ impl Emitter<'_> {
                 }
                 self.line("}");
                 if split.is_some(){let result=self.rebuild(&out);self.split.remove(&out);result}else{out}
+            }
+            Expr::Call(n, args)
+                if (n == "sum" || n == "count") && !pipeline(&args[0]).stages.is_empty() =>
+            {
+                let p = pipeline(&args[0]);
+                let sink = if n == "sum" { Sink::Sum } else { Sink::Count };
+                match self.fused(&p, env, sink, &t)? {
+                    Some(out) if n == "count" && !count_number => format!("BigInt({out})"),
+                    Some(out) => out,
+                    None => {
+                        let context = if n == "sum" { Some(Type::List(Box::new(t.clone()))) } else { None };
+                        let xs = self.expr(&args[0], env, context.as_ref())?;
+                        let xs = self.bind(&xs);
+                        if n == "count" {
+                            if count_number { format!("{xs}.length") } else { format!("BigInt({xs}.length)") }
+                        } else {
+                            let out = self.fresh();
+                            let index = self.fresh();
+                            self.line(format!("let {out}={};for(let {index}=0;{index}<{xs}.length;{index}++){{", zero(&t)));
+                            let value = self.bind(&word_load(&format!("{xs}[{index}]"), &t));
+                            self.line(format!("{out}={};}}", self.arithmetic("+", &out, &value, &t)));
+                            out
+                        }
+                    }
+                }
             }
             Expr::Call(n, args) if n == "sum" || n == "count" => {
                 let context = if n == "sum" {
