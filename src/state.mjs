@@ -22,6 +22,27 @@ function __keyCompare(a,b,type){
 // fetched at traversal time, so replacement never leaves stale row payloads.
 const __tableOrder=new WeakMap();
 function __keyPosition(keys,key,type){let low=0,high=keys.length;while(low<high){const middle=(low+high)>>>1;if(__keyCompare(keys[middle],key,type)<0)low=middle+1;else high=middle;}return low;}
+// Rows in key order for values(), kept beside the ordered keys. Writes mark
+// their keys stale (__invalidateSnapshotRow); a read refreshes only those, and
+// a membership change rebuilds the rows with the merged keys. Null while a
+// staged cell changes membership (__orderedKeys returns a filtered copy).
+// values() returns the cached array itself: a List is never written in place
+// unless the program owns it (ink_core::in_place), and values() is never
+// owned. Once shared, the array is never changed again: the next refresh
+// copies it first, so reads without writes cost nothing.
+function __orderedRows(rt,index){
+ const table=rt.tables[index],keys=__orderedKeys(rt,index),view=__tableOrder.get(table);
+ if(!view||keys!==view.keys)return null;
+ if(view.rowsFor!==keys){view.rows=keys.map(k=>table.get(k));view.rowsFor=keys;view.stale=new Set();view.shared=false;(rt.rowCaches??=new Uint8Array(rt.tables.length))[index]=1;}
+ else if(view.stale.size){
+  const type=rt.meta.roots[index].key;let R=view.rows;
+  if(view.shared){R=view.rows=R.slice();view.shared=false;}
+  for(const key of view.stale){const at=__keyPosition(keys,key,type);if(at<keys.length&&keys[at]===key)R[at]=table.get(key);}
+  view.stale.clear();
+ }
+ view.shared=true;
+ return view.rows;
+}
 function __tableMembership(rt,index,key,present){
  const view=__tableOrder.get(rt.tables[index]);if(!view)return;
  const at=__keyPosition(view.keys,key,rt.meta.roots[index].key);
@@ -163,7 +184,7 @@ function __pendingView(rt,view){
  return rt.pendingValues[keep];
 }
 function __prepareCell(rt){if(rt.cell&&rt.activeViewRoots[rt.cell.index]){const prepare=rt.views.prepareRoots?.[rt.cell.index];if(prepare)prepare(rt,rt.cell);else for(const view of rt.viewsByRoot[rt.cell.index])if(rt.keeps[view.keep]!==undefined)__pendingView(rt,view);}}
-function __invalidateSnapshotRow(rt,index,key){rt.snapshotRows?.[index].delete(key);const filters=rt.filterRoots;if(filters&&filters[index]){const views=__tableFilters.get(rt.tables[index]);if(views)for(const view of views)if(view)view.dirty.add(key);}}
+function __invalidateSnapshotRow(rt,index,key){rt.snapshotRows?.[index].delete(key);const filters=rt.filterRoots;if(filters&&filters[index]){const views=__tableFilters.get(rt.tables[index]);if(views)for(const view of views)if(view)view.dirty.add(key);}const rows=rt.rowCaches;if(rows&&rows[index]){const view=__tableOrder.get(rt.tables[index]);if(view&&view.rows)view.stale.add(key);}}
 function __writeCell(rt,index,key,next,prior){
  if(rt.cellMode){if(rt.cell)throw Error('checked single-cell bound exceeded');rt.cell={index,key,next,prior};}
  else{const table=rt.tables[index];__invalidateSnapshotRow(rt,index,key);if(rt.changeTracking)__recordChange(rt,index,key,prior,next);if((prior!==undefined)!==(next!==undefined))__tableMembership(rt,index,key,next!==undefined);if(next===undefined)table.delete(key);else table.set(key,next);}
@@ -286,6 +307,7 @@ function __table(rt,index,method,args){
  if(method==='get')return __tableGet(rt,index,key);
  if(method==='contains')return __tableContains(rt,index,key);
  const table=rt.tables[index];
+ if(method==='values'&&!(rt.cell&&rt.cell.index===index)){const rows=__orderedRows(rt,index);if(rows)return rows;}
  if(method==='values'||method==='keys'){const keys=__orderedKeys(rt,index);return method==='keys'?keys.slice():keys.map(k=>__cellGet(rt,index,k));}
  if(method==='intersect_table'){const current=__readTable(rt,index),other=__readTable(rt,args[0]),small=current.size<=other.size?current:other,large=small===current?other:current;const result=[];for(const k of small.keys())if(large.has(k))result.push(k);return result.sort((a,b)=>__keyCompare(a,b,rt.meta.roots[index].key));}
  if(method==='intersect_keys'){const requested=args[0],size=rt.tables[index].size;
