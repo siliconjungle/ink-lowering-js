@@ -306,17 +306,17 @@ const NativeArray=globalThis.Array;let allocations=0;
 globalThis.Array=new Proxy(NativeArray,{construct(target,args){allocations++;return Reflect.construct(target,args);}});
 let reads=[];function input(values,tag){const xs=values.slice();values.forEach((value,i)=>Object.defineProperty(xs,i,{get(){reads.push(tag+i);return value;}}));return xs;}
 function reset(){visits={plus:0,pred:0};reads=[];allocations=0;}globalThis.visits={plus:0,pred:0};
-let xs=input([1,2,3],'x'),ys=input([8,9],'y');reset();assert.deepEqual(functions.pipeline(xs,2),[4,5]);assert.deepEqual(reads,['x0','x1','x2']);assert.deepEqual(visits,{plus:2,pred:3});assert.equal(allocations,1); // filter literal + exactly one map allocation; no fused stages
+let xs=input([1,2,3],'x'),ys=input([8,9],'y');reset();assert.deepEqual(functions.pipeline(xs,2),[4,5]);assert.deepEqual(reads,['x0','x1','x2']);assert.deepEqual(visits,{plus:2,pred:3});assert.equal(allocations,0); // filter and map fuse into one loop that pushes into a literal
 reset();assert.deepEqual(functions.indexed(xs,1),[2,4,6]);assert.deepEqual(reads,['x0','x1','x2']);assert.equal(visits.plus,3);assert.equal(allocations,1);
 reset();assert.equal(functions.reverse(xs,9),(1-(2-(3-9)))>>>0);assert.deepEqual(reads,['x2','x1','x0']);assert.equal(allocations,0);
 reset();assert.deepEqual(functions.second(xs,ys),[9,11]);assert.deepEqual(reads,['x0','y0','x1','y1']);assert.equal(allocations,1);
 reset();assert.equal(functions.choose_lazy(xs,false),xs);assert.deepEqual(reads,[]);assert.equal(visits.plus,0);assert.equal(allocations,0);
 reset();assert.equal(functions.lookup_lazy([7],ys),7);assert.deepEqual(reads,[]);assert.equal(visits.plus,0);assert.equal(allocations,0);
 for(const [name,arg,want] of [['div_lazy',3,4],['rem_lazy',5,2],['and_lazy',false,false],['or_lazy',true,true]]){reset();assert.equal(functions[name](xs,arg),want);assert.deepEqual(reads,[]);assert.equal(visits.plus,0);assert.equal(allocations,0);}
-reset();assert.equal(functions.lookup_lazy([],ys),19);assert.deepEqual(reads,['y0','y1']);assert.equal(visits.plus,2);assert.equal(allocations,1);
-reset();assert.equal(functions.div_lazy(xs,0),9);assert.deepEqual(reads,['x0','x1','x2']);assert.equal(visits.plus,3);assert.equal(allocations,1);
-reset();assert.equal(functions.zero_repeat(xs,ys),9);assert.deepEqual(reads,['x0','x1','x2']);assert.equal(visits.plus,3);assert.equal(allocations,1);
-reset();assert.equal(functions.initial_fold([],ys),19);assert.deepEqual(reads,['y0','y1']);assert.equal(visits.plus,2);assert.equal(allocations,1);
+reset();assert.equal(functions.lookup_lazy([],ys),19);assert.deepEqual(reads,['y0','y1']);assert.equal(visits.plus,2);assert.equal(allocations,0);
+reset();assert.equal(functions.div_lazy(xs,0),9);assert.deepEqual(reads,['x0','x1','x2']);assert.equal(visits.plus,3);assert.equal(allocations,0);
+reset();assert.equal(functions.zero_repeat(xs,ys),9);assert.deepEqual(reads,['x0','x1','x2']);assert.equal(visits.plus,3);assert.equal(allocations,0);
+reset();assert.equal(functions.initial_fold([],ys),19);assert.deepEqual(reads,['y0','y1']);assert.equal(visits.plus,2);assert.equal(allocations,0);
 globalThis.Array=NativeArray;console.log('direct stage/read/allocation/order and lazy branch counters passed');
 "#,
     );
