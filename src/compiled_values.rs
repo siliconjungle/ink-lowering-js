@@ -139,6 +139,7 @@ pub(super) fn emit(
     let mut named_groups = BTreeMap::<String, (String, String)>::new();
     let mut definitions = String::new();
     let mut entries = vec![];
+    let mut schemas: Vec<(&Type, Option<Value>)> = vec![];
     for (index, f) in p.functions.iter().enumerate() {
         if ink_core::local_collections::owned(&f.result, p)
             || f.params
@@ -152,13 +153,22 @@ pub(super) fn emit(
         let mut codecs = vec![];
         let mut supported = true;
         for ty in f.params.iter().map(|(_, t)| t).chain([&f.result]) {
-            let logical = descriptor(ty, p, &mut BTreeSet::new())?;
-            let schema = match ink_abi::value_wire::Schema::new(logical.clone(), named.clone()) {
-                Ok(schema) => schema.descriptor(),
-                Err(_) => {
-                    supported = false;
-                    break;
+            // Signatures repeat a few types; each gets one schema.
+            let known = schemas.iter().find(|(seen, _)| *seen == ty).map(|(_, schema)| schema.clone());
+            let schema = match known {
+                Some(schema) => schema,
+                None => {
+                    let logical = descriptor(ty, p, &mut BTreeSet::new())?;
+                    let schema = ink_abi::value_wire::Schema::new(logical, named.clone())
+                        .ok()
+                        .map(|schema| schema.descriptor());
+                    schemas.push((ty, schema.clone()));
+                    schema
                 }
+            };
+            let Some(schema) = schema else {
+                supported = false;
+                break;
             };
             let key = schema["identity"]
                 .as_str()

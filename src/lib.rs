@@ -87,8 +87,39 @@ fn float_literal(bits: u32) -> String {
     if value.is_finite() { format!("{:?}", f64::from(value)) }
     else { format!("__nfFromBits({bits})") }
 }
+// Describing a type serializes the program's declarations. One emission
+// describes thousands of types of one program, so `lower_with_layout`
+// serializes that program's declarations once and leaves them here while it
+// holds the program borrowed. The address identifies the program only for
+// that borrow; any other program takes the ordinary path below.
+thread_local! {
+    static DECLARED: std::cell::RefCell<Option<(usize, [Value; 3])>> = const { std::cell::RefCell::new(None) };
+}
+struct DeclaredScope(Option<(usize, [Value; 3])>);
+impl DeclaredScope {
+    fn enter(p: &Program) -> Self {
+        let declared = (|| Some([
+            serde_json::to_value(&p.records).ok()?,
+            serde_json::to_value(&p.enums).ok()?,
+            serde_json::to_value(&p.ids).ok()?,
+        ]))();
+        let current = declared.map(|values| (p as *const Program as usize, values));
+        Self(DECLARED.with(|slot| slot.replace(current)))
+    }
+}
+impl Drop for DeclaredScope {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        DECLARED.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
 fn descriptor(t: &Type, p: &Program, _seen: &mut BTreeSet<String>) -> LangResult<Value> {
-    ink_abi::describe(t, &p.records, &p.enums, &p.ids)
+    DECLARED.with(|slot| match slot.borrow().as_ref() {
+        Some((program, [records, enums, ids])) if *program == p as *const Program as usize => {
+            ink_abi::describe(t, records, enums, ids)
+        }
+        _ => ink_abi::describe(t, &p.records, &p.enums, &p.ids),
+    })
 }
 fn arithmetic(op: &str, a: &str, b: &str, t: &Type) -> String {
     match t {
@@ -278,6 +309,7 @@ impl<'a> TypedEquality<'a> {
     }
 }
 struct Emitter<'a> {
+    inferred_types: std::cell::RefCell<check::Env>,
     p: &'a Program,
     next: usize,
     budget: usize,
@@ -532,7 +564,15 @@ impl Emitter<'_> {
             .collect()
     }
     fn infer(&self, e: &Expr, env: &Env, want: Option<&Type>) -> LangResult<Type> {
-        check::infer_context(e, &Self::types(env), self.p, want)
+        // Consecutive inferences usually share an environment. Keep its typed
+        // form while the names and types still match; rebuild it otherwise.
+        let mut types = self.inferred_types.borrow_mut();
+        let current = types.len() == env.len()
+            && types.iter().zip(env).all(|((name, ty), (n, (_, t)))| name == n && ty == t);
+        if !current {
+            *types = Self::types(env);
+        }
+        check::infer_context(e, &types, self.p, want)
     }
 
     // Bind callback arguments into a lexical environment at compile time. The
@@ -1984,6 +2024,7 @@ fn lower_with_layout(
     kernels:&[Option<String>],
 ) -> LangResult<Emission> {
     let p = module.program();
+    let _declared = DeclaredScope::enter(p);
     let has_state = !p.actions.is_empty() || !p.states.is_empty() || !p.keeps.is_empty();
     let sums=sum_layout::Sums::new(p,sum_types)?;
     // Pure helpers compute in native carriers; state/actions retain exact bits.
@@ -1995,6 +2036,7 @@ fn lower_with_layout(
     equality.elisions=elisions.clone();
     equality.sums=sums.clone();
     let mut emitter = Emitter {
+        inferred_types: Default::default(),
         p,
         next: 0,
         budget: 200_000,
@@ -2034,7 +2076,7 @@ fn lower_with_layout(
         // Contract predicates execute at the public boundary and therefore keep
         // full inputs as well. Exported logical type metadata never narrows.
         let demand = ink_core::input_demand::fields(f,p);
-        let projected = params.iter().zip(demand).map(|(param,fields)| {
+        let projected = params.iter().zip(&demand).map(|(param,fields)| {
             let mut ty=param["type"].clone();
             if !p.contracts.precondition_checks.contains_key(&f.name) {
                 if let Some(fields)=fields {
@@ -2054,7 +2096,7 @@ fn lower_with_layout(
         let predicate=p.contracts.precondition_checks.get(&f.name)
             .and_then(|name|p.functions.iter().find(|candidate|&candidate.name==name));
         let predicate_used=predicate.map(|function|ink_core::analysis::free_variables(&function.body));
-        let captures=ink_core::input_demand::fields(f,p).into_iter().enumerate().map(|(i,fields)|{
+        let captures=demand.into_iter().enumerate().map(|(i,fields)|{
             if has_state && native_f32 {
                 // Preserve the established stateful module's eager typed
                 // ingress, including accessor order and unused scalar inputs.
