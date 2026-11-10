@@ -70,6 +70,13 @@ const __nfValue = value => typeof value === 'number' ? Math.fround(value) : __nf
 // Number operands have already been normalised at their typed read or producer.
 const __nfNumber = value => typeof value === 'number' ? value : __float(value.F32Bits);
 const __nfBits = value => typeof value === 'number' ? __bits(value) : value.F32Bits;
+// An F32 list every element of which is a number: loops over it may read
+// Math.fround(x) and use the values directly. One scan; typed arrays pass.
+const __nfPlain = xs => {
+  if(ArrayBuffer.isView(xs))return !(xs instanceof DataView);
+  for(let i=0;i<xs.length;i++)if(typeof xs[i]!=='number')return false;
+  return true;
+};
 const __nfFromBits = bits => {
   if((bits & 0x7fffffff)<=0x7f800000)return __float(bits);
   const value=Object.freeze({F32Bits:bits});__nfTagged.add(value);return value;

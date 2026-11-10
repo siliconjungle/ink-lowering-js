@@ -53,13 +53,19 @@ fn fused_pipelines_match_the_reference_evaluator() {
         let end = code[start..].find("\nfunction ").map_or(code.len(), |e| start + e);
         code[start..end].to_string()
     };
+    // F32 sources get a second copy of the loop for plain-number lists.
+    let loops = |code: &str| if code.contains("if(__nfPlain(") { 2 } else { 1 };
+    for name in ["sumf", "dot"] {
+        assert!(body(name).contains("if(__nfPlain("), "{name} has a plain-number copy");
+    }
     for name in ["sum32", "sum64", "sumf", "dot", "revenue", "how_many", "counted", "open_count"] {
         let code = body(name);
-        assert_eq!(code.matches("for(").count(), 1, "{name} is one loop:\n{code}");
+        assert_eq!(code.matches("for(").count(), loops(&code), "{name} is one loop:\n{code}");
         assert!(!code.contains(".push(") && !code.contains("new Array("), "{name} builds no list:\n{code}");
     }
     for name in ["kept", "chain", "mapped_twice", "zip_kept", "heavy"] {
-        assert_eq!(body(name).matches("for(").count(), 1, "{name} is one loop");
+        let code = body(name);
+        assert_eq!(code.matches("for(").count(), loops(&code), "{name} is one loop");
     }
     assert_eq!(body("mapped_length").matches("for(").count(), 1, "a length after maps still runs each map once");
 
@@ -84,12 +90,18 @@ fn fused_pipelines_match_the_reference_evaluator() {
         let others: Vec<u32> = (0..(next() % 12) as usize).map(|_| (next() % 20) as u32).collect();
         let wide: Vec<u64> = words.iter().map(|w| [*w as u64, 18446744073709551615, 9007199254740993][(next() % 3) as usize]).collect();
         let signed: Vec<i32> = words.iter().map(|w| *w as i32).collect();
-        let floats: Vec<f32> = (0..n).map(|_| [0.0f32, 0.75, -1.5, 3.4e38, 1e-45, 0.1][(next() % 6) as usize]).collect();
+        // Finite values as numbers; every few rounds a NaN payload or an
+        // infinity as exact bits, which JavaScript receives as a tagged value.
+        let floats: Vec<Value> = (0..n).map(|_| match next() % 9 {
+            6 if round % 3 == 0 => json!({"F32Bits": 0x7fc0_1234u32}),
+            7 if round % 3 == 0 => json!({"F32Bits": 0xff80_0000u32}),
+            k => json!([0.0f32, 0.75, -1.5, 3.4e38, 1e-45, 0.1, 2.0, 0.5, 4.0][k as usize]),
+        }).collect();
         let items: Vec<Value> = (0..n)
             .map(|i| {
                 let price = [0u64, 7, 18446744073709551615][(next() % 3) as usize];
                 let (qty, open) = (next() % 5, next() % 2 == 0);
-                json!({"id":i,"price":price,"qty":qty,"open":open,"weight":floats.get(i).copied().unwrap_or(0.0)})
+                json!({"id":i,"price":price,"qty":qty,"open":open,"weight":floats.get(i).cloned().unwrap_or(json!(0.0))})
             })
             .collect();
         let limit = [0u32, 4, 2147483649, 4294967295][round % 4];

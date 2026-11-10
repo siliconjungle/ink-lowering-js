@@ -834,10 +834,66 @@ impl Emitter<'_> {
             Sink::Sum => self.line(format!("let {out}={};", zero(t))),
             Sink::Count => self.line(format!("let {out}=0;")),
         }
+        // An F32 sum starts at 0 and is only assigned Math.fround results.
+        if self.native_f32 && matches!(sink, Sink::Sum) && *t == Type::F32 {
+            self.f32_numbers.insert(out.clone());
+        }
+        // F32 list elements may be numbers or tagged NaN payloads, so each read
+        // is normalised and each use checks its carrier. When every F32 source
+        // is plain numbers (one scan, or a Float32Array) and every captured F32
+        // scalar is a number, a second copy of the loop reads Math.fround(x)
+        // and uses the values directly. Both copies compute the same values.
+        let mut plain = vec![];
+        if self.native_f32 {
+            if *inner == Type::F32 { plain.push(xs.clone()); }
+            if let Some((ys, Type::F32)) = &second { plain.push(ys.clone()); }
+        }
+        if plain.is_empty() {
+            self.fused_loop(p, env, &types, &xs, &second, &len, &inner, &out, &sink, t, filtered, &[])?;
+            return Ok(Some(out));
+        }
+        let mut captured = BTreeSet::new();
+        for (_, callback, _) in &p.stages {
+            for name in ink_core::analysis::free_variables(callback) {
+                if let Some((js, Type::F32)) = env.get(&name) {
+                    captured.insert(js.clone());
+                }
+            }
+        }
+        let guard = plain.iter().map(|xs| format!("__nfPlain({xs})"))
+            .chain(captured.iter().map(|v| format!("typeof {v}==='number'")))
+            .collect::<Vec<_>>().join("&&");
+        // No binding made inside one copy may be reused by the other.
+        let shared = std::mem::replace(&mut self.local_values.enabled, false);
+        let saved = (self.f32_numbers.clone(), self.normalized_f32.clone());
+        self.line(format!("if({guard}){{"));
+        self.f32_numbers.extend(captured.iter().cloned());
+        self.normalized_f32.extend(captured.iter().cloned());
+        self.fused_loop(p, env, &types, &xs, &second, &len, &inner, &out, &sink, t, filtered, &plain)?;
+        (self.f32_numbers, self.normalized_f32) = saved;
+        self.line("}else{");
+        self.fused_loop(p, env, &types, &xs, &second, &len, &inner, &out, &sink, t, filtered, &[])?;
+        self.line("}");
+        self.local_values.enabled = shared;
+        Ok(Some(out))
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn fused_loop(&mut self, p: &Pipeline, env: &Env, types: &[Type], xs: &str, second: &Option<(String, Type)>, len: &str,
+        inner: &Type, out: &str, sink: &Sink, t: &Type, filtered: bool, plain: &[String]) -> LangResult<()> {
+        let load = |me: &mut Self, list: &str, index: &str, ty: &Type| -> String {
+            if plain.iter().any(|l| l == list) {
+                let value = me.bind(&format!("Math.fround({list}[{index}])"));
+                me.f32_numbers.insert(value.clone());
+                me.normalized_f32.insert(value.clone());
+                value
+            } else {
+                me.bind(&word_load(&format!("{list}[{index}]"), ty))
+            }
+        };
         let i = self.fresh();
         self.line(format!("for(let {i}=0;{i}<{len};{i}++){{"));
-        let mut value = self.bind(&word_load(&format!("{xs}[{i}]"), &inner));
-        let mut ty = *inner;
+        let mut value = load(self, xs, &i, inner);
+        let mut ty = inner.clone();
         // Every stage runs for each element that reaches it, as unfused stages
         // do, even when the sink only counts: borrowed host inputs can observe
         // their reads.
@@ -845,7 +901,7 @@ impl Emitter<'_> {
             match *method {
                 "zip" => {
                     let (ys, other) = second.clone().expect("zip source");
-                    let right = self.bind(&word_load(&format!("{ys}[{i}]"), &other));
+                    let right = load(self, &ys, &i, &other);
                     let (body, local) = Self::callback(callback, env, &[(value.clone(), ty.clone()), (right, other)])?;
                     let next = self.expr(body, &local, Some(&types[k]))?;
                     value = self.bind(&next);
@@ -868,13 +924,13 @@ impl Emitter<'_> {
             Sink::Collect if filtered => self.line(format!("{out}.push({value});")),
             Sink::Collect => self.line(format!("{out}[{i}]={value};")),
             Sink::Sum => {
-                let add = self.arithmetic("+", &out, &value, t);
+                let add = self.arithmetic("+", out, &value, t);
                 self.line(format!("{out}={add};"));
             }
             Sink::Count => self.line(format!("{out}++;")),
         }
         self.line("}");
-        Ok(Some(out))
+        Ok(())
     }
     // Keep collection emission off the recursive scalar emitter's stack frame.
     fn collection_expr(
@@ -1373,7 +1429,9 @@ impl Emitter<'_> {
                     )
                 } else {
                     let (av, bv) = if at == Type::F32 {
-                        (format!("{}({av})",if self.native_f32 {"__nfNumber"}else{"__float"}), format!("{}({bv})",if self.native_f32 {"__nfNumber"}else{"__float"}))
+                        let number = |v: &str| if self.native_f32 && self.f32_numbers.contains(v) { v.to_owned() }
+                            else { format!("{}({v})", if self.native_f32 {"__nfNumber"} else {"__float"}) };
+                        (number(&av), number(&bv))
                     } else if at==Type::F64 {
                         (format!("__dfNumber({av})"),format!("__dfNumber({bv})"))
                     } else {
