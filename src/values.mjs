@@ -26,6 +26,21 @@ const __mapWords = (value,f,context) => {
   return out;
 };
 const __mapper = kind => kind==='f32'||kind==='f64' ? __mapFloats : kind==='u32'||kind==='i32' ? __mapWords : __mapList;
+// Native F32 lists are almost always plain numbers. Those are converted in
+// the loop itself, exactly as the element converter would convert them; any
+// other carrier still goes through the element converter.
+const __floatsIn = (value,f,context) => {
+  if(!Array.isArray(value)&&!ArrayBuffer.isView(value))return Array.from(value,item=>f(item,context));
+  const n=value.length,out=new Array(n);
+  for(let i=0;i<n;i++){const x=value[i];out[i]=typeof x==='number'?Math.fround(x):f(x,context);}
+  return out;
+};
+const __floatsOut = (value,f,context) => {
+  if(!Array.isArray(value)&&!ArrayBuffer.isView(value))return Array.from(value,item=>f(item,context));
+  const n=value.length,out=new Array(n);
+  for(let i=0;i<n;i++){const x=value[i];let y;out[i]=typeof x==='number'&&Number.isFinite(y=Math.fround(x))?y:f(x,context);}
+  return out;
+};
 const __view = new DataView(new ArrayBuffer(4));
 const __float = bits => { __view.setUint32(0, bits, true); return __view.getFloat32(0, true); };
 const __bits = number => { if(Number.isNaN(number))return 0x7fc00000; __view.setFloat32(0, number, true); return __view.getUint32(0, true); };
@@ -108,8 +123,11 @@ function __representationRaw(type, output, capture) {
     } : value => typeof value === 'number' ? __bits(value) : value.F32Bits;
     case 'list': case 'vector': {
       const element = __representation(type.element, output,capture);
+      if(element === __identity) return __identity;
+      if(type.element.kind==='f32'&&typeof __nativeF32!=='undefined'&&__nativeF32)
+        return output ? (value,context) => __floatsOut(value,element,context) : (value,context) => __floatsIn(value,element,context);
       const map = __mapper(type.element.kind);
-      return element === __identity ? __identity : (value,context) => map(value,element,context);
+      return (value,context) => map(value,element,context);
     }
     case 'record': {
       if((typeof __recordElisions!=='undefined'&&__recordElisions.has(type.name))){
