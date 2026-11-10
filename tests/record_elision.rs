@@ -115,7 +115,11 @@ assert.deepEqual(reduce(resultHandle),resultCodec.materialize(resultHandle));
 for(const value of [...invalid,{...packet,extra:1},{...packet,exact:{value:{Int:'-0'}}},{...packet,proto:{['__proto__']:'\ud800'}},{...packet,float:{value:Infinity}}])for(const limits of [{nodes:0},{nodes:1},{nodes:2},{nodes:5},{nodes:20},{nodes:1000000},{depth:0},{depth:1},{depth:3},{depth:128},{bytes:0},{bytes:40},{bytes:41},{bytes:50},{bytes:200},{bytes:16777216}])assert.deepEqual(ink.wireCaptureProbe(value,limits,true),ink.wireCaptureProbe(value,limits,false));
 for(const limits of [{nodes:1},{nodes:2},{nodes:10},{nodes:1000000},{bytes:40},{bytes:100},{depth:2}]){const trace=literal=>{const reads=[],host={};for(const key of Object.keys(packet))Object.defineProperty(host,key,{enumerable:true,get(){reads.push(key);return packet[key];}});return {result:ink.wireCaptureProbe(host,limits,literal),reads};};assert.deepEqual(trace(true),trace(false));}
 
-assert.equal(Object.isFrozen(inputHandle),true);assert.equal(Object.getPrototypeOf(inputHandle),null);assert.deepEqual(Object.keys(inputHandle),[]);
+assert.equal(Object.isFrozen(inputHandle),true);assert.deepEqual(Reflect.ownKeys(inputHandle),[]);
+// A handle exposes nothing: its prototype is a frozen empty object with no constructor and no prototype of its own.
+{const shape=Object.getPrototypeOf(inputHandle);assert.equal(Object.isFrozen(shape),true);assert.deepEqual(Reflect.ownKeys(shape),[]);assert.equal(Object.getPrototypeOf(shape),null);assert.equal(inputHandle.constructor,undefined);
+// Neither an object with a handle's prototype, a proxy of a handle nor a copy is a handle.
+for(const forged of [Object.freeze(Object.create(shape)),new Proxy(inputHandle,{}),{...inputHandle},structuredClone(inputHandle)])assert.throws(()=>ink.callCompiled('identity',[forged]),/owner mismatch/);}
 assert.deepEqual(resultCodec.materialize(resultHandle),p);
 const publicReply=resultCodec.materialize(resultHandle);publicReply.pair.first.value.value.words[0]=88;assert.equal(resultCodec.materialize(resultHandle).pair.first.value.value.words[0],1);
 assert.deepEqual(inputCodec.materialize(inputHandle),p);

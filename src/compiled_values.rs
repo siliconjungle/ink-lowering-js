@@ -282,7 +282,12 @@ export function callCompiled(name,args){
 
 // Explicit sealed-value partial application. Each token owns a bounded set of
 // lexical caches; no mutable host object, global memo table or error is retained.
-const __preparedCompiled=new WeakMap();
+class __PreparedToken{
+ #entry;
+ constructor(entry){this.#entry=entry;Object.freeze(this);}
+ static entry(token){return token!==null&&typeof token==='object'&&#entry in token?token.#entry:undefined;}
+}
+Object.setPrototypeOf(__PreparedToken.prototype,null);delete __PreparedToken.prototype.constructor;Object.freeze(__PreparedToken.prototype);
 export function prepareCompiled(name,bindings){
  const entry=__compiledEntries.get(name);
  if(!entry||!Array.isArray(bindings)||bindings.length>entry.params.length)throw Error('unsupported prepared compiled call');
@@ -293,14 +298,13 @@ export function prepareCompiled(name,bindings){
   if(!Number.isInteger(index)||index<0||index>=fixed.length||fixed[index])throw Error('prepared compiled parameter');
   captured[index]=__compiledEntry(handle,entry.params[index]().identity);fixed[index]=true;
  }
- const remaining=fixed.flatMap((yes,i)=>yes?[]:[i]);
+ const remaining=[];for(let i=0;i<fixed.length;i++)if(!fixed[i])remaining.push(i);
  const factory=__preparedFactories.get(entry.index);
  const run=factory?factory(fixed):__implementations[entry.index];
- const token=Object.freeze(Object.create(null));
- __preparedCompiled.set(token,{entry,captured,remaining,run});return token;
+ return new __PreparedToken({entry,captured,remaining,run});
 }
 export function callPreparedCompiled(token,args){
- const prepared=__preparedCompiled.get(token);
+ const prepared=__PreparedToken.entry(token);
  if(!prepared||!Array.isArray(args)||args.length!==prepared.remaining.length)throw Error('invalid prepared compiled call');
  const {entry,captured,remaining,run}=prepared,owned=captured.slice();
  for(let i=0;i<remaining.length;i++){const at=remaining[i];owned[at]=__compiledEntry(args[i],entry.params[at]().identity);}
@@ -312,7 +316,7 @@ export function callPreparedCompiled(token,args){
 // retained containers never escape: structured elements are deeply detached.
 const __destinationBudget=Object.freeze({remaining:Infinity,enter(){},text(){}});
 export function callPreparedCompiledInto(token,args,destination){
- const prepared=__preparedCompiled.get(token);
+ const prepared=__PreparedToken.entry(token);
  if(!prepared||!prepared.entry.destination||!Array.isArray(args)||args.length!==prepared.remaining.length)throw Error('invalid prepared compiled destination call');
  const {entry,captured,remaining,run}=prepared,owned=captured.slice();
  for(let i=0;i<remaining.length;i++){const at=remaining[i];owned[at]=__compiledEntry(args[i],entry.params[at]().identity);}

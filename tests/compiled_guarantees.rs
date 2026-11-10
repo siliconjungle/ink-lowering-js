@@ -71,7 +71,7 @@ fn kernel(xs:List<f32>,ids:List<u32>)->f32{return foldl(ids,0.0,fn(i)=>fn(acc)=>
  let module=CheckedModule::from_source(parse(source).unwrap()).unwrap();
  let mut code=ink_lowering_js::lower(&module).unwrap().javascript;
  // Test-only storage observation; production handles never expose payloads.
- code.push_str("\nexport const dense=h=>__compiledHandles.get(h).value instanceof Float32Array;\n");
+ code.push_str("\nexport const dense=h=>__CompiledHandle.entry(h).value instanceof Float32Array;\n");
  let root=std::env::temp_dir().join(format!("ink-dense-float-{}",std::process::id()));fs::create_dir_all(&root).unwrap();
  fs::write(root.join("program.mjs"),code).unwrap();
  fs::write(root.join("test.mjs"),r#"

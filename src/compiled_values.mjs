@@ -1,13 +1,22 @@
 // Handles have no mutable private payload surface. Membership and type identity
 // are checked by this module's closure; copied/foreign objects cannot forge them.
-const __compiledHandles=new WeakMap();
-const __compiledBindings=new WeakMap();
-function __compiledHandle(identity,value,guaranteed=false){
- const handle=Object.freeze(Object.create(null));
- __compiledHandles.set(handle,{identity,value,guaranteed});return handle;
+// The payload is a private field of the frozen handle, so it lives and dies
+// with the handle and no module-wide table grows with every capture and call.
+// A handle's prototype is a frozen empty object without a constructor: the
+// class is not reachable from a handle, and a handle has no properties.
+// Each sealed class is written out where it is used. Classes made by one
+// shared factory would share the engine's feedback for the field test while
+// each having its own private name, and the test would stop being a fast one.
+class __CompiledHandle{
+ #entry;
+ constructor(entry){this.#entry=entry;Object.freeze(this);}
+ static entry(handle){return handle!==null&&typeof handle==='object'&&#entry in handle?handle.#entry:undefined;}
 }
+Object.setPrototypeOf(__CompiledHandle.prototype,null);delete __CompiledHandle.prototype.constructor;Object.freeze(__CompiledHandle.prototype);
+const __compiledBindings=new WeakMap();
+function __compiledHandle(identity,value,guaranteed=false){return new __CompiledHandle({identity,value,guaranteed});}
 function __compiledEntry(handle,identity){
- const entry=__compiledHandles.get(handle);
+ const entry=__CompiledHandle.entry(handle);
  if(!entry||entry.identity!==identity)throw Error('compiled value type or owner mismatch');
  return entry;
 }
@@ -50,7 +59,7 @@ function __compiledReduction(factory,root,reduce,identity){
   }
  };
  prepare(root);Object.freeze(reducers);
- return Object.freeze(function(handle,context,limits={}){
+ return Object.freeze(function(handle,context,limits=undefined){
   const value=__compiledUnwrap(handle,identity),budget=createValueCaptureBudget(limits);
   return reduce(value,reducers,budget,0,context);
  });
@@ -63,7 +72,9 @@ function __compiledCodec(schema,capture,read,write,copy,constructorRoot,reductio
   identity,
   descriptor:publicCodec.descriptor,
   resolve(type){return publicCodec.resolve(type);},
-  capture(value,limits={}){
+  // An omitted limit reaches the budget as the shared default; a fresh empty
+  // object would be merged and validated on every capture.
+  capture(value,limits=undefined){
    return __compiledHandle(identity,capture(value,createValueCaptureBudget(limits),0));
   },
   decode(bytes,limits={}){return __compiledHandle(identity,(portableFused?fused():privateCodec).decode(bytes,limits));},
@@ -72,8 +83,8 @@ function __compiledCodec(schema,capture,read,write,copy,constructorRoot,reductio
   decodeCompactFused(bytes,limits={}){return __compiledHandle(identity,fused().compact().decode(bytes,limits));},
   encode(handle,limits={}){const value=__compiledUnwrap(handle,identity);return publicCodec.encodeWith(writer=>write(writer,value,false),limits);},
   encodeCompact(handle,limits={}){const value=__compiledUnwrap(handle,identity);return publicCodec.compact().encodeWith(writer=>write(writer,value,true),limits);},
-  materialize(handle,limits={}){return copy(__compiledUnwrap(handle,identity),createValueCaptureBudget(limits),0);},
-  builder(limits={}){return __valueBuilder(__constructorNodes(),constructorRoot,identity,limits);},
+  materialize(handle,limits=undefined){return copy(__compiledUnwrap(handle,identity),createValueCaptureBudget(limits),0);},
+  builder(limits=undefined){return __valueBuilder(__constructorNodes(),constructorRoot,identity,limits);},
   reducer(factory){return __compiledReduction(factory,reductionRoot,reduce,identity);},
   visit(handle,sink,limits={}){
    const value=__compiledUnwrap(handle,identity),events=__compiledValueEvents(sink,limits);
