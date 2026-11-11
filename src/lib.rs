@@ -2336,7 +2336,8 @@ fn lower_with_layout(
     if has_state || uses("__word(") || uses("__rot") {
         helpers.push_str(include_str!("word.mjs"));
     }
-    javascript = emitter.equality.sums.source()+&format!("const __recordElisions=new Set({});\nconst __nativeF32={native_f32};\n",serde_json::to_string(elisions).map_err(|e|e.to_string())?) + &helpers + &javascript;
+    let shapes = if helpers.contains("function __representationRaw") { record_shapes(p, elisions)? } else { String::new() };
+    javascript = emitter.equality.sums.source()+&format!("const __recordElisions=new Set({});\nconst __nativeF32={native_f32};\n",serde_json::to_string(elisions).map_err(|e|e.to_string())?) + &shapes + &helpers + &javascript;
     let named = p
         .records
         .keys()
@@ -2528,3 +2529,40 @@ mod definition_native;
 pub mod representation_program;
 pub mod mir;
 pub mod tasks;
+
+/// Boundary converters for the record shapes of this program, written out as
+/// object literals. The generic converter walks a field list with computed
+/// keys, which an engine cannot specialise; a literal reads and writes the
+/// same own properties in the same order through ordinary property accesses.
+/// Shapes are keyed by their field names, so a record the table does not hold
+/// simply keeps the generic converter.
+fn record_shapes(p: &Program, elisions: &BTreeSet<String>) -> LangResult<String> {
+    let quote = |name: &str| serde_json::to_string(name).map_err(|e| e.to_string());
+    let mut shapes = BTreeMap::new();
+    for (record, fields) in &p.records {
+        if elisions.contains(record) || fields.is_empty() || fields.len() > 64 {
+            continue;
+        }
+        let names = fields.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>();
+        let key = serde_json::to_string(&names).map_err(|e| e.to_string())?;
+        if shapes.contains_key(&key) {
+            continue;
+        }
+        let mut locals = String::new();
+        let mut body = String::new();
+        for (i, name) in names.iter().enumerate() {
+            let text = quote(name)?;
+            locals.push_str(&format!("{}c{i}=c[{i}]", if i == 0 { "const " } else { "," }));
+            // `"__proto__":` in a literal sets the prototype; the computed
+            // form defines an own property, as the generic converter does.
+            let property = if *name == "__proto__" { format!("[{text}]") } else { text.clone() };
+            body.push_str(&format!("{}{property}:c{i}(value[{text}],context)", if i == 0 { "" } else { "," }));
+        }
+        shapes.insert(key, format!("c=>{{{locals};return (value,context)=>({{{body}}});}}"));
+    }
+    let entries = shapes
+        .iter()
+        .map(|(key, converter)| Ok(format!("[{},{converter}]", quote(key)?)))
+        .collect::<LangResult<Vec<_>>>()?;
+    Ok(format!("const __recordShapes=new Map([{}]);\n", entries.join(",\n")))
+}

@@ -143,8 +143,12 @@ function __representationRaw(type, output, capture) {
         return output?(value,context)=>({[field.name]:child(value,context)}):(value,context)=>child(value[field.name],context);
       }
       const fields = type.fields.map(field => [field.name, __representation(field.type, output,capture)]);
-      return fields.every(([,convert]) => convert === __identity) ? __identity :
-        (value,context) => {
+      if(fields.every(([,convert]) => convert === __identity)) return __identity;
+      // A shape the compiler wrote a literal converter for uses it; the result
+      // has the same own properties, defined in the same order.
+      const shaped = typeof __recordShapes==='undefined' ? undefined : __recordShapes.get(JSON.stringify(type.fields.map(field => field.name)));
+      if(shaped) return shaped(fields.map(([,convert]) => convert));
+      return (value,context) => {
           const result={};
           for(const [name,convert] of fields){
             const field=convert(value[name],context);
