@@ -2545,9 +2545,6 @@ fn record_shapes(p: &Program, elisions: &BTreeSet<String>) -> LangResult<String>
         }
         let names = fields.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>();
         let key = serde_json::to_string(&names).map_err(|e| e.to_string())?;
-        if shapes.contains_key(&key) {
-            continue;
-        }
         let mut locals = String::new();
         let mut body = String::new();
         let mut reads = String::new();
@@ -2567,7 +2564,29 @@ fn record_shapes(p: &Program, elisions: &BTreeSet<String>) -> LangResult<String>
         }
         // A result record is the kernel's own object unless a field has to
         // change; an argument record is always rebuilt.
-        shapes.insert(key, format!("(c,result)=>{{{locals};return result?(value,context)=>{{{reads};return {same}?value:{{{kept}}};}}:(value,context)=>({{{body}}});}}"));
+        shapes.insert(key.clone(), format!("(c,result)=>{{{locals};return result?(value,context)=>{{{reads};return {same}?value:{{{kept}}};}}:(value,context)=>({{{body}}});}}"));
+        // A result record whose F32 fields are native and whose other fields
+        // need no conversion is almost always finite binary32 throughout.
+        // That is tested in place, without a converter call per field; any
+        // other value takes the general path above. The table is keyed by the
+        // field names and which of them are F32, and the runtime only asks for
+        // an entry when its own converters agree with that.
+        let mask = fields.iter().map(|(_, ty)| if matches!(ty, Type::F32) { 'f' } else { '-' }).collect::<String>();
+        if mask.contains('f') {
+            let mut values = String::new();
+            let mut finite = String::new();
+            for (i, name) in names.iter().enumerate() {
+                values.push_str(&format!("{}v{i}=value[{}]", if i == 0 { "const " } else { "," }, quote(name)?));
+                if mask.as_bytes()[i] == b'f' {
+                    finite.push_str(&format!("{}typeof v{i}==='number'&&Math.fround(v{i})-v{i}===0", if finite.is_empty() { "" } else { "&&" }));
+                }
+            }
+            let rest = names.iter().enumerate().map(|(i, _)| format!("r{i}=c{i}(v{i},context)")).collect::<Vec<_>>().join(",");
+            shapes.insert(
+                format!("{key}|{mask}"),
+                format!("c=>{{{locals};return (value,context)=>{{{values};if({finite})return value;const {rest};return {same}?value:{{{kept}}};}};}}"),
+            );
+        }
     }
     let entries = shapes
         .iter()

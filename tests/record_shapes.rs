@@ -33,6 +33,9 @@ fn pair(a:Point,b:Point)->List<Point>{return list(a,b);}
     assert_eq!(shapes.matches("(c,result)=>").count(), 4, "{shapes}");
     assert!(shapes.contains(r#"["__proto__"]:c0(value["__proto__"],context)"#), "{shapes}");
     assert!(shapes.contains(r#"{["__proto__"]:r0,"plain":r1}"#), "{shapes}");
+    // Records with F32 fields also get a converter that tests those fields in place.
+    assert!(shapes.contains(r#"|ff",c=>"#), "{shapes}");
+    assert!(shapes.contains("if(typeof v0==='number'&&Math.fround(v0)-v0===0&&typeof v1==='number'&&Math.fround(v1)-v1===0)return value;"), "{shapes}");
     let generic = emitted.replacen(shapes, "const __recordShapes=new Map();\n", 1);
     assert_ne!(generic, emitted);
     let root = std::env::temp_dir().join(format!("ink-record-shapes-{}", std::process::id()));

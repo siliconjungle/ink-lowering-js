@@ -212,7 +212,16 @@ function __representationRaw(type, output, capture, keep) {
       // A shape the compiler wrote a literal converter for uses it; the result
       // has the same own properties, defined in the same order.
       const shaped = typeof __recordShapes==='undefined' ? undefined : __recordShapes.get(JSON.stringify(type.fields.map(field => field.name)));
-      if(shaped) return shaped(fields.map(([,convert]) => convert),keep);
+      if(shaped){
+        const converters=fields.map(([,convert]) => convert);
+        if(keep&&typeof __nativeF32!=='undefined'&&__nativeF32){
+          // 'f' a native F32 field, '-' a field that needs no conversion.
+          const mask=type.fields.map((field,i) => field.type.kind==='f32' ? 'f' : converters[i]===__identity ? '-' : 'x').join('');
+          const tested=mask.includes('f')&&!mask.includes('x') ? __recordShapes.get(JSON.stringify(type.fields.map(field => field.name))+'|'+mask) : undefined;
+          if(tested) return tested(converters);
+        }
+        return shaped(converters,keep);
+      }
       // A result record none of whose fields changes is the kernel's own.
       if(keep) return (value,context) => {
           const converted=new Array(fields.length);let same=true;
