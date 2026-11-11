@@ -2550,15 +2550,24 @@ fn record_shapes(p: &Program, elisions: &BTreeSet<String>) -> LangResult<String>
         }
         let mut locals = String::new();
         let mut body = String::new();
+        let mut reads = String::new();
+        let mut same = String::new();
+        let mut kept = String::new();
         for (i, name) in names.iter().enumerate() {
             let text = quote(name)?;
+            let comma = if i == 0 { "" } else { "," };
             locals.push_str(&format!("{}c{i}=c[{i}]", if i == 0 { "const " } else { "," }));
             // `"__proto__":` in a literal sets the prototype; the computed
             // form defines an own property, as the generic converter does.
             let property = if *name == "__proto__" { format!("[{text}]") } else { text.clone() };
-            body.push_str(&format!("{}{property}:c{i}(value[{text}],context)", if i == 0 { "" } else { "," }));
+            body.push_str(&format!("{comma}{property}:c{i}(value[{text}],context)"));
+            reads.push_str(&format!("{}v{i}=value[{text}],r{i}=c{i}(v{i},context)", if i == 0 { "const " } else { "," }));
+            same.push_str(&format!("{}r{i}===v{i}", if i == 0 { "" } else { "&&" }));
+            kept.push_str(&format!("{comma}{property}:r{i}"));
         }
-        shapes.insert(key, format!("c=>{{{locals};return (value,context)=>({{{body}}});}}"));
+        // A result record is the kernel's own object unless a field has to
+        // change; an argument record is always rebuilt.
+        shapes.insert(key, format!("(c,result)=>{{{locals};return result?(value,context)=>{{{reads};return {same}?value:{{{kept}}};}}:(value,context)=>({{{body}}});}}"));
     }
     let entries = shapes
         .iter()

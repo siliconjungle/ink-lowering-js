@@ -34,7 +34,7 @@ fn generic(conversion: bool, boundary: &Boundary) -> String {
     if conversion && public {
         return r#"Object.freeze(Object.fromEntries(metadata.functions.filter(f=>!f.internal).map(f=> {
   const input=__inputTypes[f.index].types.map((t,i)=>__representation(t,false,__inputTypes[f.index].capture[i]));
-  const output=__representation(f.result,true);
+  const output=__representation(f.result,true,false,true);
   const body=__implementations[f.index];
   const implementation=f.precondition==null?body:(...args)=>{if(__implementations[f.precondition](...args)!==true)throw Error('contract precondition failed');return body(...args);};
   const needsInput=input.some(c=>c!==__identity);
@@ -67,7 +67,7 @@ fn generic(conversion: bool, boundary: &Boundary) -> String {
         "const needsInput=false;"
     };
     let output = if conversion && public {
-        "const output=__representation(f.result,true);"
+        "const output=__representation(f.result,true,false,true);"
     } else {
         "const output=__identity;"
     };
@@ -145,7 +145,7 @@ pub(super) fn emit(functions: &[Value], conversion: bool, boundary: Boundary) ->
         }
         if conversion && output {
             setup +=
-                &format!("const output=__representation(metadata.functions[{index}].result,true);");
+                &format!("const output=__representation(metadata.functions[{index}].result,true,false,true);");
             identity.push("output===__identity".into());
         }
         if conversion {

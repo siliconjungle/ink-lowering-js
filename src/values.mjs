@@ -26,6 +26,30 @@ const __mapWords = (value,f,context) => {
   return out;
 };
 const __mapper = kind => kind==='f32'||kind==='f64' ? __mapFloats : kind==='u32'||kind==='i32' ? __mapWords : __mapList;
+// Results are converted only where they need it. A result list is the
+// kernel's own array unless some element has to change; then the elements
+// before it are copied and the rest converted. Lists the kernel holds in
+// another carrier are still copied into an Array.
+const __keepList = (value,f,context) => {
+  if(!Array.isArray(value))return __mapList(value,f,context);
+  const n=value.length;let out=null;
+  for(let i=0;i<n;i++){
+    const x=value[i],y=f(x,context);
+    if(out!==null)out[i]=y;
+    else if(y!==x){out=new Array(n);for(let j=0;j<i;j++)out[j]=value[j];out[i]=y;}
+  }
+  return out===null?value:out;
+};
+const __keepFloats = (value,f,context) => {
+  if(!Array.isArray(value))return __mapFloats(value,f,context);
+  const n=value.length;let out=null;
+  for(let i=0;i<n;i++){
+    const x=value[i],y=f(x,context);
+    if(out!==null)out[i]=y;
+    else if(y!==x){out=new Array(n);for(let j=0;j<i;j++)out[j]=value[j];out[i]=y;}
+  }
+  return out===null?value:out;
+};
 // Native F32 lists are almost always plain numbers. Those are converted in
 // the loop itself, exactly as the element converter would convert them; any
 // other carrier still goes through the element converter.
@@ -39,6 +63,19 @@ const __floatsOut = (value,f,context) => {
   if(!Array.isArray(value)&&!ArrayBuffer.isView(value))return Array.from(value,item=>f(item,context));
   const n=value.length,out=new Array(n);
   for(let i=0;i<n;i++){const x=value[i];let y;out[i]=typeof x==='number'&&Number.isFinite(y=Math.fround(x))?y:f(x,context);}
+  return out;
+};
+// An Array of finite binary32 Numbers is already the public value. The
+// difference is zero only for a finite value that rounding leaves alone;
+// written as a finiteness test and a comparison the loop runs four times slower.
+const __floatsKeep = (value,f,context) => {
+  if(!Array.isArray(value))return __floatsOut(value,f,context);
+  const n=value.length;let i=0;
+  for(;i<n;i++){const x=value[i];if(typeof x!=='number'||Math.fround(x)-x!==0)break;}
+  if(i===n)return value;
+  const out=new Array(n);
+  for(let j=0;j<i;j++)out[j]=value[j];
+  for(;i<n;i++){const x=value[i];let y;out[i]=typeof x==='number'&&Number.isFinite(y=Math.fround(x))?y:f(x,context);}
   return out;
 };
 const __view = new DataView(new ArrayBuffer(4));
@@ -87,14 +124,36 @@ const __identity = value => value;
 // Intern declared conversion schemas once. An invocation owns one WeakMap per
 // schema instead of allocating a Map for every converted record/list node.
 const __conversionKeys = new Map();
-function __representation(type, output, capture=false) {
-  const convert=__representationRaw(type,output,capture);
+// `keep` selects results that are converted only where they need it: the
+// public calls. Destinations and state results are always written as copies.
+function __representation(type, output, capture=false, keep=false) {
+  const convert=__representationRaw(type,output,capture,keep);
   if(convert===__identity)return convert;
   // Conversion identity is invocation-local: callers may reuse a mutable host
   // object in a later call. Distinct declared schemas have distinct memo keys.
-  const schema=(output?'out:':capture?'capture:':'in:')+JSON.stringify(type);
+  const schema=(keep?'keep:':output?'out:':capture?'capture:':'in:')+JSON.stringify(type);
   let key=__conversionKeys.get(schema);
   if(!key){key={};__conversionKeys.set(schema,key);}
+  if(keep)return (value,context)=>{
+    if(!context||!value||typeof value!=='object')return convert(value,context);
+    // A result that needs no conversion is returned as it is, so there is
+    // nothing to remember about it. The memo starts with the first object of
+    // this call that had to be rebuilt; from then on every object is looked
+    // up and recorded, which keeps repeated objects shared exactly as before.
+    if(context.rebuilt!==true){
+      const result=convert(value,context);
+      if(result===value)return value;
+      context.rebuilt=true;
+      let entries=context.get(key);
+      if(!entries){entries=new WeakMap();context.set(key,entries);}
+      entries.set(value,result);return result;
+    }
+    let entries=context.get(key);
+    if(!entries){entries=new WeakMap();context.set(key,entries);}
+    if(entries.has(value))return entries.get(value);
+    const result=convert(value,context);
+    entries.set(value,result);return result;
+  };
   return (value,context)=>{
     if(!context||!value||typeof value!=='object')return convert(value,context);
     let entries=context.get(key);
@@ -104,20 +163,25 @@ function __representation(type, output, capture=false) {
     entries.set(value,result);return result;
   };
 }
-function __representationRaw(type, output, capture) {
+function __representationRaw(type, output, capture, keep) {
   switch (type.kind) {
     case 'ref': {
       let resolved;
-      return (value,context)=>(resolved??=__representation(__namedTypes[type.name],output,capture))(value,context);
+      return (value,context)=>(resolved??=__representation(__namedTypes[type.name],output,capture,keep))(value,context);
     }
     case 'id': return value=>value.toLowerCase();
     case 'int': return output ? value=>({Int:value.toString()}) : value=>BigInt(value && typeof value==='object' ? value.Int : value);
     case 'option': {
-      const item=__representation(type.element,output,capture);
-      return item===__identity?__identity:(value,context)=>Object.hasOwn(value,'Some')?{Some:item(value.Some,context)}:{None:null};
+      const item=__representation(type.element,output,capture,keep);
+      if(item===__identity)return __identity;
+      if(keep)return (value,context)=>{
+        if(!Object.hasOwn(value,'Some'))return Object.hasOwn(value,'None')&&value.None===null?value:{None:null};
+        const some=value.Some,result=item(some,context);return result===some?value:{Some:result};
+      };
+      return (value,context)=>Object.hasOwn(value,'Some')?{Some:item(value.Some,context)}:{None:null};
     }
     case 'result': {
-      const ok=__representation(type.ok,output,capture),err=__representation(type.error,output,capture);
+      const ok=__representation(type.ok,output,capture,keep),err=__representation(type.error,output,capture,keep);
       const key=typeof __sumSpecs==='undefined'?null:__sumKey(type),flat=key!==null&&__sumSpecs.has(key);
       if(flat)return output?(value,context)=>{const v=__sumView(key,value);return Object.hasOwn(v,'Ok')?{Ok:ok(v.Ok,context)}:{Err:err(v.Err,context)};}:(v,context)=>Object.hasOwn(v,'Ok')?__sumMake(key,true,ok(v.Ok,context)):__sumMake(key,false,err(v.Err,context));
       return ok===__identity&&err===__identity?__identity:(value,context)=>Object.hasOwn(value,'Ok')?{Ok:ok(value.Ok,context)}:{Err:err(value.Err,context)};
@@ -129,25 +193,39 @@ function __representationRaw(type, output, capture) {
       return Number.isFinite(number) ? number : {F32Bits:value};
     } : value => typeof value === 'number' ? __bits(value) : value.F32Bits;
     case 'list': case 'vector': {
-      const element = __representation(type.element, output,capture);
+      const element = __representation(type.element, output,capture,keep);
       if(element === __identity) return __identity;
       if(type.element.kind==='f32'&&typeof __nativeF32!=='undefined'&&__nativeF32)
-        return output ? (value,context) => __floatsOut(value,element,context) : (value,context) => __floatsIn(value,element,context);
+        return keep ? (value,context) => __floatsKeep(value,element,context) : output ? (value,context) => __floatsOut(value,element,context) : (value,context) => __floatsIn(value,element,context);
+      if(keep){const kept=type.element.kind==='f32'||type.element.kind==='f64'?__keepFloats:__keepList;return (value,context) => kept(value,element,context);}
       const map = __mapper(type.element.kind);
       return (value,context) => map(value,element,context);
     }
     case 'record': {
       if((typeof __recordElisions!=='undefined'&&__recordElisions.has(type.name))){
         if(!type.fields.length)return ()=>undefined; // lexically unconsumed projected input
-        const field=type.fields[0],child=__representation(field.type,output,capture);
+        const field=type.fields[0],child=__representation(field.type,output,capture,keep);
         return output?(value,context)=>({[field.name]:child(value,context)}):(value,context)=>child(value[field.name],context);
       }
-      const fields = type.fields.map(field => [field.name, __representation(field.type, output,capture)]);
+      const fields = type.fields.map(field => [field.name, __representation(field.type, output,capture,keep)]);
       if(fields.every(([,convert]) => convert === __identity)) return __identity;
       // A shape the compiler wrote a literal converter for uses it; the result
       // has the same own properties, defined in the same order.
       const shaped = typeof __recordShapes==='undefined' ? undefined : __recordShapes.get(JSON.stringify(type.fields.map(field => field.name)));
-      if(shaped) return shaped(fields.map(([,convert]) => convert));
+      if(shaped) return shaped(fields.map(([,convert]) => convert),keep);
+      // A result record none of whose fields changes is the kernel's own.
+      if(keep) return (value,context) => {
+          const converted=new Array(fields.length);let same=true;
+          for(let i=0;i<fields.length;i++){const field=value[fields[i][0]];if((converted[i]=fields[i][1](field,context))!==field)same=false;}
+          if(same)return value;
+          const result={};
+          for(let i=0;i<fields.length;i++){
+            const name=fields[i][0];
+            if(name==='__proto__')Object.defineProperty(result,name,{value:converted[i],writable:true,enumerable:true,configurable:true});
+            else result[name]=converted[i];
+          }
+          return result;
+        };
       return (value,context) => {
           const result={};
           for(const [name,convert] of fields){
