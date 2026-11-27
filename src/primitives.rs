@@ -19,6 +19,7 @@ pub fn expression(n: &str, a: &[String], first: Option<&Type>, native: bool) -> 
         "f32_from_f64"=>float(format!("__dfNumber({x})")),
         "f64_from_u32"|"f64_from_i32"=>x.clone(),
         "f64_from_u64"|"f64_from_int"=>format!("Number({x})"),
+        "f64_from_decimal"=>format!("__ink_f64_from_decimal({x})"),
         "int_from_f64"=>format!("__ink_int_from_float(__dfNumber({x}))"),
         "u32_from_f64"|"u64_from_f64"|"i32_from_f64"=>format!("__ink_from_float(__dfNumber({x}),{:?})",&n[..3]),
         "sqrt" | "floor" | "ceil" | "trunc" => float(format!("Math.{n}({})", number(x))),

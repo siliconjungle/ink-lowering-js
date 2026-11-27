@@ -17,3 +17,8 @@ function __ink_concat(a,b){const s=a+b;if(__ink_byte_len(s)>4294967295)throw Err
 function __ink_find(s,needle,from){let unit=0,bytes=0;while(bytes<from&&unit<s.length){const c=s.charCodeAt(unit++);if(c<128)bytes++;else if(c<2048)bytes+=2;else if(c>=0xd800&&c<=0xdbff&&unit<s.length&&s.charCodeAt(unit)>=0xdc00&&s.charCodeAt(unit)<=0xdfff){bytes+=4;unit++;}else bytes+=3;}if(bytes!==from)return {None:null};const at=s.indexOf(needle,unit);return at<0?{None:null}:{Some:bytes+__ink_byte_len(s,unit,at)};}
 
 function __ink_int_from_float(x){return Number.isFinite(x)?{Some:BigInt(Math.trunc(x))}:{None:null};}
+function __ink_f64_from_decimal(text) {
+  if (!text.length || /[^0-9eE.+-]/.test(text)) return {None:null};
+  const number = Number(text);
+  return Number.isFinite(number) ? {Some:number} : {None:null};
+}
