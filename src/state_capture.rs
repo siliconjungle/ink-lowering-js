@@ -115,7 +115,7 @@ impl<'a> Captures<'a> {
             }
         };
         let constant = if body.is_empty() { format!("const __ownedType{}={ty};\n", name.trim_start_matches("__ownedInput")) } else { String::new() };
-        let code = format!("{constant}function {name}(value,budget={{cells:1000000}},depth=0,maxDepth=64){{{prefix}{body}}}\n");
+        let code = format!("{constant}function {name}(value,budget={{cells:1000000}},depth=0,maxDepth=budget.maxDepth??64){{{prefix}{body}}}\n");
         self.functions.insert(key, (name.clone(), code));
         Ok(name)
     }

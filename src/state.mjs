@@ -455,9 +455,12 @@ function __createState(meta,implementations,captures=null,views=[],prefixes=[]){
   invokePrepared(token){const packet=prepared.get(token);if(!packet)throw Error('invalid prepared state call');return run(packet.action,packet.args,null,null,false,true);},
   // A prebound typed entrypoint: scalar arguments obey the native caller contract.
   // Composite arguments still capture owned input; events remain in the outbox.
-  bind(name,{resultOnly=false}={}){
+  bind(name,{resultOnly=false,inputLimits}={}){
    const a=actionMap.get(name);if(!a)throw Error(`unknown action ${name}`);
-   const inputs=a.params.map((p,i)=>p.type.kind==='f32'?(value=>typeof value==='number'?__bits(value):value.F32Bits):['u32','i32','u64','bool','unit','string','f64','id','enum','int'].includes(p.type.kind)?__representation(p.type,false):a.inputs[i]);
+   const depth=inputLimits?.depth??64,nodes=inputLimits?.nodes??1000000;
+   if(!Number.isInteger(depth)||depth<0||depth>1024||!Number.isSafeInteger(nodes)||nodes<1)throw RangeError('invalid state input limits');
+   const inputs=a.params.map((p,i)=>p.type.kind==='f32'?(value=>typeof value==='number'?__bits(value):value.F32Bits):['u32','i32','u64','bool','unit','string','f64','id','enum','int'].includes(p.type.kind)?__representation(p.type,false):
+    inputLimits===undefined?a.inputs[i]:(value=>a.inputs[i](value,{cells:nodes,maxDepth:depth})));
    if(!a.change&&!a.precondition&&inputs.length===0)return readZero(a,resultOnly);
    return (__statePreflightFactories[a.index]||__stateBoundFactories[a.index])(run,a,inputs,a.output,resultOnly,rt,begin,complete,abort,end);
   },

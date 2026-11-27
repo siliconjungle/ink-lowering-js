@@ -49,6 +49,14 @@ const owned=capture(packet);assert.equal(Object.getPrototypeOf(owned),Object.pro
 const state=createState(),prepared=state.prepare('echo',[packet]);packet.words[0]=99;
 const first=state.invokePrepared(prepared).result;assert.equal(first.words[0],7);first.words[0]=33;
 assert.equal(state.invokePrepared(prepared).result.words[0],7);
+let deep=tree;for(let i=0;i<30;i++)deep=call('node',[deep]);
+const deepPacket={...packet,tree:deep};
+assert.throws(()=>state.bind('echo')(deepPacket),/state input resource limit/);
+const deepEcho=state.bind('echo',{resultOnly:true,inputLimits:{depth:512,nodes:10000}});
+assert.deepEqual(deepEcho(deepPacket).tree,deep);
+assert.throws(()=>deepEcho({...deepPacket,words:[-1]}),/invalid u32/);
+assert.throws(()=>state.bind('echo',{inputLimits:{depth:512,nodes:4}})(deepPacket),/state input resource limit/);
+assert.throws(()=>state.bind('echo',{inputLimits:{depth:2048}}),/invalid state input limits/);
 // Capture reads each host field exactly once and in declaration order, including
 // when the next child exhausts its budget or is invalid. Inlining may not move
 // reads ahead of earlier validation failures.

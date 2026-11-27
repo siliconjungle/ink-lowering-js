@@ -265,7 +265,7 @@ function __stateCapture(type){
 }
 function __compileStateCapture(type){
  const limited=copy=>(value,budget={cells:1000000},depth=0)=>{
-  if(depth>64||--budget.cells<0)throw Error('state input resource limit');
+  if(depth>(budget.maxDepth??64)||--budget.cells<0)throw Error('state input resource limit');
   return copy(value,budget,depth);
  };
  const tagged=(value,tag)=>value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).length===1&&Object.hasOwn(value,tag);
@@ -314,7 +314,7 @@ function __compileStateCapture(type){
   default:return (value,budget,depth)=>__stateInput(value,type,budget,depth);
  }
 }
-function __stateInput(value,type,budget={cells:1000000},depth=0,maxDepth=64){
+function __stateInput(value,type,budget={cells:1000000},depth=0,maxDepth=budget.maxDepth??64){
   if(depth>maxDepth||--budget.cells<0)throw Error('state input resource limit');
   const input=(v,t)=>__stateInput(v,t,budget,depth+1,maxDepth);
   const integer=(min,max)=>{if(typeof value!=='number'||!Number.isInteger(value)||value<min||value>max)throw Error('invalid '+type.kind);return value===0?0:value;};
