@@ -11,7 +11,21 @@ class __InkBuffer {
  set(i,v){if(i<this.length){if(typeof v!=='number'&&!Array.isArray(this.data))this.detach();this.data[this.start+i]=v;}return this;}
  swap(a,b){if(a<this.length&&b<this.length){const x=this.item(a);this.set(a,this.item(b));this.set(b,x);}return this;}
  fill_range(start,count,value){start=Math.min(start,this.length);count=Math.min(count,this.length-start);if(count&&typeof value!=='number'&&!Array.isArray(this.data))this.detach();this.data.fill(value,this.start+start,this.start+start+count);return this;}
- copy_within(source,destination,count){source=Math.min(source,this.length);destination=Math.min(destination,this.length);count=Math.min(count,this.length-source,this.length-destination);this.data.copyWithin(this.start+destination,this.start+source,this.start+source+count);return this;}
+ copy_within(source,destination,count){
+  const length=this.length;
+  source=Math.min(source,length);destination=Math.min(destination,length);
+  count=Math.min(count,length-source,length-destination);
+  if(!count||source===destination)return this;
+  const data=this.data,from=this.start+source,to=this.start+destination;
+  if(!Array.isArray(data)){data.copyWithin(to,from,from+count);return this;}
+  // Affine slot arrays are dense. Copy their values directly in overlap order.
+  if(to>from&&to<from+count){
+   for(let i=count-1;i>=0;i--)data[to+i]=data[from+i];
+  }else{
+   for(let i=0;i<count;i++)data[to+i]=data[from+i];
+  }
+  return this;
+ }
  detach(){if(this.shared||this.start!==0||this.end!==this.data.length||!Array.isArray(this.data)){this.data=Array.isArray(this.data)?this.data.slice(this.start,this.end):Array.from(this.data.subarray(this.start,this.end));this.start=0;this.end=this.data.length;this.shared=false;}}
  push(v){if(this.length>=4294967295)throw Error('buffer length exhausted');this.detach();this.data.push(v);this.end++;return this;}
  pop(){this.length=Math.max(0,this.length-1);return this;}
